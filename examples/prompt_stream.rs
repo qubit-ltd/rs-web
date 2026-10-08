@@ -30,6 +30,7 @@ use axum::routing::get;
 use axum::routing::post;
 use futures_core::Stream;
 use qubit_web::BoundedJson;
+use qubit_web::HttpLimits;
 use qubit_web::RequestLimitLayer;
 use qubit_web::ServerContext;
 use qubit_web::ServerOptions;
@@ -140,8 +141,9 @@ async fn shutdown(State(state): State<AppState>) -> StatusCode {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let options = ServerOptions::new("127.0.0.1:3001".parse::<SocketAddr>()?);
-    let http_limits = options.http_limits();
+    let options = ServerOptions::new("127.0.0.1:3001".parse::<SocketAddr>()?)
+        .with_max_transport_connections(128)?;
+    let http_limits = HttpLimits::default();
     let server = WebServer::bind_http(options.clone()).await?;
     let context = server.context();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
