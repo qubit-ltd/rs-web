@@ -8,7 +8,6 @@
 //! Finite HTTP request limits for explicitly protected router branches.
 
 use std::future::Future;
-use std::io;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -17,7 +16,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::Request;
 use axum::http::StatusCode;
@@ -26,9 +24,11 @@ use axum::middleware;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use hyper::body::Body as HttpBody;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 
+mod internal;
 /// Boxed future produced by the request-limit middleware.
 #[doc(hidden)]
 pub type LimitFuture = Pin<Box<dyn Future<Output = Response> + Send>>;
@@ -324,14 +324,7 @@ fn body_exceeds_limit(request: &Request<Body>, maximum: usize) -> bool {
 ///
 /// The same request with a body wrapper that reports an over-limit frame.
 fn limit_request_body(request: Request<Body>, maximum: usize, exceeded: Arc<AtomicBool>) -> Request<Body> {
-    request.map(|inner| {
-        Body::new(LimitedRequestBody {
-            inner,
-            max_bytes: maximum,
-            consumed_bytes: 0,
-            exceeded,
-        })
-    })
+    request.map(|inner| internal::limit_request_body(inner, maximum, exceeded))
 }
 
 /// Runs the handler, checks streamed body accounting, and retains capacity for
@@ -361,158 +354,9 @@ async fn run_limited_request(
         return Err(WebRejection::BodyTooLarge);
     }
     Ok(response.map(|body| {
-        Body::new(PermitBody {
-            inner: body,
-            permit: Some(permit),
-            deadline: Box::pin(tokio::time::sleep_until(deadline)),
-            timed_out: false,
-        })
+        let permit = if body.is_end_stream() { None } else { Some(permit) };
+        internal::permit_body(body, permit, deadline)
     }))
-}
-
-/// Request body wrapper that rejects data after the configured byte budget.
-struct LimitedRequestBody {
-    /// Underlying body polled by the extractor.
-    inner: Body,
-    /// Maximum total data-frame size accepted.
-    max_bytes: usize,
-    /// Bytes already delivered to the extractor.
-    consumed_bytes: usize,
-    /// Shared signal used to turn extractor failures into a stable rejection.
-    exceeded: Arc<AtomicBool>,
-}
-
-impl hyper::body::Body for LimitedRequestBody {
-    type Data = Bytes;
-    type Error = std::io::Error;
-
-    /// Polls one frame and rejects data frames that exceed the cumulative
-    /// budget.
-    ///
-    /// # Parameters
-    ///
-    /// - `context`: task context used to register the next body wake-up.
-    ///
-    /// # Returns
-    ///
-    /// The next body frame, an I/O rejection, end of stream, or `Pending`.
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        context: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
-        let this = self.as_mut().get_mut();
-        if this.exceeded.load(Ordering::Acquire) {
-            return std::task::Poll::Ready(None);
-        }
-        match Pin::new(&mut this.inner).poll_frame(context) {
-            std::task::Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
-                Ok(data) => {
-                    let next_size = this.consumed_bytes.saturating_add(data.len());
-                    if next_size > this.max_bytes {
-                        this.exceeded.store(true, Ordering::Release);
-                        std::task::Poll::Ready(Some(Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "request body exceeds configured limit",
-                        ))))
-                    } else {
-                        this.consumed_bytes = next_size;
-                        std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(data))))
-                    }
-                }
-                Err(trailers) => std::task::Poll::Ready(Some(Ok(trailers))),
-            },
-            std::task::Poll::Ready(Some(Err(error))) => std::task::Poll::Ready(Some(Err(std::io::Error::other(error)))),
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
-
-    /// Reports whether the body ended or the byte budget was exceeded.
-    ///
-    /// # Returns
-    ///
-    /// `true` when no further frames can be delivered.
-    fn is_end_stream(&self) -> bool {
-        self.exceeded.load(Ordering::Acquire) || self.inner.is_end_stream()
-    }
-
-    /// Preserves the underlying body's size estimate for downstream extractors.
-    ///
-    /// # Returns
-    ///
-    /// The underlying body's current size hint.
-    fn size_hint(&self) -> hyper::body::SizeHint {
-        self.inner.size_hint()
-    }
-}
-
-/// Response body wrapper that holds capacity until streaming finishes or times
-/// out.
-struct PermitBody {
-    /// Handler response body polled while the permit is held.
-    inner: Body,
-    /// Capacity lease released when this wrapper is dropped or times out.
-    permit: Option<OwnedSemaphorePermit>,
-    /// Absolute request deadline shared with the handler phase.
-    deadline: Pin<Box<tokio::time::Sleep>>,
-    /// Whether a timeout error has already been emitted.
-    timed_out: bool,
-}
-
-impl hyper::body::Body for PermitBody {
-    type Data = Bytes;
-    type Error = axum::Error;
-
-    /// Polls the response body until completion or emits one deadline error.
-    ///
-    /// # Parameters
-    ///
-    /// - `context`: task context used to register body and deadline wake-ups.
-    ///
-    /// # Returns
-    ///
-    /// The next response frame, a timeout error, end of stream, or `Pending`.
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        context: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
-        let this = self.as_mut().get_mut();
-        if this.timed_out {
-            return std::task::Poll::Ready(None);
-        }
-        if this.deadline.as_mut().poll(context).is_ready() {
-            this.timed_out = true;
-            this.permit.take();
-            return std::task::Poll::Ready(Some(Err(axum::Error::new(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "short response exceeded its configured deadline",
-            )))));
-        }
-        Pin::new(&mut this.inner).poll_frame(context)
-    }
-
-    /// Reports whether the response ended or a timeout has stopped its body.
-    ///
-    /// # Returns
-    ///
-    /// `true` when no further response frames can be delivered.
-    fn is_end_stream(&self) -> bool {
-        self.timed_out || self.inner.is_end_stream()
-    }
-
-    /// Returns an empty size hint after timeout, otherwise delegates to the
-    /// body.
-    ///
-    /// # Returns
-    ///
-    /// The body size hint, or the default empty hint after timeout.
-    fn size_hint(&self) -> hyper::body::SizeHint {
-        if self.timed_out {
-            hyper::body::SizeHint::default()
-        } else {
-            self.inner.size_hint()
-        }
-    }
 }
 
 /// A stable, request-independent rejection generated by the infrastructure.

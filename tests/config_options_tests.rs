@@ -34,10 +34,12 @@ async fn maps_loopback_address_and_accepts_a_valid_shutdown_timeout() {
     config.set("http.request_timeout_ms", 1500u64).unwrap();
 
     config.set("transport.max_connections", 3u64).unwrap();
+    config.set("transport.idle_timeout_ms", 900u64).unwrap();
     let configured = ConfiguredWeb::from_config(&config).unwrap();
     let (options, limits) = configured.into_parts();
     assert_eq!(options.address(), "127.0.0.1:0".parse().unwrap());
     assert_eq!(options.max_transport_connections(), 3);
+    assert_eq!(options.transport_idle_timeout(), std::time::Duration::from_millis(900));
     assert_eq!(options.shutdown_timeout(), std::time::Duration::from_millis(2500));
     assert_eq!(limits.max_body_bytes(), 4096);
     assert_eq!(limits.max_concurrent_requests(), 8);
@@ -96,6 +98,7 @@ fn uses_the_standard_shutdown_timeout_when_omitted() {
 
     assert_eq!(options.shutdown_timeout(), std::time::Duration::from_secs(30));
     assert_eq!(options.request_header_timeout(), std::time::Duration::from_secs(10));
+    assert_eq!(options.transport_idle_timeout(), std::time::Duration::from_secs(30));
     let limits = configured.http_limits();
     assert_eq!(limits.max_body_bytes(), 1024 * 1024);
     assert_eq!(limits.max_concurrent_requests(), 256);
@@ -143,7 +146,9 @@ fn reports_a_malformed_limit_by_field_without_echoing_its_value() {
 
     assert_eq!(error.field(), "http.max_concurrent_requests");
     assert!(!error.to_string().contains("private-limit-sentinel"));
-    assert!(!format!("{error:?}").contains("private-limit-sentinel"));
+    let debug = format!("{error:?}");
+    assert!(debug.contains("http.max_concurrent_requests"));
+    assert!(!debug.contains("private-limit-sentinel"));
 }
 
 #[test]
@@ -202,6 +207,24 @@ fn defaults_transport_connection_limit_to_1024_and_reports_invalid_values() {
         let error = ConfiguredWeb::from_config(&config).unwrap_err();
 
         assert_eq!(error.field(), "transport.max_connections");
+        assert!(!error.to_string().contains("private-sentinel"));
+    }
+}
+
+#[test]
+fn rejects_zero_or_malformed_transport_idle_timeout_by_field() {
+    for malformed in [false, true] {
+        let mut config = Config::new();
+        config.set("address", "127.0.0.1:0").unwrap();
+        if malformed {
+            config.set("transport.idle_timeout_ms", "private-sentinel").unwrap();
+        } else {
+            config.set("transport.idle_timeout_ms", 0u64).unwrap();
+        }
+
+        let error = ConfiguredWeb::from_config(&config).unwrap_err();
+
+        assert_eq!(error.field(), "transport.idle_timeout_ms");
         assert!(!error.to_string().contains("private-sentinel"));
     }
 }

@@ -9,6 +9,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::task::Context;
+use std::task::Poll;
 use std::time::Duration;
 
 use axum::Router;
@@ -16,7 +18,11 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::http::header;
 use axum::routing::get;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
 use qubit_web::ServerOptions;
+use qubit_web::SseConnectionPolicy;
 use qubit_web::WebServer;
 use qubit_web::WebServerError;
 use tokio::io::AsyncReadExt;
@@ -28,6 +34,16 @@ use tokio::sync::oneshot;
 use tokio::test as tokio_test;
 use tokio::time;
 use tower::ServiceExt;
+
+struct PendingEvents;
+
+impl futures_core::Stream for PendingEvents {
+    type Item = Result<axum::response::sse::Event, std::convert::Infallible>;
+
+    fn poll_next(self: std::pin::Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Pending
+    }
+}
 
 #[tokio_test]
 async fn test_binds_ephemeral_http_and_serves_router_with_native_404() {
@@ -70,22 +86,42 @@ async fn test_binds_ephemeral_http_and_serves_router_with_native_404() {
 #[tokio_test]
 async fn test_rejects_invalid_options_and_reports_socket_conflicts() {
     let invalid = ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::ZERO);
-    assert_eq!(invalid.validate(), Err(WebServerError::InvalidConfig));
+    assert!(matches!(invalid.validate(), Err(WebServerError::InvalidConfig)));
     let invalid_header_timeout =
         ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_request_header_timeout(Duration::ZERO);
-    assert_eq!(invalid_header_timeout.validate(), Err(WebServerError::InvalidConfig));
+    assert!(matches!(
+        invalid_header_timeout.validate(),
+        Err(WebServerError::InvalidConfig)
+    ));
+    let invalid_idle_timeout =
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_transport_idle_timeout(Duration::ZERO);
+    assert!(matches!(
+        invalid_idle_timeout.validate(),
+        Err(WebServerError::InvalidConfig)
+    ));
 
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
         .unwrap();
     let conflict = WebServer::bind_http(ServerOptions::new(server.local_addr())).await;
-    assert_eq!(conflict.unwrap_err(), WebServerError::BindFailed);
+    let error = conflict.expect_err("binding an occupied address must fail");
+    assert!(matches!(&error, WebServerError::BindFailed { .. }));
+    assert_eq!(error.code(), "bind_failed");
+    let source = std::error::Error::source(&error).expect("bind errors retain their I/O source");
+    let source_message = source.to_string();
+    assert_eq!(
+        source.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+        Some(std::io::ErrorKind::AddrInUse)
+    );
+    assert!(!error.to_string().contains(&source_message));
+    assert!(!format!("{error:?}").contains(&source_message));
 }
 
 #[tokio_test]
 async fn test_transport_connection_limit_defaults_rejects_zero_and_gates_tcp_accepts() {
     let defaults = ServerOptions::new("127.0.0.1:0".parse().unwrap());
     assert_eq!(defaults.max_transport_connections(), 1024);
+    assert_eq!(defaults.transport_idle_timeout(), Duration::from_secs(30));
     assert!(matches!(
         defaults.clone().with_max_transport_connections(0),
         Err(WebServerError::InvalidConfig)
@@ -167,6 +203,205 @@ async fn test_transport_connection_limit_defaults_rejects_zero_and_gates_tcp_acc
         .unwrap();
     assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"));
     assert_eq!(handled.load(Ordering::SeqCst), 2);
+
+    shutdown_tx.send(()).unwrap();
+    assert!(task.await.unwrap().unwrap().graceful);
+}
+
+#[tokio_test]
+async fn test_idle_http2_preface_releases_transport_capacity() {
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_transport_idle_timeout(Duration::from_millis(50))
+        .with_max_transport_connections(1)
+        .unwrap();
+    let server = WebServer::bind_http(options).await.unwrap();
+    let addr = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let task = spawn(
+        server.serve(Router::new().route("/", get(|| async { "ok" })), async move {
+            let _ = shutdown_rx.await;
+        }),
+    );
+
+    let mut first = TcpStream::connect(addr).await.unwrap();
+    first
+        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+        .await
+        .unwrap();
+    let mut eof = Vec::new();
+    time::timeout(Duration::from_secs(2), first.read_to_end(&mut eof))
+        .await
+        .expect("idle HTTP/2 connection should be closed")
+        .unwrap();
+
+    let mut second = TcpStream::connect(addr).await.unwrap();
+    second
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    time::timeout(Duration::from_secs(2), second.read_to_end(&mut response))
+        .await
+        .expect("capacity should be released after the idle HTTP/2 connection closes")
+        .unwrap();
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"));
+
+    shutdown_tx.send(()).unwrap();
+    assert!(task.await.unwrap().unwrap().graceful);
+}
+
+#[tokio_test]
+async fn test_active_http2_handler_survives_transport_idle_timeout() {
+    let options =
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_transport_idle_timeout(Duration::from_millis(50));
+    let server = WebServer::bind_http(options).await.unwrap();
+    let addr = server.local_addr();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let entered_handler = entered.clone();
+    let release_handler = release.clone();
+    let app = Router::new().route(
+        "/hold",
+        get(move || {
+            let entered = entered_handler.clone();
+            let release = release_handler.clone();
+            async move {
+                entered.notify_one();
+                release.notified().await;
+                "ok"
+            }
+        }),
+    );
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let task = spawn(server.serve(app, async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    let client = Client::builder(TokioExecutor::new())
+        .http2_only(true)
+        .build(HttpConnector::new());
+    let uri = format!("http://{addr}/hold").parse::<hyper::Uri>().unwrap();
+    let request = hyper::Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let response = spawn(async move { client.request(request).await });
+    entered.notified().await;
+    time::sleep(Duration::from_millis(150)).await;
+    release.notify_one();
+    let response = time::timeout(Duration::from_secs(2), response)
+        .await
+        .expect("active HTTP/2 request should not be closed by idle timeout")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+    shutdown_tx.send(()).unwrap();
+    assert!(task.await.unwrap().unwrap().graceful);
+}
+
+#[tokio_test]
+async fn test_sse_body_keeps_connection_active_past_idle_timeout() {
+    let options =
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_transport_idle_timeout(Duration::from_millis(50));
+    let server = WebServer::bind_http(options).await.unwrap();
+    let addr = server.local_addr();
+    let context = server.context();
+    let policy = SseConnectionPolicy::default();
+    let app = Router::new().route(
+        "/events",
+        get(move || {
+            let context = context.clone();
+            let policy = policy.clone();
+            async move {
+                policy
+                    .begin(&context)
+                    .expect("SSE admission should succeed")
+                    .into_sse(PendingEvents)
+            }
+        }),
+    );
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let task = spawn(server.serve(app, async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response_head = Vec::new();
+    while !response_head.windows(4).any(|window| window == b"\r\n\r\n") {
+        let mut byte = [0; 1];
+        stream.read_exact(&mut byte).await.unwrap();
+        response_head.push(byte[0]);
+    }
+    assert!(String::from_utf8_lossy(&response_head).starts_with("HTTP/1.1 200"));
+    let mut byte = [0; 1];
+    assert!(
+        time::timeout(Duration::from_millis(150), stream.read(&mut byte))
+            .await
+            .is_err(),
+        "an open SSE response must retain its activity lease"
+    );
+
+    drop(stream);
+    shutdown_tx.send(()).unwrap();
+    assert!(
+        time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .graceful
+    );
+}
+
+#[tokio_test]
+async fn test_idle_http1_keep_alive_releases_transport_capacity() {
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_transport_idle_timeout(Duration::from_millis(50))
+        .with_max_transport_connections(1)
+        .unwrap();
+    let server = WebServer::bind_http(options).await.unwrap();
+    let addr = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let task = spawn(
+        server.serve(Router::new().route("/", get(|| async { "ok" })), async move {
+            let _ = shutdown_rx.await;
+        }),
+    );
+
+    let mut first = TcpStream::connect(addr).await.unwrap();
+    first
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    while !response.ends_with(b"ok") {
+        let mut byte = [0; 1];
+        first.read_exact(&mut byte).await.unwrap();
+        response.push(byte[0]);
+    }
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"));
+    let mut eof = [0; 1];
+    assert_eq!(
+        time::timeout(Duration::from_secs(2), first.read(&mut eof))
+            .await
+            .expect("idle keep-alive connection should close")
+            .unwrap(),
+        0
+    );
+
+    let mut second = TcpStream::connect(addr).await.unwrap();
+    second
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut second_response = Vec::new();
+    time::timeout(Duration::from_secs(2), second.read_to_end(&mut second_response))
+        .await
+        .expect("idle keep-alive connection should release the transport cap")
+        .unwrap();
+    assert!(String::from_utf8_lossy(&second_response).starts_with("HTTP/1.1 200"));
 
     shutdown_tx.send(()).unwrap();
     assert!(task.await.unwrap().unwrap().graceful);

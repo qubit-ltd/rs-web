@@ -277,25 +277,136 @@ async fn permit_is_held_until_response_body_eof() {
         .layer(RequestLimitLayer::new(
             HttpLimits::default().with_max_concurrent_requests(1).unwrap(),
         ));
-    let first = app
+    let mut first = app
         .clone()
         .oneshot(Request::get("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
+    let first_body = first.body_mut();
+    let first_frame = std::future::poll_fn(|context| Pin::new(&mut *first_body).poll_frame(context))
+        .await
+        .expect("the response should contain a data frame")
+        .expect("the response frame should be valid");
+    assert_eq!(first_frame.into_data().unwrap(), "ok");
+
+    let rejected = app
+        .clone()
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    while std::future::poll_fn(|context| Pin::new(&mut *first_body).poll_frame(context))
+        .await
+        .is_some()
+    {}
+    assert_eq!(first.status(), StatusCode::OK);
+
     let second = app
         .clone()
         .oneshot(Request::get("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
-    assert_eq!(first.status(), StatusCode::OK);
-    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let bytes = axum::body::to_bytes(first.into_body(), 16).await.unwrap();
-    assert_eq!(bytes, "ok");
+    assert_eq!(second.status(), StatusCode::OK);
+    drop(first);
+    drop(second);
     let third = app
         .oneshot(Request::get("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(third.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn empty_response_body_releases_short_request_capacity_immediately() {
+    let app = Router::new()
+        .route("/empty", post(|| async { Response::new(Body::empty()) }))
+        .route("/ok", post(|| async { "ok" }))
+        .layer(RequestLimitLayer::new(
+            HttpLimits::default().with_max_concurrent_requests(1).unwrap(),
+        ));
+
+    let empty = app
+        .clone()
+        .oneshot(Request::post("/empty").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let response = app
+        .oneshot(Request::post("/ok").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(empty.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(empty);
+}
+
+struct FailedResponseBody;
+
+impl hyper::body::Body for FailedResponseBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        Poll::Ready(Some(Err(std::io::Error::other("response failed"))))
+    }
+}
+
+#[tokio::test]
+async fn response_body_error_releases_short_request_capacity() {
+    let app = Router::new()
+        .route(
+            "/failed",
+            post(|| async { Response::new(Body::new(FailedResponseBody)) }),
+        )
+        .route("/ok", post(|| async { "ok" }))
+        .layer(RequestLimitLayer::new(
+            HttpLimits::default().with_max_concurrent_requests(1).unwrap(),
+        ));
+
+    let mut failed = app
+        .clone()
+        .oneshot(Request::post("/failed").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let error = std::future::poll_fn(|context| Pin::new(failed.body_mut()).poll_frame(context))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("response failed"));
+
+    let response = app
+        .oneshot(Request::post("/ok").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    drop((failed, response));
+}
+
+#[tokio::test]
+async fn dropping_unconsumed_response_body_releases_short_request_capacity() {
+    let app = Router::new()
+        .route("/ok", post(|| async { "ok" }))
+        .layer(RequestLimitLayer::new(
+            HttpLimits::default().with_max_concurrent_requests(1).unwrap(),
+        ));
+    let first = app
+        .clone()
+        .oneshot(Request::post("/ok").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    drop(first);
+
+    let second = app
+        .oneshot(Request::post("/ok").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
 }
 
 struct NeverEndingResponse;
@@ -327,18 +438,18 @@ async fn response_body_deadline_releases_short_request_capacity() {
         .route("/ok", post(|| async { "ok" }))
         .layer(RequestLimitLayer::new(limits));
 
-    let response = app
+    let mut response = app
         .clone()
         .oneshot(Request::post("/stalled").body(Body::empty()).unwrap())
         .await
         .unwrap();
     let body_result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        axum::body::to_bytes(response.into_body(), usize::MAX),
+        std::future::poll_fn(|context| Pin::new(response.body_mut()).poll_frame(context)),
     )
     .await
     .expect("the response body deadline must wake a stalled stream");
-    assert!(body_result.is_err());
+    assert!(body_result.unwrap().is_err());
 
     let response = app
         .oneshot(Request::post("/ok").body(Body::empty()).unwrap())

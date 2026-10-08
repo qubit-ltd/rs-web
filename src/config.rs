@@ -54,10 +54,12 @@ impl ConfiguredWeb {
     /// Parses listener settings and route limit defaults from explicit values.
     ///
     /// The required `address` value is a socket address. The optional
-    /// `shutdown_timeout_ms` value defaults to 30 seconds, and
-    /// `transport.max_connections` defaults to 1024. HTTP limits are returned
-    /// separately so they can be installed only on appropriate short routes.
-    /// This function does not discover or load a global configuration source.
+    /// `shutdown_timeout_ms` value defaults to 30 seconds,
+    /// `transport.max_connections` defaults to 1024, and
+    /// `transport.idle_timeout_ms` defaults to 30 seconds. HTTP limits are
+    /// returned separately so they can be installed only on appropriate
+    /// short routes. This function does not discover or load a global
+    /// configuration source.
     ///
     /// # Parameters
     ///
@@ -88,6 +90,13 @@ impl ConfiguredWeb {
             .get_optional::<u64>("transport.max_connections")
             .map_err(|_| ConfigOptionsError::new("transport.max_connections"))?
             .unwrap_or(1024);
+        let transport_idle_timeout_ms = config
+            .get_optional::<u64>("transport.idle_timeout_ms")
+            .map_err(|_| ConfigOptionsError::new("transport.idle_timeout_ms"))?
+            .unwrap_or(30_000);
+        if transport_idle_timeout_ms == 0 {
+            return Err(ConfigOptionsError::new("transport.idle_timeout_ms"));
+        }
 
         let max_body_bytes = config
             .get_optional::<u64>("http.max_body_bytes")
@@ -122,6 +131,7 @@ impl ConfiguredWeb {
 
         let server_options = ServerOptions::new(address)
             .with_shutdown_timeout(Duration::from_millis(shutdown_timeout_ms))
+            .with_transport_idle_timeout(Duration::from_millis(transport_idle_timeout_ms))
             .with_max_transport_connections(
                 usize::try_from(max_transport_connections)
                     .map_err(|_| ConfigOptionsError::new("transport.max_connections"))?,
@@ -129,7 +139,10 @@ impl ConfiguredWeb {
             .map_err(|_| ConfigOptionsError::new("transport.max_connections"))?;
         server_options.validate().map_err(|error| match error {
             WebServerError::InvalidConfig => ConfigOptionsError::new("shutdown_timeout_ms"),
-            _ => ConfigOptionsError::new("address"),
+            WebServerError::BindFailed { .. }
+            | WebServerError::LocalAddressFailed { .. }
+            | WebServerError::ServeFailed { .. }
+            | WebServerError::TlsInvalid => ConfigOptionsError::new("address"),
         })?;
 
         Ok(Self {
