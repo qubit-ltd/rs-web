@@ -19,14 +19,75 @@ include = [
     "/README.zh_CN.md",
     "/src/**",
     "/doc/**",
+    "/examples/**",
     "/tests/**",
+    "/qubit-web-macros/**",
 ]
 
 [lib]
 name = "qubit_web"
 doctest = true
 
+[[example]]
+name = "controller_crud"
+required-features = ["json"]
+
+[[example]]
+name = "prompt_stream"
+required-features = ["json", "ws"]
+
+[[test]]
+name = "config_options_tests"
+required-features = ["config"]
+
+[[test]]
+name = "https_server_tests"
+required-features = ["tls-rustls", "ws"]
+
+[[test]]
+name = "integration_tests"
+required-features = ["json", "tls-rustls", "ws"]
+
+[[test]]
+name = "json_limits_tests"
+required-features = ["json"]
+
+[[test]]
+name = "websocket_tests"
+required-features = ["ws"]
+
 [features]
 default = []
+json = ["dep:serde", "dep:qubit-json", "dep:qubit-budget", "axum/json"]
+ws = ["axum/ws", "dep:futures-util"]
+tls-rustls = ["dep:axum-server", "dep:tokio-rustls"]
+config = ["dep:qubit-config"]
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "matched-path", "query", "tokio"] }
+futures-core = "0.3"
+futures-util = { version = "0.3", features = ["sink"], optional = true }
+hyper = { version = "1", features = ["http1", "http2", "server"] }
+hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "tokio"] }
+qubit-web-macros = { version = "0.1.0", path = "qubit-web-macros" }
+qubit-redact = { version = "0.9", default-features = false, features = ["http"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["limit", "trace"] }
+tracing = "0.1"
+qubit-json = { version = "0.10", optional = true }
+qubit-budget = { version = "0.7", features = ["json"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+qubit-config = { version = "0.14", default-features = false, optional = true }
+axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"], optional = true }
+
+[dev-dependencies]
+trybuild = "1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http2"] }
 
 [workspace]
+members = ["qubit-web-macros"]
+resolver = "3"
