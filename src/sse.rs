@@ -17,6 +17,8 @@ use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
 
+use axum::http::StatusCode;
+use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::response::sse::Event;
@@ -27,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ServerContext;
 use crate::SessionGuard;
+use crate::SessionRegistrationError;
 use crate::WebServerError;
 use crate::limit::WebRejection;
 
@@ -141,12 +144,13 @@ impl SseConnectionPolicy {
     ///
     /// # Errors
     ///
-    /// Returns [`SseCapacityExceeded`] when the configured capacity is full.
-    pub fn begin(&self, context: &ServerContext) -> Result<SseConnection, SseCapacityExceeded> {
+    /// Returns [`SseAdmissionError`] when capacity is full or shutdown has
+    /// begun.
+    pub fn begin(&self, context: &ServerContext) -> Result<SseConnection, SseAdmissionError> {
         let mut active = self.active_connections.load(Ordering::Acquire);
         loop {
             if active >= self.max_connections.get() {
-                return Err(SseCapacityExceeded);
+                return Err(SseAdmissionError::CapacityExceeded);
             }
             match self
                 .active_connections
@@ -157,12 +161,20 @@ impl SseConnectionPolicy {
             }
         }
 
+        let session = match context.try_register_session() {
+            Ok(session) => session,
+            Err(SessionRegistrationError::ShuttingDown) => {
+                self.active_connections.fetch_sub(1, Ordering::AcqRel);
+                return Err(SseAdmissionError::ShuttingDown);
+            }
+        };
+
         let cancellation = context.cancellation_token().child_token();
         Ok(SseConnection {
             keep_alive_interval: self.keep_alive_interval,
             guard: Some(SseConnectionGuard {
                 active_connections: self.active_connections.clone(),
-                session: Some(context.register_session()),
+                session: Some(session),
                 cancellation: cancellation.clone(),
             }),
             cancellation,
@@ -170,8 +182,32 @@ impl SseConnectionPolicy {
     }
 }
 
+/// Reports why an SSE connection reservation was rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
+pub enum SseAdmissionError {
+    /// The configured number of simultaneous SSE streams is already active.
+    CapacityExceeded,
+    /// The server has begun shutting down and no longer accepts SSE sessions.
+    ShuttingDown,
+}
+
+impl IntoResponse for SseAdmissionError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::CapacityExceeded => WebRejection::CapacityExceeded.into_response(),
+            Self::ShuttingDown => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(CONTENT_TYPE, "application/problem+json")],
+                r#"{"type":"about:blank","title":"Service Unavailable","status":503,"code":"server_shutting_down"}"#,
+            )
+                .into_response(),
+        }
+    }
+}
+
 /// Returned when the configured number of simultaneous SSE streams is already
-/// active.
+/// active. Prefer [`SseAdmissionError`] for new code.
 ///
 /// # Examples
 ///

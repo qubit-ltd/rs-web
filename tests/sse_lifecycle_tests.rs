@@ -33,6 +33,7 @@ use hyper_util::rt::TokioExecutor;
 use qubit_web::ServerOptions;
 use qubit_web::SseConnectionPolicy;
 use qubit_web::WebServer;
+use qubit_web::sse::SseAdmissionError;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -234,6 +235,32 @@ async fn test_sse_capacity_rejection_is_a_stable_503_problem_response() {
     assert!(body.contains("\"type\":\"about:blank\""), "{body}");
     assert!(body.contains("\"title\":\"Service Unavailable\""), "{body}");
     assert!(body.contains("\"code\":\"capacity_exceeded\""), "{body}");
+}
+
+#[tokio_test]
+async fn test_sse_admission_after_shutdown_is_rejected_without_leaking_capacity() {
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let context = server.context();
+    let policy = SseConnectionPolicy::new(NonZeroUsize::new(1).unwrap());
+    let service = spawn(server.serve(Router::new(), async {}));
+    assert!(service.await.unwrap().unwrap().graceful);
+
+    let error = match policy.begin(&context) {
+        Ok(_) => panic!("SSE admission must be closed after shutdown"),
+        Err(error) => error,
+    };
+    assert_eq!(error, SseAdmissionError::ShuttingDown);
+    assert_eq!(policy.active_connections(), 0);
+    assert_eq!(context.active_sessions(), 0);
+
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/problem+json");
+    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("\"code\":\"server_shutting_down\""), "{body}");
 }
 
 #[tokio_test]

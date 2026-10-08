@@ -5,16 +5,25 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::convert::Infallible;
 use std::future::pending;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::task::Context;
+use std::task::Poll;
 use std::time::Duration;
 
 use axum::Router;
+use axum::response::IntoResponse;
+use axum::response::sse::Event;
 use axum::routing::get;
+use futures_core::Stream;
 use qubit_web::ServerOptions;
+use qubit_web::SessionRegistrationError;
+use qubit_web::SseConnectionPolicy;
 use qubit_web::WebServer;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -26,16 +35,61 @@ use tokio::test as tokio_test;
 use tokio::time::Instant;
 use tokio::time::timeout;
 
+struct PendingSse;
+
+impl Stream for PendingSse {
+    type Item = Result<Event, Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Pending
+    }
+}
+
 #[tokio_test]
 async fn test_session_registration_releases_on_drop() {
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
         .unwrap();
     let context = server.context();
-    let session = context.register_session();
+    let session = context.try_register_session().unwrap();
     assert_eq!(context.active_sessions(), 1);
     drop(session);
     assert_eq!(context.active_sessions(), 0);
+}
+
+#[tokio_test]
+async fn test_session_registration_is_rejected_after_shutdown_starts() {
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_secs(1)),
+    )
+    .await
+    .unwrap();
+    let context = server.context();
+    let session = context.try_register_session().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let service = spawn(server.serve(Router::new(), async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    shutdown_tx.send(()).unwrap();
+    timeout(Duration::from_secs(1), context.cancellation_token().cancelled())
+        .await
+        .expect("shutdown should close session registration");
+    assert_eq!(
+        context.try_register_session().unwrap_err(),
+        SessionRegistrationError::ShuttingDown
+    );
+    assert_eq!(context.active_sessions(), 1);
+
+    drop(session);
+    assert_eq!(context.active_sessions(), 0);
+    let report = timeout(Duration::from_secs(1), service)
+        .await
+        .expect("server shutdown should finish after the session is released")
+        .unwrap()
+        .unwrap();
+    assert!(report.graceful);
+    assert_eq!(report.unfinished_managed_sessions, 0);
 }
 
 #[tokio_test]
@@ -148,6 +202,7 @@ async fn test_shutdown_deadline_drops_a_request_that_does_not_finish() {
         .unwrap()
         .unwrap();
     assert!(!report.graceful);
+    assert_eq!(report.unfinished_managed_sessions, 0);
     assert_eq!(report.forced_connections, None);
     assert!(
         timeout(Duration::from_secs(2), client)
@@ -156,6 +211,81 @@ async fn test_shutdown_deadline_drops_a_request_that_does_not_finish() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio_test]
+async fn test_http_and_sse_share_one_shutdown_deadline() {
+    let entered = Arc::new(Notify::new());
+    let entered_handler = entered.clone();
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(150)),
+    )
+    .await
+    .unwrap();
+    let context = server.context();
+    let sse_policy = SseConnectionPolicy::default();
+    let handler_context = context.clone();
+    let handler_policy = sse_policy.clone();
+    let app = Router::new()
+        .route(
+            "/events",
+            get(move || {
+                let context = handler_context.clone();
+                let policy = handler_policy.clone();
+                async move {
+                    let connection = policy.begin(&context).unwrap();
+                    connection.into_sse(PendingSse).into_response()
+                }
+            }),
+        )
+        .route(
+            "/stuck",
+            get(move || {
+                let entered = entered_handler.clone();
+                async move {
+                    entered.notify_one();
+                    pending::<&'static str>().await
+                }
+            }),
+        );
+    let addr = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let serving = spawn(server.serve(app, async move {
+        let _ = shutdown_rx.await;
+    }));
+    let mut sse = TcpStream::connect(addr).await.unwrap();
+    sse.write_all(b"GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut headers = Vec::new();
+    while !headers.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        sse.read_exact(&mut byte).await.unwrap();
+        headers.push(byte[0]);
+    }
+    let mut http = TcpStream::connect(addr).await.unwrap();
+    http.write_all(b"GET /stuck HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    entered.notified().await;
+    timeout(Duration::from_secs(1), async {
+        while context.active_sessions() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let started = Instant::now();
+    shutdown_tx.send(()).unwrap();
+    let report = timeout(Duration::from_secs(2), serving)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!report.graceful);
+    assert!(report.unfinished_managed_sessions >= 1);
+    assert!(started.elapsed() < Duration::from_millis(250));
 }
 
 #[tokio_test]
@@ -221,6 +351,7 @@ async fn test_shutdown_while_waiting_for_transport_permit_aborts_and_reaps_conne
         .unwrap()
         .unwrap();
     assert!(!report.graceful);
+    assert_eq!(report.unfinished_managed_sessions, 0);
     assert!(
         handler_dropped.load(Ordering::SeqCst),
         "aborted handler task must be reaped"
