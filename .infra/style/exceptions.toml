@@ -1,1 +1,56 @@
 format = 1
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/server.rs"
+reason = "Runtime lifecycle types share the server shutdown and connection ownership model."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/limit.rs"
+reason = "Limit configuration, middleware and rejection types form one cohesive public request-limit API."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/json.rs"
+reason = "JSON extractor, limits and response helpers share one feature-gated module and budget implementation."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/mvc.rs"
+reason = "Controller route metadata, builder and conflict error jointly define the generated routing API."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/diagnostic.rs"
+reason = "The safe diagnostic record and its layer are a single allowlisted logging feature."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/sse.rs"
+reason = "SSE policy, connection guard and lifecycle wrapper are one cohesive streaming API."
+
+[[exceptions]]
+rule = "multiple-public-types"
+path = "src/ws.rs"
+reason = "WebSocket policy, session, queue and error types jointly implement one bounded session API."
+
+[[exceptions]]
+rule = "type-file-name"
+path = "src/options.rs"
+reason = "ServerOptions is the central server configuration type; the short module name is stable in all public examples."
+
+[[exceptions]]
+rule = "type-file-name"
+path = "src/config.rs"
+reason = "ConfigOptionsError is only the optional adapter error; keeping it beside the adapter documents their mapping contract."
+
+[[exceptions]]
+rule = "type-file-name"
+path = "src/error.rs"
+reason = "WebServerError is the crate-wide error taxonomy shared by all modules."
+
+[[exceptions]]
+rule = "type-file-name"
+path = "src/tls.rs"
+reason = "TlsConfig is the only public type and owns TLS credential loading and validation."

@@ -12,6 +12,36 @@
       "commands": ["check", "test", "doc"],
       "defaultFeatures": false,
       "features": []
+    },
+    {
+      "name": "json",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["json"]
+    },
+    {
+      "name": "ws",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["ws"]
+    },
+    {
+      "name": "tls-rustls",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["tls-rustls"]
+    },
+    {
+      "name": "config",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["config"]
+    },
+    {
+      "name": "all-features",
+      "commands": ["check", "test", "doc"],
+      "defaultFeatures": false,
+      "features": ["json", "ws", "tls-rustls", "config"]
     }
   ]
 }
