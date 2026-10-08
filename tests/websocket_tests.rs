@@ -21,16 +21,21 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
-use axum::serve as axum_serve;
 use qubit_web::ServerContext;
 use qubit_web::ServerOptions;
+use qubit_web::ShutdownReport;
 use qubit_web::WebServer;
+
+type RegisteredCheckpoint = Arc<Mutex<Option<oneshot::Sender<usize>>>>;
+type DelayedUpgradeChannels = (
+    Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+);
 use qubit_web::diagnostic::DiagnosticLayer;
 use qubit_web::ws::WsSendError;
 use qubit_web::ws::WsUpgradePolicy;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::runtime::Builder;
 use tokio::spawn;
@@ -44,17 +49,25 @@ use tracing::Level;
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::fmt::MakeWriter;
 
-async fn serve(policy: WsUpgradePolicy) -> (SocketAddr, JoinHandle<()>) {
+async fn serve(policy: WsUpgradePolicy) -> (SocketAddr, JoinHandle<ShutdownReport>) {
     serve_with(policy, CancellationToken::new()).await
 }
 
-async fn serve_with(policy: WsUpgradePolicy, shutdown: CancellationToken) -> (SocketAddr, JoinHandle<()>) {
+async fn serve_with(policy: WsUpgradePolicy, shutdown: CancellationToken) -> (SocketAddr, JoinHandle<ShutdownReport>) {
+    serve_with_shutdown_timeout(policy, shutdown, Duration::from_secs(30)).await
+}
+
+async fn serve_with_shutdown_timeout(
+    policy: WsUpgradePolicy,
+    shutdown: CancellationToken,
+    shutdown_timeout: Duration,
+) -> (SocketAddr, JoinHandle<ShutdownReport>) {
     async fn upgrade(
-        State((policy, shutdown)): State<(WsUpgradePolicy, CancellationToken)>,
+        State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,
         headers: HeaderMap,
         ws: WebSocketUpgrade,
     ) -> Response {
-        policy.on_upgrade(ws, &headers, shutdown, |mut session| async move {
+        policy.on_upgrade(ws, &headers, context, |mut session| async move {
             while let Some(Ok(message)) = session.recv().await {
                 match message {
                     Message::Text(text) => {
@@ -67,14 +80,17 @@ async fn serve_with(policy: WsUpgradePolicy, shutdown: CancellationToken) -> (So
         })
     }
 
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(shutdown_timeout);
+    let server = WebServer::bind_http(options).await.unwrap();
+    let addr = server.local_addr();
+    let context = server.context();
     let app = Router::new()
         .route("/ws", get(upgrade))
-        .with_state((policy, shutdown))
+        .with_state((policy, context))
         .layer(DiagnosticLayer::new());
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
-    let task = spawn(async move { axum_serve(listener, app).await.unwrap() }.with_subscriber(dispatch));
+    let task =
+        spawn(async move { server.serve(app, shutdown.cancelled_owned()).await.unwrap() }.with_subscriber(dispatch));
     (addr, task)
 }
 
@@ -143,6 +159,12 @@ async fn handshake(addr: SocketAddr, origin: Option<&str>) -> (TcpStream, Status
 }
 
 async fn handshake_path(addr: SocketAddr, path: &str, origin: Option<&str>) -> (TcpStream, StatusCode) {
+    let mut stream = start_handshake(addr, path, origin).await;
+    let status = read_response_status(&mut stream).await;
+    (stream, status)
+}
+
+async fn start_handshake(addr: SocketAddr, path: &str, origin: Option<&str>) -> TcpStream {
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let mut request = format!(
         "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
@@ -152,6 +174,19 @@ async fn handshake_path(addr: SocketAddr, path: &str, origin: Option<&str>) -> (
     }
     request.push_str("\r\n");
     stream.write_all(request.as_bytes()).await.unwrap();
+    stream
+}
+
+async fn start_handshake_without_version(addr: SocketAddr) -> TcpStream {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "GET /ws HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    stream
+}
+
+async fn read_response_status(stream: &mut TcpStream) -> StatusCode {
     let mut response = Vec::new();
     let mut buf = [0; 1];
     while !response.ends_with(b"\r\n\r\n") {
@@ -160,7 +195,7 @@ async fn handshake_path(addr: SocketAddr, path: &str, origin: Option<&str>) -> (
     }
     let first_line = String::from_utf8_lossy(&response);
     let status = first_line.split_whitespace().nth(1).unwrap().parse::<u16>().unwrap();
-    (stream, StatusCode::from_u16(status).unwrap())
+    StatusCode::from_u16(status).unwrap()
 }
 
 async fn send_masked_text(stream: &mut TcpStream, text: &[u8]) {
@@ -355,11 +390,10 @@ async fn test_context_upgrade_uses_the_server_absolute_shutdown_deadline() {
     assert_eq!(context.active_sessions(), 0);
     let app = Router::new()
         .route("/ws", get(context_ws_upgrade))
-        .route("/token", get(token_ws_upgrade))
         .with_state((policy.clone(), context.clone()));
     let address = server.local_addr();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let serving = spawn(server.serve(app, async move {
+    let mut serving = spawn(server.serve(app, async move {
         let _ = shutdown_rx.await;
     }));
     let (_, rejected) = handshake(address, Some("https://evil.example")).await;
@@ -393,6 +427,10 @@ async fn test_context_upgrade_uses_the_server_absolute_shutdown_deadline() {
     );
     assert_eq!(context.active_sessions(), 1);
     assert_eq!(policy.active_connections(), 1);
+    assert!(
+        timeout(Duration::from_millis(30), &mut serving).await.is_err(),
+        "serve must not report graceful completion before the peer acknowledges close"
+    );
 
     send_masked_close(&mut client).await;
     timeout(Duration::from_secs(1), async {
@@ -403,7 +441,9 @@ async fn test_context_upgrade_uses_the_server_absolute_shutdown_deadline() {
     .await
     .unwrap();
     assert_eq!(context.active_sessions(), 0);
-    assert!(serving.await.unwrap().unwrap().graceful);
+    let report = serving.await.unwrap().unwrap();
+    assert!(report.graceful);
+    assert_eq!(report.unfinished_managed_sessions, 0);
 }
 
 async fn context_ws_upgrade(
@@ -411,43 +451,155 @@ async fn context_ws_upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    policy.on_upgrade_with_context(ws, &headers, context, |mut session| async move {
+    policy.on_upgrade(ws, &headers, context, |mut session| async move {
         let _ = session.recv().await;
     })
 }
 
-async fn token_ws_upgrade(
-    State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,
+async fn upgrade_registration_checkpoint(
+    State((policy, context, registered_tx)): State<(WsUpgradePolicy, ServerContext, RegisteredCheckpoint)>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    policy.on_upgrade(ws, &headers, context.cancellation_token(), |mut session| async move {
+    let response = policy.on_upgrade(ws, &headers, context.clone(), |mut session| async move {
+        let _ = session.recv().await;
+    });
+    registered_tx
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .send(context.active_sessions())
+        .unwrap();
+    response
+}
+
+async fn delayed_context_ws_upgrade(
+    State((policy, context, (ready_tx, release_rx))): State<(WsUpgradePolicy, ServerContext, DelayedUpgradeChannels)>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ready_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+    let release = release_rx.lock().unwrap().take().unwrap();
+    release.await.unwrap();
+    policy.on_upgrade(ws, &headers, context, |mut session| async move {
         let _ = session.recv().await;
     })
 }
 
 #[tokio_test]
-async fn test_token_upgrade_does_not_register_an_active_server_session() {
+async fn test_upgrade_is_registered_before_the_response_is_returned() {
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
         .unwrap();
     let context = server.context();
     let policy = WsUpgradePolicy::new();
+    let (registered_tx, registered_rx) = oneshot::channel();
     let app = Router::new()
-        .route("/token", get(token_ws_upgrade))
-        .with_state((policy, context.clone()));
+        .route("/ws", get(upgrade_registration_checkpoint))
+        .with_state((policy, context.clone(), Arc::new(Mutex::new(Some(registered_tx)))));
     let address = server.local_addr();
     let serving = spawn(server.serve(app, pending::<()>()));
 
-    let (mut client, status) = handshake_path(address, "/token", None).await;
+    let (mut client, status) = handshake(address, None).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
-    assert_eq!(context.active_sessions(), 0);
+    assert_eq!(registered_rx.await.unwrap(), 1);
+    assert_eq!(context.active_sessions(), 1);
     send_masked_close(&mut client).await;
     timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
         .unwrap();
-    assert_eq!(context.active_sessions(), 0);
     serving.abort();
+}
+
+#[tokio_test]
+async fn test_origin_and_capacity_rejections_do_not_register_sessions() {
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new()
+        .max_connections(1)
+        .allowed_origins(["https://app.example"]);
+    let app = Router::new()
+        .route("/ws", get(context_ws_upgrade))
+        .with_state((policy, context.clone()));
+    let address = server.local_addr();
+    let serving = spawn(server.serve(app, pending::<()>()));
+
+    let mut invalid_handshake = start_handshake_without_version(address).await;
+    assert_eq!(
+        read_response_status(&mut invalid_handshake).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(context.active_sessions(), 0);
+
+    let (_, origin_status) = handshake(address, Some("https://evil.example")).await;
+    assert_eq!(origin_status, StatusCode::FORBIDDEN);
+    assert_eq!(context.active_sessions(), 0);
+
+    let (mut client, status) = handshake(address, Some("https://app.example")).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(context.active_sessions(), 1);
+
+    let (_, capacity_status) = handshake(address, Some("https://app.example")).await;
+    assert_eq!(capacity_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(context.active_sessions(), 1);
+
+    send_masked_close(&mut client).await;
+    timeout(Duration::from_secs(1), async {
+        while context.active_sessions() != 0 {
+            yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    serving.abort();
+}
+
+#[tokio_test]
+async fn test_upgrade_after_shutdown_starts_returns_stable_503_without_registration() {
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new();
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let app = Router::new().route("/ws", get(delayed_context_ws_upgrade)).with_state((
+        policy,
+        context.clone(),
+        (
+            Arc::new(Mutex::new(Some(ready_tx))),
+            Arc::new(Mutex::new(Some(release_rx))),
+        ),
+    ));
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = spawn(server.serve(app, async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    let mut client = start_handshake(address, "/ws", None).await;
+    ready_rx.await.unwrap();
+    shutdown_tx.send(()).unwrap();
+    timeout(Duration::from_secs(1), async {
+        while !context.cancellation_token().is_cancelled() {
+            yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    release_tx.send(()).unwrap();
+
+    assert_eq!(read_response_status(&mut client).await, StatusCode::SERVICE_UNAVAILABLE);
+    let expected =
+        br#"{"type":"about:blank","title":"Service Unavailable","status":503,"code":"server_shutting_down"}"#;
+    let mut body = vec![0; expected.len()];
+    client.read_exact(&mut body).await.unwrap();
+    assert_eq!(body, expected);
+    assert_eq!(context.active_sessions(), 0);
+    assert!(serving.await.unwrap().unwrap().graceful);
 }
 
 #[tokio_test]
@@ -458,13 +610,15 @@ async fn test_context_session_is_released_after_shutdown_deadline_without_peer_a
     .await
     .unwrap();
     let context = server.context();
-    let policy = WsUpgradePolicy::new().max_connections(1);
+    let policy = WsUpgradePolicy::new()
+        .max_connections(1)
+        .shutdown_timeout(Duration::from_secs(5));
     let app = Router::new()
         .route("/ws", get(context_ws_upgrade))
         .with_state((policy.clone(), context.clone()));
     let address = server.local_addr();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let serving = spawn(server.serve(app, async move {
+    let mut serving = spawn(server.serve(app, async move {
         let _ = shutdown_rx.await;
     }));
 
@@ -484,14 +638,13 @@ async fn test_context_session_is_released_after_shutdown_deadline_without_peer_a
         .unwrap();
     assert_eq!(opcode, 8);
 
-    timeout(Duration::from_secs(1), async {
-        while context.active_sessions() != 0 || policy.active_connections() != 0 {
-            yield_now().await;
-        }
-    })
-    .await
-    .expect("shutdown deadline should release the context session without peer ack");
-    assert!(serving.await.unwrap().unwrap().graceful);
+    assert!(
+        timeout(Duration::from_millis(30), &mut serving).await.is_err(),
+        "serve must wait for the managed session until its shutdown deadline"
+    );
+    let report = serving.await.unwrap().unwrap();
+    assert!(!report.graceful);
+    assert!(report.unfinished_managed_sessions >= 1);
 }
 
 #[tokio_test]
@@ -500,7 +653,7 @@ async fn test_shutdown_close_deadline_releases_connection_without_peer_ack() {
         .max_connections(1)
         .shutdown_timeout(Duration::from_millis(30));
     let shutdown = CancellationToken::new();
-    let (addr, task) = serve_with(policy.clone(), shutdown.clone()).await;
+    let (addr, task) = serve_with_shutdown_timeout(policy.clone(), shutdown.clone(), Duration::from_millis(30)).await;
     let (mut client, status) = handshake(addr, None).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
     shutdown.cancel();

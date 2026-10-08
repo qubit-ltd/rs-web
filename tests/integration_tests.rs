@@ -93,7 +93,7 @@ fn application(context: ServerContext) -> Router<()> {
                 let policy = ws.clone();
                 let context = ws_context.clone();
                 async move {
-                    policy.on_upgrade_with_context(upgrade, &headers, context, |mut session| async move {
+                    policy.on_upgrade(upgrade, &headers, context, |mut session| async move {
                         while let Some(Ok(message)) = session.recv().await {
                             if let Message::Text(text) = message {
                                 let _ = session.try_send(Message::text(text));

@@ -1,0 +1,145 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
+//! Application-facing WebSocket session handle.
+
+use std::sync::PoisonError;
+use std::time::Duration;
+
+use axum::Error;
+use axum::extract::ws::Message;
+use tokio::join;
+use tokio::select;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
+
+use super::ws_send_error::WsSendError;
+use super::ws_send_queue::WsSendQueue;
+use super::ws_send_queue::message_size;
+
+/// One upgraded connection with bounded outbound buffering and coordinated
+/// reader/writer shutdown.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_web::ws::WsSession;
+///
+/// async fn consume_messages(mut session: WsSession) {
+///     while let Some(message) = session.recv().await {
+///         let _ = message;
+///     }
+/// }
+///
+/// let _handler = consume_messages;
+/// ```
+pub struct WsSession {
+    /// Channel carrying inbound frames from the reader task.
+    pub(super) incoming: mpsc::Receiver<Result<Message, Error>>,
+    /// Shared bounded queue drained by the writer task.
+    pub(super) queue: WsSendQueue,
+    /// Cancellation token shared by the application and both tasks.
+    pub(super) shutdown: CancellationToken,
+    /// Maximum interval without an inbound application message.
+    pub(super) idle_timeout: Duration,
+    /// Maximum time allowed for close acknowledgement during shutdown.
+    pub(super) shutdown_timeout: Duration,
+    /// Dedicated task that writes queued messages and close frames.
+    pub(super) writer: JoinHandle<()>,
+    /// Dedicated task that reads frames and sends them to the application.
+    pub(super) reader: JoinHandle<()>,
+}
+
+impl WsSession {
+    /// Receives the next application message, returning `None` on close,
+    /// shutdown, or the configured idle deadline.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Ok(message))` for an inbound frame, `Some(Err(error))` for a
+    /// transport error, and `None` after close, cancellation, or idle timeout.
+    ///
+    /// # Errors
+    ///
+    /// The inner error reports a WebSocket read failure observed by the reader
+    /// task.
+    pub async fn recv(&mut self) -> Option<Result<Message, Error>> {
+        select! {
+            biased;
+            _ = self.shutdown.cancelled() => {
+                self.close().await;
+                None
+            }
+            message = timeout(self.idle_timeout, self.incoming.recv()) => {
+                match message {
+                    Ok(message) => message,
+                    Err(_) => {
+                        self.close().await;
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    /// Adds a message to the bounded outbound queue.
+    ///
+    /// # Parameters
+    ///
+    /// * `message` - Outbound WebSocket message to queue.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the message is accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WsSendError::Closed`] after shutdown or
+    /// [`WsSendError::Backpressure`] when queue capacity is exhausted.
+    #[inline]
+    pub fn try_send(&self, message: Message) -> Result<(), WsSendError> {
+        if self.shutdown.is_cancelled() {
+            return Err(WsSendError::Closed);
+        }
+        self.queue.try_send(message)
+    }
+
+    /// Sends a close frame and discards queued messages.
+    ///
+    /// The close operation waits at most the configured session shutdown
+    /// timeout, then aborts reader and writer tasks and clears queued data.
+    pub async fn close(&mut self) {
+        self.shutdown.cancel();
+        let wait_for_tasks = async {
+            let _ = join!(&mut self.writer, &mut self.reader);
+        };
+        if timeout(self.shutdown_timeout, wait_for_tasks).await.is_err() {
+            self.writer.abort();
+            self.reader.abort();
+            let _ = join!(&mut self.writer, &mut self.reader);
+        }
+        self.clear_queue();
+    }
+
+    /// Drops queued messages while preserving accounting for any in-flight
+    /// send.
+    fn clear_queue(&self) {
+        let mut state = self.queue.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let queued_bytes = state.messages.iter().map(message_size).sum::<usize>();
+        state.messages.clear();
+        state.queued_bytes = state.queued_bytes.saturating_sub(queued_bytes);
+    }
+}
+
+impl Drop for WsSession {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        self.clear_queue();
+    }
+}
