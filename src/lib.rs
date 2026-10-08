@@ -24,10 +24,36 @@
 //! ```
 //!
 //! `serve` consumes the bound server. On shutdown it stops accepting
-//! connections, cancels the shared [`ServerContext`] token, and waits up to
-//! the configured grace period. `ShutdownReport::forced_connections` is
-//! `None` because the underlying HTTP server does not expose a provable count
-//! of forcibly closed connections. The shutdown future must be `Send`.
+//! connections, closes admission for managed SSE and WebSocket sessions,
+//! cancels the shared [`ServerContext`] token, and waits for HTTP connections
+//! and registered sessions against one grace deadline. The report records any
+//! managed sessions still active at that deadline; it does not cover arbitrary
+//! application background tasks or native Axum upgrades. Transport connections
+//! with no active request or response body close after the configured idle
+//! timeout (30 seconds by default). `ShutdownReport::forced_connections` is
+//! `None` because Axum does not expose a provable count. The shutdown future
+//! must be `Send`.
+//!
+//! Controller macros are re-exported by this crate and can be assembled into
+//! a normal Axum router:
+//!
+//! ```
+//! use std::sync::Arc;
+//! use qubit_web::{ControllerRoutes, get_mapping, rest_controller};
+//!
+//! struct Health;
+//!
+//! #[rest_controller("/health")]
+//! impl Health {
+//!     #[get_mapping("")]
+//!     async fn check(&self) -> &'static str { "ok" }
+//! }
+//!
+//! let router = ControllerRoutes::<()>::new()
+//!     .add(Arc::new(Health)).unwrap()
+//!     .finish().unwrap();
+//! let _ = router;
+//! ```
 
 pub mod diagnostic;
 /// Structured startup and request rejection errors.
@@ -36,6 +62,8 @@ pub mod limit;
 pub mod mvc;
 /// Validated server address and timeout configuration.
 pub mod options;
+/// Shared classification for routes and request policies.
+pub mod route_kind;
 /// HTTP/HTTPS binding, request dispatch, and graceful shutdown.
 pub mod server;
 pub mod sse;
@@ -81,9 +109,10 @@ pub use qubit_web_macros::put;
 pub use qubit_web_macros::put_mapping;
 pub use qubit_web_macros::rest_controller;
 pub use qubit_web_macros::route;
-pub use server::RouteKind;
+pub use route_kind::RouteKind;
 pub use server::ServerContext;
 pub use server::SessionGuard;
+pub use server::SessionRegistrationError;
 pub use server::ShutdownReport;
 pub use server::WebServer;
 pub use sse::SseCapacityExceeded;

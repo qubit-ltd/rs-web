@@ -1,12 +1,22 @@
 # rs-web 详细设计方案
 
-> 日期：2026-10-08；状态：历史技术决策记录（实施后对照见下文）；目标仓库：`qubit-ltd/rs-web`；Cargo 包名：`qubit-web`。本文保留决策过程；现行操作方式见[用户指南](user_guide.md)与[中文版](user_guide.zh_CN.md)，需求基准见[PRD](2026-10-08-rs-web-prd.md)。
+> 日期：2026-10-08；状态：历史技术决策记录；目标仓库：`qubit-ltd/rs-web`；Cargo 包名：`qubit-web`。本文保留重构前的决策过程，其中部分 API 与行为已被 2026-10-09 的生命周期方案取代。现行合同见[英文生命周期设计摘要](2026-10-09-rs-web-lifecycle-design.en.md)、[中文生命周期设计摘要](2026-10-09-rs-web-lifecycle-design.zh_CN.md)及[英文用户指南](user_guide.md)、[中文用户指南](user_guide.zh_CN.md)，需求基准见[PRD](2026-10-08-rs-web-prd.md)。
 
-## 实施状态对照（2026-10-08）
+## 新旧合同对照（2026-10-09）
 
-- **已实现：** 本文首版描述的主要 HTTP/HTTPS、Controller、JSON、SSE、WebSocket 和 shutdown API；具体可用 feature 以 `Cargo.toml` 为准。
-- **本轮方案已实施：** `ServerOptions::with_max_transport_connections` 默认 1024，许可在 accept 前取得；满额时服务停止 accept，客户端可能等待或连接失败，不产生保证的 503。HTTP/1 请求头默认 10 秒，HTTPS TLS 握手沿用此 timeout；不对 HTTP/2 首帧/空闲作同等承诺。
-- **本轮方案已实施：** `ConfiguredWeb` 将 `ServerOptions` 与 `HttpLimits` 分开返回。HTTP 限额须由应用在适当短路由显式安装。context 型 SSE/WS 进入 `ServerContext::active_sessions()`；仅接收 cancellation token 的 WS 入口不计入该统计。
+- **停服与会话：** 当前 `active_sessions()` 统计受管 SSE 与通过 `WsUpgradePolicy::on_upgrade` 预留的 WebSocket（含待完成升级）；停服关闭新预留，并让 HTTP 连接和受管会话共用截止时间。`ShutdownReport::unfinished_managed_sessions` 记录截止时尚未结束的受管会话。原生 Axum upgrade 和任意应用后台任务不计入；这替代了下文首版对会话计数及报告的草案。
+- **空闲传输：** 当前 `transport_idle_timeout` 默认 30 秒，配置键为 `transport.idle_timeout_ms`。无活跃请求或响应体的 HTTP/1、HTTP/2 连接会被回收；活跃请求和 SSE 响应体不受空闲计时影响。`request_header_timeout` 仍为 10 秒 HTTP/1 请求头/TLS 握手期限。
+- **Origin 与错误：** `WsUpgradePolicy::new()` 默认允许不带 Origin 的请求继续到应用认证，带 Origin 的请求默认拒绝，除非精确匹配 `allowed_origins`。监听及 accept I/O 错误可通过 `Error::source()` 查询；默认 `Display`/`Debug` 不包含底层错误文本。
+- **破坏性 API 与版本：** 0.2.0 移除 token-only WS 升级入口，统一为带 `ServerContext` 的 `on_upgrade(ws, headers, context, handler)`；`WebServerError` 不再是可复制的无来源枚举，并携带监听/地址/accept 的 I/O source；SSE 接纳错误区分容量耗尽与停服拒绝。
+
+以下实施状态对照记录了首版能力；现行生命周期行为以本节及 2026-10-09 设计摘要为准。
+
+## 首版实施状态对照（2026-10-08）
+
+- **历史记录：** 本文首版描述了 HTTP/HTTPS、Controller、JSON、SSE、WebSocket 和 shutdown 能力；具体 feature 以当前 `Cargo.toml` 为准。
+- **仍适用的边界：** `ServerOptions::with_max_transport_connections` 默认 1024，许可在 accept 前取得；满额时服务停止 accept，客户端可能等待或连接失败，不保证返回 503。HTTP/1 请求头默认 10 秒，HTTPS TLS 握手沿用此期限。
+- **仍适用的策略：** `ConfiguredWeb` 将 `ServerOptions` 与 `HttpLimits` 分开返回。HTTP 限额须由应用在适当短路由显式安装。
+- **已被新合同取代：** 会话登记、Origin、HTTP/2 空闲和停服报告以本页顶部“新旧合同对照”及 2026-10-09 生命周期摘要为准；不要将下文较早 API 草案当作当前用法。
 - **非目标仍然有效：** 本库不提供应用认证/授权、SSE 事件重放或业务协议。`prompt_stream` 的 demo token 仅用于示例，不能作为生产认证。
 
 以下章节记录首版设计及决策脉络；当历史愿景描述与当前 API 或上方实现合同不同，按上方合同和用户指南理解。

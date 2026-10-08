@@ -2,11 +2,6 @@ format = 1
 
 [[exceptions]]
 rule = "multiple-public-types"
-path = "src/server.rs"
-reason = "Runtime lifecycle types share the server shutdown and connection ownership model."
-
-[[exceptions]]
-rule = "multiple-public-types"
 path = "src/config.rs"
 reason = "ConfiguredWeb and its field-safe ConfigOptionsError jointly define the explicit configuration adapter API."
 

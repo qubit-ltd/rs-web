@@ -1,6 +1,6 @@
 # Running an HTTP service with bounded streams
 
-This guide is for Rust service developers using `qubit-web` 0.1.0 (Rust 1.94 or newer). It follows one service that accepts a bounded JSON prompt request, streams progress over SSE, optionally echoes a WebSocket, and shuts down under host control. The prompt and token are demonstration data; the example does not run an agent and its token is not production authentication.
+This guide is for Rust service developers using `qubit-web` 0.2.0 (Rust 1.94 or newer). It follows one service that accepts a bounded JSON prompt request, streams progress over SSE, optionally echoes a WebSocket, and shuts down under host control. The prompt and token are demonstration data; the example does not run an agent and its token is not production authentication.
 
 Start with the [English README](../README.md) for project scope and feature selection. The [Chinese README](../README.zh_CN.md) and [Chinese guide](user_guide.zh_CN.md) are also available. This guide covers operational setup. Public API details are in [docs.rs](https://docs.rs/qubit-web) and crate Rustdoc.
 
@@ -10,7 +10,7 @@ Add `qubit-web` with the features your service uses. The example below needs JSO
 
 ```toml
 [dependencies]
-qubit-web = { version = "0.1", features = ["json", "ws"] }
+qubit-web = { version = "0.2", features = ["json", "ws"] }
 ```
 
 For HTTPS add `tls-rustls`. Add `config` only if you want `ConfiguredWeb` to parse a `qubit_config::Config` value supplied by your application; it does not load a file or global settings source for you.
@@ -28,6 +28,18 @@ let context = server.context();
 
 Zero is rejected with `WebServerError::InvalidConfig`. The cap applies per `WebServer`; it covers accepted sockets, TLS handshakes, and HTTP connection futures. It is held until the HTTP transport future ends. Upgraded WebSocket sessions are governed by `WsUpgradePolicy` after Hyper completes the upgrade.
 
+Transport connections with no active request or response body close after 30 seconds by default. Choose a different positive duration when the deployment needs another idle policy:
+
+```rust
+use std::time::Duration;
+
+let options = ServerOptions::new("127.0.0.1:3001".parse()?)
+    .with_transport_idle_timeout(Duration::from_secs(45));
+assert_eq!(options.transport_idle_timeout(), Duration::from_secs(45));
+```
+
+An active handler or response body pauses the idle timer, so long-lived SSE is not closed by this timeout. It also reclaims an HTTP/2 connection that never starts a request. HTTP/2 PING traffic does not count as request activity. With `config`, `transport.idle_timeout_ms` sets the same value and defaults to `30000`; zero is invalid. `request_header_timeout` remains a separate 10-second HTTP/1 header and TLS handshake limit.
+
 With the optional `config` feature, parse settings and keep route policy separate:
 
 ```rust,ignore
@@ -36,7 +48,7 @@ let (server_options, http_limits) = configured.into_parts();
 let server = WebServer::bind_http(server_options).await?;
 ```
 
-`address` is required; `shutdown_timeout_ms` defaults to 30000 and `transport.max_connections` to 1024. The `http.*` fields create `HttpLimits`, but do not install them. Errors identify the invalid field through `ConfigOptionsError::field()` without echoing its value.
+`address` is required; `shutdown_timeout_ms` defaults to 30000, `transport.max_connections` to 1024, and `transport.idle_timeout_ms` to 30000. The `http.*` fields create `HttpLimits`, but do not install them. Errors identify the invalid field through `ConfigOptionsError::field()` without echoing its value.
 
 ## Assemble short routes and long-lived routes
 
@@ -82,7 +94,7 @@ let app = app.route("/admin/active-sessions", get(move || {
 }));
 ```
 
-This is application code, not a built-in admin endpoint. Protect it with the application's normal authentication and network policy. `active_sessions()` counts registered SSE sessions and WebSockets created through `WsUpgradePolicy::on_upgrade_with_context`; it does not count token-only `on_upgrade` sessions or all TCP connections.
+This is application code, not a built-in admin endpoint. Protect it with the application's normal authentication and network policy. `active_sessions()` counts managed SSE sessions and WebSocket upgrades admitted through `WsUpgradePolicy::on_upgrade`, including an upgrade whose response has not completed yet. It does not count ordinary HTTP requests, native Axum upgrades, or arbitrary application background tasks.
 
 The host owns shutdown. Keep the shutdown future pending while serving, then resolve it when your process signal or supervisor requests a stop:
 
@@ -91,7 +103,7 @@ let report = server.serve(app, shutdown_signal).await?;
 assert!(report.graceful);
 ```
 
-On shutdown, the server stops accepting new connections, notifies registered sessions, and waits up to the configured shutdown timeout before forcing remaining connection tasks to stop. The report indicates whether shutdown completed gracefully.
+On shutdown, the server atomically closes admission for new managed SSE and WebSocket sessions, stops accepting new connections, and notifies active sessions. It waits for HTTP connections and registered sessions against the same configured deadline. `graceful` is true only if both finish before that deadline. Otherwise `unfinished_managed_sessions` records the managed session count at the deadline; the report does not claim that arbitrary application background tasks have stopped. `forced_connections` is `None` because Axum does not expose a reliable count.
 
 Run the demonstration service with:
 
@@ -133,16 +145,18 @@ Budget transport connections separately from long-lived sessions. For example, w
 
 When all transport permits are occupied, the accept loop waits before accepting another socket. A client may remain in the OS listen backlog or fail to connect. There is no HTTP handler to return a guaranteed 503 for a socket that has not been accepted. Tune the cap and the operating system backlog as deployment-specific settings; do not treat backlog behavior as an application response.
 
-`request_header_timeout` defaults to 10 seconds. It bounds HTTP/1 request headers and is also used for the HTTPS TLS handshake. It does not establish an equivalent HTTP/2 first-frame or idle timeout guarantee. This is separate from `HttpLimits::with_request_timeout`, which applies only after `RequestLimitLayer` is installed on a short route.
+`request_header_timeout` defaults to 10 seconds. It bounds HTTP/1 request headers and is also used for the HTTPS TLS handshake. `transport_idle_timeout` defaults to 30 seconds and closes idle HTTP/1 and HTTP/2 transports when no handler or response body is active. It does not time out a stalled active request; use route limits or deployment-level policies for that case. This is separate from `HttpLimits::with_request_timeout`, which applies only after `RequestLimitLayer` is installed on a short route.
 
 | Symptom | Check |
 | --- | --- |
 | Client waits or connection fails during overload | Check per-instance transport capacity and OS backlog. Do not expect a 503 before accept. |
 | A request exceeds the body cap but succeeds | Confirm that the route has `RequestLimitLayer` or its controller branch uses `with_http_limits`; confirm the body is consumed by the handler/extractor. |
 | SSE closes at the ordinary request deadline | Remove `RequestLimitLayer` from that streaming branch and use `SseConnectionPolicy` limits. |
-| `active_sessions()` stays at zero for a WS | Use `on_upgrade_with_context`; the token-only `on_upgrade` has no `ServerContext` to register. |
+| `active_sessions()` stays at zero for a WS | Call `WsUpgradePolicy::on_upgrade` with the server's `ServerContext`; native Axum upgrades are outside managed-session reporting. |
 | Configuration is rejected | Inspect `ConfigOptionsError::field()`; check address, positive timeout/limit values, and integer types. Error text intentionally does not include rejected values. |
 | HTTPS or WSS cannot connect | Check certificate chain/key pairing and client trust. A TLS failure occurs before HTTP routing. |
 | Shutdown exceeds expectations | Check the configured shutdown timeout and whether application handlers or stream producers respond to cancellation. |
 
-See the [Chinese guide](user_guide.zh_CN.md), [README](../README.md), [API documentation](https://docs.rs/qubit-web), and [design record](2026-10-08-rs-web-design.md) for next steps.
+`WebServerError` exposes retained socket errors through `std::error::Error::source()`. Its default `Display` and `Debug` intentionally show only the error category; inspect `source()` explicitly when diagnosing bind or accept failures.
+
+See the [Chinese guide](user_guide.zh_CN.md), [README](../README.md), [API documentation](https://docs.rs/qubit-web), the [historical Chinese design record](2026-10-08-rs-web-design.md), and the [current lifecycle design summary](2026-10-09-rs-web-lifecycle-design.en.md) for next steps.

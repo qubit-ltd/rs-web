@@ -6,6 +6,25 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Procedural macros for `qubit-web`.
+//!
+//! The macros declare routes on an inherent Controller implementation; the
+//! main `qubit-web` crate re-exports them and provides the route builder:
+//!
+//! ```ignore
+//! use std::sync::Arc;
+//! use qubit_web::{ControllerRoutes, rest_controller, get_mapping};
+//!
+//! struct Health;
+//!
+//! #[rest_controller("/health")]
+//! impl Health {
+//!     #[get_mapping("")]
+//!     async fn check(&self) -> &'static str { "ok" }
+//! }
+//!
+//! let router = ControllerRoutes::new().add(Arc::new(Health))?.finish()?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 mod controller;
 mod route;

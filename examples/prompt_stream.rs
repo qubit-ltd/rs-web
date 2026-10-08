@@ -118,7 +118,7 @@ async fn websocket(State(state): State<AppState>, headers: HeaderMap, ws: WebSoc
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let policy = state.ws.clone();
-    policy.on_upgrade_with_context(ws, &headers, state.context.clone(), |mut session| async move {
+    policy.on_upgrade(ws, &headers, state.context.clone(), |mut session| async move {
         while let Some(Ok(message)) = session.recv().await {
             match message {
                 Message::Text(text) => {

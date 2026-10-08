@@ -8,7 +8,7 @@ Add the crate and enable only the capabilities you use:
 
 ```toml
 [dependencies]
-qubit-web = { version = "0.1", features = ["json", "ws"] }
+qubit-web = { version = "0.2", features = ["json", "ws"] }
 ```
 
 The default feature set is empty. `json` enables bounded JSON helpers, `ws` enables WebSocket policy support, `tls-rustls` enables HTTPS binding, and `config` enables the `qubit-config` adapter.
@@ -47,10 +47,11 @@ The sample bearer token is `demo-only`; it illustrates a handler check and is no
 
 - The per-`WebServer` transport connection limit defaults to 1024 and can be configured with `ServerOptions::with_max_transport_connections`. It covers TLS handshakes and HTTP connection futures. When full, accepting pauses and clients may wait in the operating system backlog or fail to connect; this does not promise an HTTP 503. An upgraded WebSocket uses its own `WsUpgradePolicy` capacity. SSE remains an HTTP connection; size its transport and SSE budgets for the expected long-lived streams.
 - `HttpLimits` applies finite body size, concurrency, and processing-time limits to ordinary short requests only where the application installs `ControllerRoutes::with_http_limits` or `RequestLimitLayer`. Controller `short` routes are covered by the configured Controller policy; `sse` and `ws` routes skip the short-request layer. Native Axum routes need an explicit layer on each selected branch.
-- The default HTTP/1 request-header timeout is 10 seconds and also bounds an HTTP/1 WebSocket upgrade request before its headers arrive. It does not guarantee a timeout for an HTTP/2 first frame or idle connection.
-- Prefer `WsUpgradePolicy::on_upgrade_with_context` to share shutdown cancellation and count the upgraded session in `ServerContext::active_sessions()`. The token-based `on_upgrade` has no server context and is not included in that count. `active_sessions()` counts registered SSE and context-based WS sessions, not all TCP connections.
-- The library does not provide authentication or authorization. Applications must authenticate before accepting WebSocket upgrades and choose an Origin allowlist. An absent Origin does not authenticate a client.
+- The default HTTP/1 request-header timeout is 10 seconds and also bounds an HTTP/1 WebSocket upgrade request before its headers arrive. The transport idle timeout defaults to 30 seconds (`ServerOptions::with_transport_idle_timeout` or `transport.idle_timeout_ms`); it closes connections with no active request or response body, including idle HTTP/2 connections, while active requests and SSE bodies keep the connection active.
+- Use `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)` to reserve a managed session before returning the upgrade response. Origin is optional by default: requests without Origin proceed to application authentication, while requests with Origin are rejected unless it exactly matches `allowed_origins`. An absent Origin does not authenticate a client.
+- `ServerContext::active_sessions()` counts managed SSE sessions and WebSocket upgrades admitted through `on_upgrade`, including pending handshakes. Shutdown waits for HTTP connections and these sessions against one deadline; `ShutdownReport::unfinished_managed_sessions` records sessions remaining at the deadline. Native Axum upgrades and arbitrary application tasks are outside this count.
+- `WebServerError` keeps socket I/O details available through `std::error::Error::source()` while its default `Display` and `Debug` omit the underlying OS error text.
 - Direct public deployment requires trusted TLS. `tls-rustls` supports HTTPS binding; provide valid certificates and private keys, or configure a trusted reverse proxy explicitly. Forwarded headers are not trusted by default.
 - SSE producers can observe disconnect and shutdown cancellation, but event IDs, buffering, persistence, replay, and recovery remain application responsibilities. Closing a connection does not cancel business work already accepted by the application.
 
-For setup, capacity planning, TLS, streaming, and troubleshooting, see the [English user guide](doc/user_guide.md) and [Chinese user guide](doc/user_guide.zh_CN.md). See the [API documentation](https://docs.rs/qubit-web) and the [requirements](doc/2026-10-08-rs-web-prd.md) and [design notes](doc/2026-10-08-rs-web-design.md) for project context.
+For setup, capacity planning, TLS, streaming, and troubleshooting, see the [English user guide](doc/user_guide.md) and [Chinese user guide](doc/user_guide.zh_CN.md). See the [API documentation](https://docs.rs/qubit-web), the [historical Chinese design record](doc/2026-10-08-rs-web-design.md), and the [current lifecycle design summary](doc/2026-10-09-rs-web-lifecycle-design.en.md) for project context.

@@ -1,6 +1,6 @@
 [package]
 name = "qubit-web"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Haixing Hu <starfish.hu@gmail.com>"]
@@ -69,7 +69,7 @@ futures-core = "0.3"
 futures-util = { version = "0.3", features = ["sink"], optional = true }
 hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "tokio"] }
-qubit-web-macros = { version = "0.1.0", path = "qubit-web-macros" }
+qubit-web-macros = { version = "0.2.0", path = "qubit-web-macros" }
 qubit-redact = { version = "0.9", default-features = false, features = ["http"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }

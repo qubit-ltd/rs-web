@@ -824,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "axum-server",
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-web-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
