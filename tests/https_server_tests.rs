@@ -14,8 +14,12 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::Router;
@@ -29,6 +33,10 @@ use axum::routing::get;
 use qubit_web::ServerOptions;
 use qubit_web::WebServer;
 use qubit_web::tls::TlsConfig;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener as TokioTcpListener;
+use tokio::net::TcpStream as TokioTcpStream;
 use tokio::sync::oneshot;
 
 fn fixture(name: &str) -> PathBuf {
@@ -62,6 +70,124 @@ async fn serves_the_same_router_over_a_real_https_connection() {
     assert!(response.ends_with("tls-ok"), "unexpected response: {response}");
 }
 
+#[tokio::test]
+async fn slow_tls_handshake_holds_transport_capacity_until_handshake_aborts() {
+    let tls = TlsConfig::from_pem_files(fixture("cert.pem"), fixture("key.pem"))
+        .await
+        .expect("valid test certificate and key");
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_max_transport_connections(1)
+        .unwrap();
+    let server = WebServer::bind_https(options, tls).await.expect("HTTPS listener binds");
+    let address = server.local_addr();
+    let handled = Arc::new(AtomicUsize::new(0));
+    let handled_route = handled.clone();
+    let app = Router::new().route(
+        "/health",
+        get(move || {
+            let handled = handled_route.clone();
+            async move {
+                handled.fetch_add(1, Ordering::SeqCst);
+                "tls-limited"
+            }
+        }),
+    );
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(server.serve(app, async {
+        let _ = shutdown_rx.await;
+    }));
+
+    let client_hello = capture_tls_client_hello().await;
+    let mut slow_handshake = TokioTcpStream::connect(address).await.unwrap();
+    slow_handshake.write_all(&client_hello).await.unwrap();
+    let mut record_header = [0; 5];
+    tokio::time::timeout(Duration::from_secs(2), slow_handshake.read_exact(&mut record_header))
+        .await
+        .expect("TLS server should respond to the ClientHello")
+        .expect("TLS server should send a record header");
+    assert_eq!(record_header[0], 22, "server should begin a TLS handshake response");
+    let record_length = u16::from_be_bytes([record_header[3], record_header[4]]) as usize;
+    let mut server_hello = vec![0; record_length];
+    tokio::time::timeout(Duration::from_secs(2), slow_handshake.read_exact(&mut server_hello))
+        .await
+        .expect("TLS ServerHello record should arrive")
+        .expect("TLS ServerHello record should be complete");
+    assert_eq!(server_hello.first(), Some(&2), "server should send ServerHello first");
+
+    let (response_tx, mut response_rx) = oneshot::channel();
+    tokio::task::spawn_blocking(move || {
+        let _ = response_tx.send(https_get(address));
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut response_rx)
+            .await
+            .is_err(),
+        "the second HTTPS request must wait while the first TLS handshake owns the permit"
+    );
+    assert_eq!(handled.load(Ordering::SeqCst), 0);
+
+    drop(slow_handshake);
+    let response = tokio::time::timeout(Duration::from_secs(3), &mut response_rx)
+        .await
+        .expect("second TLS connection should continue after the slow handshake is dropped")
+        .expect("HTTPS client task should send its response");
+    assert!(response.starts_with("HTTP/1.1 200"), "unexpected response: {response}");
+    assert!(response.ends_with("tls-limited"), "unexpected response: {response}");
+    assert_eq!(handled.load(Ordering::SeqCst), 1);
+
+    let _ = shutdown_tx.send(());
+    assert!(serving.await.unwrap().unwrap().graceful);
+}
+
+async fn capture_tls_client_hello() -> Vec<u8> {
+    struct OpenSslClient {
+        child: Child,
+        _stdin: std::process::ChildStdin,
+    }
+
+    impl Drop for OpenSslClient {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut child = Command::new("openssl")
+        .args(["s_client", "-connect", &address.to_string(), "-tls1_2"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("openssl is required to generate the TLS ClientHello fixture");
+    let child_stdin = child.stdin.take().expect("OpenSSL stdin is piped");
+    let _client = OpenSslClient {
+        child,
+        _stdin: child_stdin,
+    };
+    let (mut stream, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+        .await
+        .expect("OpenSSL should connect to the local capture listener")
+        .unwrap();
+    let mut record_header = [0; 5];
+    tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut record_header))
+        .await
+        .expect("OpenSSL should send a TLS record")
+        .expect("ClientHello record header should be complete");
+    assert_eq!(record_header[0], 22, "OpenSSL should send a TLS handshake record");
+    let record_length = u16::from_be_bytes([record_header[3], record_header[4]]) as usize;
+    let mut client_hello = record_header.to_vec();
+    client_hello.resize(5 + record_length, 0);
+    tokio::time::timeout(Duration::from_secs(3), stream.read_exact(&mut client_hello[5..]))
+        .await
+        .expect("OpenSSL should send the complete ClientHello")
+        .expect("ClientHello payload should be complete");
+    assert_eq!(client_hello.get(5), Some(&1), "TLS record should contain ClientHello");
+    drop(stream);
+    client_hello
+}
+
 #[cfg(all(feature = "tls-rustls", feature = "ws"))]
 #[tokio::test]
 async fn serves_a_websocket_echo_over_tls() {
@@ -91,6 +217,51 @@ async fn serves_a_websocket_echo_over_tls() {
     let _ = shutdown_tx.send(());
     serving.await.unwrap().expect("WSS serve completes");
     assert_eq!(echoed, "wss-echo-sentinel");
+}
+
+#[cfg(all(feature = "tls-rustls", feature = "ws"))]
+#[tokio::test]
+async fn websocket_upgrade_releases_transport_capacity_for_another_https_request() {
+    let tls = TlsConfig::from_pem_files(fixture("cert.pem"), fixture("key.pem"))
+        .await
+        .expect("valid test certificate and key");
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_max_transport_connections(1)
+        .unwrap();
+    let server = WebServer::bind_https(options, tls).await.expect("HTTPS listener binds");
+    let address = server.local_addr();
+    let app = Router::new()
+        .route(
+            "/ws",
+            get(|ws: WebSocketUpgrade| async move {
+                ws.on_upgrade(|_socket: WebSocket| async move {
+                    std::future::pending::<()>().await;
+                })
+            }),
+        )
+        .route("/health", get(|| async { "after-upgrade" }));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(server.serve(app, async {
+        let _ = shutdown_rx.await;
+    }));
+
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    let websocket = tokio::task::spawn_blocking(move || wss_open_until_stopped(address, ready_tx, stop_rx));
+    let upgrade_response = tokio::time::timeout(Duration::from_secs(2), ready_rx)
+        .await
+        .expect("WebSocket upgrade response should arrive")
+        .expect("WebSocket client task should send the upgrade response");
+    assert!(upgrade_response.starts_with("HTTP/1.1 101"), "unexpected response: {upgrade_response}");
+
+    let response = tokio::task::spawn_blocking(move || https_get(address)).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "unexpected response: {response}");
+    assert!(response.ends_with("after-upgrade"), "unexpected response: {response}");
+
+    stop_tx.send(()).unwrap();
+    websocket.await.unwrap();
+    let _ = shutdown_tx.send(());
+    assert!(serving.await.unwrap().unwrap().graceful);
 }
 
 #[cfg(all(feature = "tls-rustls", feature = "ws"))]
@@ -163,8 +334,20 @@ fn wss_echo(address: SocketAddr) -> String {
 }
 
 fn https_get(address: SocketAddr) -> String {
-    let mut child = Command::new("openssl")
-        .args(["s_client", "-connect", &address.to_string(), "-quiet", "-ign_eof"])
+    https_request(address, "/health")
+}
+
+fn https_request(address: SocketAddr, path: &str) -> String {
+    let mut child = Command::new("timeout")
+        .args([
+            "5s",
+            "openssl",
+            "s_client",
+            "-connect",
+            &address.to_string(),
+            "-quiet",
+            "-ign_eof",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -172,9 +355,7 @@ fn https_get(address: SocketAddr) -> String {
         .expect("openssl is required for the loopback TLS integration test");
     let mut input = child.stdin.take().unwrap();
     let output = child.stdout.take().unwrap();
-    input
-        .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .unwrap();
+    write!(input, "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
     drop(input);
 
     let mut response = String::new();
@@ -193,6 +374,52 @@ fn https_get(address: SocketAddr) -> String {
     let _ = child.kill();
     let _ = child.wait();
     response
+}
+
+#[cfg(all(feature = "tls-rustls", feature = "ws"))]
+fn wss_open_until_stopped(
+    address: SocketAddr,
+    ready: oneshot::Sender<String>,
+    stop: std::sync::mpsc::Receiver<()>,
+) {
+    let mut child = Command::new("timeout")
+        .args([
+            "5s",
+            "openssl",
+            "s_client",
+            "-connect",
+            &address.to_string(),
+            "-quiet",
+            "-ign_eof",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("openssl is required for the loopback WSS integration test");
+    let mut input = child.stdin.take().unwrap();
+    let output = child.stdout.take().unwrap();
+    write!(
+        input,
+        "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    )
+    .unwrap();
+    let mut reader = BufReader::new(output);
+    let mut line = String::new();
+    let mut response = String::new();
+    while reader.read_line(&mut line).unwrap() > 0 {
+        response.push_str(&line);
+        if line == "\r\n" {
+            break;
+        }
+        line.clear();
+    }
+    let _ = ready.send(response);
+    let _ = stop.recv_timeout(Duration::from_secs(5));
+    drop(reader);
+    drop(input);
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[tokio::test]

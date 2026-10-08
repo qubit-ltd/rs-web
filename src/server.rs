@@ -23,6 +23,7 @@ use hyper_util::rt::TokioTimer;
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 #[cfg(feature = "tls-rustls")]
 use tokio_rustls::TlsAcceptor;
@@ -106,6 +107,11 @@ impl ServerContext {
     }
 
     /// Returns the number of currently registered sessions.
+    ///
+    /// The count covers long-lived sessions whose owners registered a guard,
+    /// including SSE and WebSocket sessions that use the context-aware upgrade
+    /// API. It does not count ordinary HTTP requests, pending handshakes, or
+    /// WebSocket upgrades made with only a cancellation token.
     pub fn active_sessions(&self) -> usize {
         self.active_sessions.load(Ordering::Acquire)
     }
@@ -197,6 +203,7 @@ impl WebServer {
             ..
         } = self;
         let request_header_timeout = options.request_header_timeout;
+        let connection_limit = Arc::new(Semaphore::new(options.max_transport_connections.get()));
         let graceful = GracefulShutdown::new();
         let mut connections = JoinSet::new();
         tokio::pin!(shutdown);
@@ -205,7 +212,14 @@ impl WebServer {
             tokio::select! {
                 biased;
                 _ = &mut shutdown => break false,
-                accepted = listener.accept() => {
+                accepted = async {
+                    let permit = connection_limit.clone().acquire_owned().await.ok()?;
+                    let accepted = listener.accept().await;
+                    Some((permit, accepted))
+                } => {
+                    let Some((permit, accepted)) = accepted else {
+                        break true;
+                    };
                     let (stream, _) = match accepted {
                         Ok(accepted) => accepted,
                         Err(_) => break true,
@@ -217,6 +231,7 @@ impl WebServer {
                     #[cfg(feature = "tls-rustls")]
                     let cancellation = context.cancellation_token();
                     connections.spawn(async move {
+                        let _permit = permit;
                         #[cfg(feature = "tls-rustls")]
                         if let Some(acceptor) = tls_acceptor {
                             let accepted = tokio::select! {
