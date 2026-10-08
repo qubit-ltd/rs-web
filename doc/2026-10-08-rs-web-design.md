@@ -1,6 +1,15 @@
 # rs-web 详细设计方案
 
-> 日期：2026-10-08；状态：待审阅；目标仓库：`qubit-ltd/rs-web`；Cargo 包名：`qubit-web`。本文依据 [首版 PRD](2026-10-08-rs-web-prd.md) 细化技术合同，不代表当前 crate 已提供这些 API。PRD 的需求编号和验收条件优先于本文的示意命名。
+> 日期：2026-10-08；状态：历史技术决策记录（实施后对照见下文）；目标仓库：`qubit-ltd/rs-web`；Cargo 包名：`qubit-web`。本文保留决策过程；现行操作方式见[用户指南](user_guide.md)与[中文版](user_guide.zh_CN.md)，需求基准见[PRD](2026-10-08-rs-web-prd.md)。
+
+## 实施状态对照（2026-10-08）
+
+- **已实现：** 本文首版描述的主要 HTTP/HTTPS、Controller、JSON、SSE、WebSocket 和 shutdown API；具体可用 feature 以 `Cargo.toml` 为准。
+- **本轮方案已实施：** `ServerOptions::with_max_transport_connections` 默认 1024，许可在 accept 前取得；满额时服务停止 accept，客户端可能等待或连接失败，不产生保证的 503。HTTP/1 请求头默认 10 秒，HTTPS TLS 握手沿用此 timeout；不对 HTTP/2 首帧/空闲作同等承诺。
+- **本轮方案已实施：** `ConfiguredWeb` 将 `ServerOptions` 与 `HttpLimits` 分开返回。HTTP 限额须由应用在适当短路由显式安装。context 型 SSE/WS 进入 `ServerContext::active_sessions()`；仅接收 cancellation token 的 WS 入口不计入该统计。
+- **非目标仍然有效：** 本库不提供应用认证/授权、SSE 事件重放或业务协议。`prompt_stream` 的 demo token 仅用于示例，不能作为生产认证。
+
+以下章节记录首版设计及决策脉络；当历史愿景描述与当前 API 或上方实现合同不同，按上方合同和用户指南理解。
 
 ## 1. 目标、输入与判据
 
@@ -258,7 +267,7 @@ OpenAPI 生成、全局自动路由发现、逐参数 Spring 风格别名宏、�
 
 `ServerOptions` 只包含服务级默认值、监听地址和关闭策略。按职责拆为 `HttpLimits`、`SseConnectionPolicy`、`WsLimits` 和可选 `JsonLimits`；各类型构造时就验证正值、字节/条数关系和期限。配置值统一使用 `NonZeroUsize`/`Duration` 等明确类型；对外不接受 `0 = unlimited`。默认数值与覆盖边界见 PRD 第 5 节，实施时不得隐式变为无限制。
 
-应用应显式把策略层挂到希望受保护的 Router/route；`ServerOptions::http_limits()` 提供基线值，构建 `ControllerRoutes` 时传给 `with_http_limits`，原生 Axum 分支则传给 `RequestLimitLayer::new`。`WebServer` 保留调用方构造的 Router，不根据选项重写路由类别。Controller 的所有 short 路由共享一份服务级在途 limiter；路由级策略可以收紧/放宽字节上限或期限，但不复制服务级并发额度。SSE/WS 路由跳过普通短请求策略。组装顺序固定为：先确定路由与策略 → 前置容量/长度检查 → 应用认证及其他 middleware → body 消费/提取 → handler/流式响应。实际 Tower 层的执行方向与此不同写法时，以测试证明可观察顺序一致。应用若绕过公共限额层直接使用 Axum Router，文档必须明确该路由不享受相关约束；库不能声称自动覆盖任意原生 extractor。
+应用应显式把策略层挂到希望受保护的 Router/route。当前 API 可从启用 `config` feature 后的 `ConfiguredWeb::http_limits()` 取得配置的限额，或直接构造 `HttpLimits`；将其传给 `ControllerRoutes::with_http_limits`，或在原生 Axum 分支显式安装 `RequestLimitLayer::new`。这里的 `ServerOptions::http_limits()` 是早期设计稿中的接口，实施时已删除。`WebServer` 保留调用方构造的 Router，不根据选项重写路由类别。Controller 的所有 short 路由共享一份服务级在途 limiter；路由级策略可以收紧/放宽字节上限或期限，但不复制服务级并发额度。SSE/WS 路由跳过普通短请求策略。组装顺序固定为：先确定路由与策略 → 前置容量/长度检查 → 应用认证及其他 middleware → body 消费/提取 → handler/流式响应。实际 Tower 层的执行方向与此不同写法时，以测试证明可观察顺序一致。应用若绕过公共限额层直接使用 Axum Router，文档必须明确该路由不享受相关约束；库不能声称自动覆盖任意原生 extractor。
 
 | 配置域 | 默认 | 路由覆盖 | 运行时检查点 |
 | --- | --- | --- | --- |
