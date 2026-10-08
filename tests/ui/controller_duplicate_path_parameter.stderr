@@ -1,0 +1,7 @@
+error: route path contains a duplicate parameter name
+  --> tests/ui/controller_duplicate_path_parameter.rs:12:1
+   |
+12 | #[rest_controller("/items/{id}")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `rest_controller` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -1,0 +1,7 @@
+error: route path contains an unclosed parameter
+  --> tests/ui/controller_unbalanced_path.rs:12:1
+   |
+12 | #[rest_controller("/items")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `rest_controller` (in Nightly builds, run with -Z macro-backtrace for more info)

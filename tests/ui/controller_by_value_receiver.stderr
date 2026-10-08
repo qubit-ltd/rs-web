@@ -1,0 +1,5 @@
+error: mapped controller methods must use `&self`
+  --> tests/ui/controller_by_value_receiver.rs:15:19
+   |
+15 |     async fn list(self) -> &'static str { "items" }
+   |                   ^^^^

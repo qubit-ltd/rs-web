@@ -1,0 +1,5 @@
+error: unknown HTTP method
+  --> tests/ui/controller_unknown_method.rs:14:27
+   |
+14 |     #[route("/", method = "BREW")]
+   |                           ^^^^^^

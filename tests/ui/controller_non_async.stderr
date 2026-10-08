@@ -1,0 +1,5 @@
+error: mapped controller methods must be async
+  --> tests/ui/controller_non_async.rs:15:5
+   |
+15 |     fn list(&self) -> &'static str { "items" }
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

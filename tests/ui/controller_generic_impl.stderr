@@ -1,0 +1,5 @@
+error: generic Controller impl blocks are not supported
+  --> tests/ui/controller_generic_impl.rs:13:5
+   |
+13 | impl<T: Send + Sync + 'static> Controller<T> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^

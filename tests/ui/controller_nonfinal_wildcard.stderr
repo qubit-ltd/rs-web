@@ -1,0 +1,7 @@
+error: wildcard route parameters must be the final segment
+  --> tests/ui/controller_nonfinal_wildcard.rs:12:1
+   |
+12 | #[rest_controller("/items")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `rest_controller` (in Nightly builds, run with -Z macro-backtrace for more info)

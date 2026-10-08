@@ -1,0 +1,7 @@
+error: route parameter names must be nonempty and cannot contain braces, slashes, or wildcard markers
+  --> tests/ui/controller_invalid_parameter_name.rs:12:1
+   |
+12 | #[rest_controller("/items")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `rest_controller` (in Nightly builds, run with -Z macro-backtrace for more info)

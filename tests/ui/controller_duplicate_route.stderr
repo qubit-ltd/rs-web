@@ -1,0 +1,5 @@
+error: duplicate controller route: GET /items
+  --> tests/ui/controller_duplicate_route.rs:18:5
+   |
+18 |     async fn index(&self) -> &'static str { "index" }
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
