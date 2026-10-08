@@ -1,0 +1,32 @@
+[package]
+name = "qubit-web"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Haixing Hu <starfish.hu@gmail.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/qubit-ltd/rs-web"
+homepage = "https://github.com/qubit-ltd/rs-web"
+documentation = "https://docs.rs/qubit-web"
+description = "Composable HTTP, HTTPS, and WebSocket server infrastructure for Rust services"
+readme = "README.md"
+keywords = ["http", "https", "websocket", "server", "qubit"]
+categories = ["web-programming::http-server", "asynchronous"]
+include = [
+    "/Cargo.toml",
+    "/LICENSE",
+    "/README.md",
+    "/README.zh_CN.md",
+    "/src/**",
+    "/doc/**",
+    "/tests/**",
+]
+
+[lib]
+name = "qubit_web"
+doctest = true
+
+[features]
+default = []
+
+[workspace]

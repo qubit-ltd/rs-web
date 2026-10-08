@@ -1,0 +1,111 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo
+# Note: Cargo.lock is committed for CI optimization and build reproducibility
+# This is acceptable for library projects with comprehensive CI testing
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+
+# nyc test coverage
+.nyc_output
+
+# Dependency directories
+node_modules/
+
+# Optional npm cache directory
+.npm
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# dotenv environment variables file
+.env
+.env.test
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Project specific exclusions
+external/
+.cursor
+.cursor/
+
+# Temporary files
+*.tmp
+*.temp
+.superpowers/
+
+# Backup files
+*.bak
+*.backup
+
+# Archive files
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Locally installed pinned rs-infra tools
+.infra/tools/bin/
+
+# Generated coverage reports
+/ci-summary.json
+/coverage-badge.json
+/coverage-summary.md
+/coverage.json
+/coverage.txt
+/lcov.info
+/.infra/*/bin/
+/.infra/*/.crates*
+/.infra/*/tool.revision*
+!/.infra/coverage/
+/.infra/coverage/*
+!/.infra/coverage/coverage.json
+!/.infra/coverage/tool.toml
+
+# Shared Rust project ignore entries (rs-infra)
+**/target/
+/fuzz/artifacts/
+/fuzz/target/
+*.profdata
+*.profraw
+.worktrees/
+/public/
+/pages-artifact.tar.gz
+__pycache__/

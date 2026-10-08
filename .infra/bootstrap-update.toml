@@ -1,0 +1,1 @@
+profiles = ["cargo-matrix-default", "dependency-policy-default", "local-path-dependencies-default", "pages-default", "style-exceptions-default"]
