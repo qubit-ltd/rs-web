@@ -38,6 +38,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::server::ServerContext;
+use crate::server::SessionGuard;
 
 const DEFAULT_CONNECTIONS: usize = 128;
 const DEFAULT_FRAME_BYTES: usize = 64 * 1024;
@@ -198,6 +199,8 @@ impl WsUpgradePolicy {
 
     /// Validates Origin and reserves capacity before writing the upgrade
     /// response. The application must perform authentication before calling it.
+    /// Sessions created through this token-only entry point are not included in
+    /// [`ServerContext::active_sessions`].
     pub fn on_upgrade<F, Fut>(
         &self,
         ws: WebSocketUpgrade,
@@ -209,11 +212,13 @@ impl WsUpgradePolicy {
         F: FnOnce(WsSession) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        self.on_upgrade_with_timeout(ws, headers, shutdown, self.inner.shutdown_timeout, None, handler)
+        self.on_upgrade_with_timeout(ws, headers, shutdown, self.inner.shutdown_timeout, None, None, handler)
     }
 
     /// Validates and upgrades a WebSocket using the server context's shared
-    /// cancellation token and shutdown deadline.
+    /// cancellation token and shutdown deadline. After a successful upgrade,
+    /// the session is included in [`ServerContext::active_sessions`] until its
+    /// writer task finishes. Rejected or failed upgrades are not counted.
     pub fn on_upgrade_with_context<F, Fut>(
         &self,
         ws: WebSocketUpgrade,
@@ -231,6 +236,7 @@ impl WsUpgradePolicy {
             context.cancellation_token(),
             context.shutdown_timeout(),
             Some(context.shutdown_deadline_handle()),
+            Some(context.clone()),
             handler,
         )
     }
@@ -242,6 +248,7 @@ impl WsUpgradePolicy {
         shutdown: CancellationToken,
         shutdown_timeout: Duration,
         server_deadline: Option<Arc<Mutex<Option<tokio::time::Instant>>>>,
+        session_context: Option<ServerContext>,
         handler: F,
     ) -> Response
     where
@@ -262,6 +269,7 @@ impl WsUpgradePolicy {
         ws.max_frame_size(self.inner.max_frame_bytes)
             .max_message_size(self.inner.max_message_bytes)
             .on_upgrade(move |socket| async move {
+                let session = session_context.map(|context| context.register_session());
                 let queue = policy.send_queue();
                 let session_shutdown = shutdown.child_token();
                 let close_code = Arc::new(AtomicU16::new(1001));
@@ -286,6 +294,7 @@ impl WsUpgradePolicy {
                         close_ack_receiver,
                         shutdown_timeout,
                         permit,
+                        session,
                     )
                     .await;
                 });
@@ -649,6 +658,7 @@ async fn writer_loop(
     mut close_ack: tokio::sync::oneshot::Receiver<()>,
     shutdown_timeout: Duration,
     _permit: OwnedSemaphorePermit,
+    _session: Option<SessionGuard>,
 ) {
     loop {
         if shutdown.is_cancelled() {

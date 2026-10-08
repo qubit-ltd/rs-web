@@ -132,9 +132,17 @@ impl<'a> MakeWriter<'a> for SharedWriter {
 }
 
 async fn handshake(addr: std::net::SocketAddr, origin: Option<&str>) -> (TcpStream, StatusCode) {
+    handshake_path(addr, "/ws", origin).await
+}
+
+async fn handshake_path(
+    addr: std::net::SocketAddr,
+    path: &str,
+    origin: Option<&str>,
+) -> (TcpStream, StatusCode) {
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let mut request = format!(
-        "GET /ws HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
     );
     if let Some(origin) = origin {
         request.push_str(&format!("Origin: {origin}\r\n"));
@@ -339,28 +347,31 @@ async fn context_upgrade_uses_the_server_absolute_shutdown_deadline() {
     let context = server.context();
     let policy = WsUpgradePolicy::new()
         .max_connections(1)
+        .allowed_origins(["https://app.example"])
         .shutdown_timeout(Duration::from_millis(30));
+    assert_eq!(context.active_sessions(), 0);
     let app = Router::new()
-        .route(
-            "/ws",
-            get(
-                |State((policy, context)): State<(WsUpgradePolicy, qubit_web::ServerContext)>,
-                 headers: HeaderMap,
-                 ws: WebSocketUpgrade| async move {
-                    policy.on_upgrade_with_context(ws, &headers, context, |mut session| async move {
-                        let _ = session.recv().await;
-                    })
-                },
-            ),
-        )
-        .with_state((policy.clone(), context));
+        .route("/ws", get(context_ws_upgrade))
+        .route("/token", get(token_ws_upgrade))
+        .with_state((policy.clone(), context.clone()));
     let address = server.local_addr();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let serving = tokio::spawn(server.serve(app, async move {
         let _ = shutdown_rx.await;
     }));
-    let (mut client, status) = handshake(address, None).await;
+    let (_, rejected) = handshake(address, Some("https://evil.example")).await;
+    assert_eq!(rejected, StatusCode::FORBIDDEN);
+    assert_eq!(context.active_sessions(), 0);
+
+    let (mut client, status) = handshake(address, Some("https://app.example")).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while context.active_sessions() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the upgraded WebSocket should register its active session");
     shutdown_tx.send(()).unwrap();
     let (opcode, _) = tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
@@ -377,6 +388,7 @@ async fn context_upgrade_uses_the_server_absolute_shutdown_deadline() {
         early_release.is_err(),
         "the per-policy 30 ms timeout must not replace the server deadline"
     );
+    assert_eq!(context.active_sessions(), 1);
     assert_eq!(policy.active_connections(), 1);
 
     send_masked_close(&mut client).await;
@@ -387,6 +399,96 @@ async fn context_upgrade_uses_the_server_absolute_shutdown_deadline() {
     })
     .await
     .unwrap();
+    assert_eq!(context.active_sessions(), 0);
+    assert!(serving.await.unwrap().unwrap().graceful);
+}
+
+async fn context_ws_upgrade(
+    State((policy, context)): State<(WsUpgradePolicy, qubit_web::ServerContext)>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    policy.on_upgrade_with_context(ws, &headers, context, |mut session| async move {
+        let _ = session.recv().await;
+    })
+}
+
+async fn token_ws_upgrade(
+    State((policy, context)): State<(WsUpgradePolicy, qubit_web::ServerContext)>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    policy.on_upgrade(ws, &headers, context.cancellation_token(), |mut session| async move {
+        let _ = session.recv().await;
+    })
+}
+
+#[tokio::test]
+async fn token_upgrade_does_not_register_an_active_server_session() {
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new();
+    let app = Router::new()
+        .route("/token", get(token_ws_upgrade))
+        .with_state((policy, context.clone()));
+    let address = server.local_addr();
+    let serving = tokio::spawn(server.serve(app, std::future::pending::<()>()));
+
+    let (mut client, status) = handshake_path(address, "/token", None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(context.active_sessions(), 0);
+    send_masked_close(&mut client).await;
+    tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
+        .await
+        .unwrap();
+    assert_eq!(context.active_sessions(), 0);
+    serving.abort();
+}
+
+#[tokio::test]
+async fn context_session_is_released_after_shutdown_deadline_without_peer_ack() {
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap())
+            .with_shutdown_timeout(Duration::from_millis(100)),
+    )
+    .await
+    .unwrap();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new().max_connections(1);
+    let app = Router::new()
+        .route("/ws", get(context_ws_upgrade))
+        .with_state((policy.clone(), context.clone()));
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let serving = tokio::spawn(server.serve(app, async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while context.active_sessions() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the upgraded WebSocket should register its active session");
+
+    shutdown_tx.send(()).unwrap();
+    let (opcode, _) = tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
+        .await
+        .unwrap();
+    assert_eq!(opcode, 8);
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while context.active_sessions() != 0 || policy.active_connections() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shutdown deadline should release the context session without peer ack");
     assert!(serving.await.unwrap().unwrap().graceful);
 }
 
