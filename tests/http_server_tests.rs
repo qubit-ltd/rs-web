@@ -5,39 +5,46 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
 use axum::Router;
 use axum::body::Body;
 use axum::http::Request;
 use axum::http::header;
 use axum::routing::get;
-use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
 use qubit_web::ServerOptions;
 use qubit_web::WebServer;
+use qubit_web::WebServerError;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tokio::spawn;
 use tokio::sync::Notify;
+use tokio::sync::oneshot;
+use tokio::test as tokio_test;
+use tokio::time;
 use tower::ServiceExt;
 
-#[tokio::test]
-async fn binds_ephemeral_http_and_serves_router_with_native_404() {
+#[tokio_test]
+async fn test_binds_ephemeral_http_and_serves_router_with_native_404() {
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
         .unwrap();
     assert_ne!(server.local_addr().port(), 0);
 
     let addr = server.local_addr();
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let task = tokio::spawn(
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let task = spawn(
         server.serve(Router::new().route("/health", get(|| async { "ok" })), async move {
             let _ = shutdown_rx.await;
         }),
     );
 
-    async fn request(addr: std::net::SocketAddr, path: &str) -> String {
+    async fn request(addr: SocketAddr, path: &str) -> String {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         stream
             .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes())
@@ -60,31 +67,28 @@ async fn binds_ephemeral_http_and_serves_router_with_native_404() {
     assert!(TcpStream::connect(addr).await.is_err());
 }
 
-#[tokio::test]
-async fn rejects_invalid_options_and_reports_socket_conflicts() {
-    let invalid = ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(std::time::Duration::ZERO);
-    assert_eq!(invalid.validate(), Err(qubit_web::WebServerError::InvalidConfig));
+#[tokio_test]
+async fn test_rejects_invalid_options_and_reports_socket_conflicts() {
+    let invalid = ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::ZERO);
+    assert_eq!(invalid.validate(), Err(WebServerError::InvalidConfig));
     let invalid_header_timeout =
-        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_request_header_timeout(std::time::Duration::ZERO);
-    assert_eq!(
-        invalid_header_timeout.validate(),
-        Err(qubit_web::WebServerError::InvalidConfig)
-    );
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_request_header_timeout(Duration::ZERO);
+    assert_eq!(invalid_header_timeout.validate(), Err(WebServerError::InvalidConfig));
 
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
         .unwrap();
     let conflict = WebServer::bind_http(ServerOptions::new(server.local_addr())).await;
-    assert_eq!(conflict.unwrap_err(), qubit_web::WebServerError::BindFailed);
+    assert_eq!(conflict.unwrap_err(), WebServerError::BindFailed);
 }
 
-#[tokio::test]
-async fn transport_connection_limit_defaults_rejects_zero_and_gates_tcp_accepts() {
+#[tokio_test]
+async fn test_transport_connection_limit_defaults_rejects_zero_and_gates_tcp_accepts() {
     let defaults = ServerOptions::new("127.0.0.1:0".parse().unwrap());
     assert_eq!(defaults.max_transport_connections(), 1024);
     assert!(matches!(
         defaults.clone().with_max_transport_connections(0),
-        Err(qubit_web::WebServerError::InvalidConfig)
+        Err(WebServerError::InvalidConfig)
     ));
     let options = defaults.with_max_transport_connections(1).unwrap();
     let server = WebServer::bind_http(options).await.unwrap();
@@ -123,8 +127,8 @@ async fn transport_connection_limit_defaults_rejects_zero_and_gates_tcp_accepts(
                 }
             }),
         );
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let task = tokio::spawn(server.serve(app, async move {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let task = spawn(server.serve(app, async move {
         let _ = shutdown_rx.await;
     }));
 
@@ -143,7 +147,7 @@ async fn transport_connection_limit_defaults_rejects_zero_and_gates_tcp_accepts(
         .unwrap();
     let mut response = Vec::new();
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), second.read_to_end(&mut response))
+        time::timeout(Duration::from_millis(100), second.read_to_end(&mut response))
             .await
             .is_err(),
         "the second request must wait while the first transport owns the permit"
@@ -152,12 +156,12 @@ async fn transport_connection_limit_defaults_rejects_zero_and_gates_tcp_accepts(
 
     release_first_handler.notify_one();
     let mut first_response = Vec::new();
-    tokio::time::timeout(Duration::from_secs(2), first.read_to_end(&mut first_response))
+    time::timeout(Duration::from_secs(2), first.read_to_end(&mut first_response))
         .await
         .expect("first request should finish after its handler is released")
         .unwrap();
     assert!(String::from_utf8_lossy(&first_response).ends_with("released"));
-    tokio::time::timeout(Duration::from_secs(2), second.read_to_end(&mut response))
+    time::timeout(Duration::from_secs(2), second.read_to_end(&mut response))
         .await
         .expect("second connection should proceed after the permit is released")
         .unwrap();
@@ -168,8 +172,8 @@ async fn transport_connection_limit_defaults_rejects_zero_and_gates_tcp_accepts(
     assert!(task.await.unwrap().unwrap().graceful);
 }
 
-#[tokio::test]
-async fn transport_limit_releases_after_an_incomplete_header_times_out() {
+#[tokio_test]
+async fn test_transport_limit_releases_after_an_incomplete_header_times_out() {
     let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
         .with_request_header_timeout(Duration::from_millis(100))
         .with_max_transport_connections(1)
@@ -196,8 +200,8 @@ async fn transport_limit_releases_after_an_incomplete_header_times_out() {
             }
         }),
     );
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let task = tokio::spawn(server.serve(app, async move {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let task = spawn(server.serve(app, async move {
         let _ = shutdown_rx.await;
     }));
 
@@ -214,20 +218,20 @@ async fn transport_limit_releases_after_an_incomplete_header_times_out() {
 
     let mut byte = [0; 1];
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), first.read(&mut byte))
+        time::timeout(Duration::from_secs(2), first.read(&mut byte))
             .await
             .expect("the first connection must reach its request-header timeout")
             .unwrap(),
         0
     );
-    tokio::time::timeout(Duration::from_secs(2), second_handler_entered.notified())
+    time::timeout(Duration::from_secs(2), second_handler_entered.notified())
         .await
         .expect("second handler should run after the first transport times out");
     assert_eq!(second_handler_calls.load(Ordering::SeqCst), 1);
     release_second_handler.notify_one();
     let mut response = String::new();
-    tokio::time::timeout(Duration::from_secs(2), second.read_to_string(&mut response))
-    .await
+    time::timeout(Duration::from_secs(2), second.read_to_string(&mut response))
+        .await
         .expect("second request should finish after its handler is released")
         .unwrap();
     assert!(response.starts_with("HTTP/1.1 200"), "unexpected response: {response}");
@@ -237,8 +241,8 @@ async fn transport_limit_releases_after_an_incomplete_header_times_out() {
     assert!(task.await.unwrap().unwrap().graceful);
 }
 
-#[tokio::test]
-async fn cross_origin_preflight_is_not_allowed_by_default() {
+#[tokio_test]
+async fn test_cross_origin_preflight_is_not_allowed_by_default() {
     let app = Router::new().route("/health", get(|| async { "ok" }));
     let response = app
         .oneshot(
@@ -256,17 +260,16 @@ async fn cross_origin_preflight_is_not_allowed_by_default() {
     assert!(!response.headers().contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
 }
 
-#[tokio::test]
-async fn closes_a_connection_that_does_not_finish_request_headers() {
+#[tokio_test]
+async fn test_closes_a_connection_that_does_not_finish_request_headers() {
     let server = WebServer::bind_http(
-        ServerOptions::new("127.0.0.1:0".parse().unwrap())
-            .with_request_header_timeout(std::time::Duration::from_millis(10)),
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_request_header_timeout(Duration::from_millis(10)),
     )
     .await
     .unwrap();
     let addr = server.local_addr();
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let task = tokio::spawn(
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let task = spawn(
         server.serve(Router::new().route("/", get(|| async { "ok" })), async move {
             let _ = shutdown_rx.await;
         }),
@@ -279,7 +282,7 @@ async fn closes_a_connection_that_does_not_finish_request_headers() {
         .unwrap();
     let mut byte = [0; 1];
     assert_eq!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), stream.read(&mut byte))
+        time::timeout(Duration::from_secs(1), stream.read(&mut byte))
             .await
             .expect("header timeout should close the connection promptly")
             .unwrap(),

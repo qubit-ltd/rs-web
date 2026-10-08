@@ -8,13 +8,21 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::future::Future;
+use std::future::poll_fn;
+use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
 
 use axum::Router;
+use axum::body::Body;
+use axum::body::to_bytes;
+use axum::http::StatusCode;
+use axum::http::header;
 use axum::response::IntoResponse;
 use axum::response::sse::Event;
 use axum::routing::get;
@@ -30,7 +38,12 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
+use tokio::spawn;
 use tokio::sync::oneshot;
+use tokio::task::yield_now;
+use tokio::test as tokio_test;
+use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 struct EventStream(VecDeque<Result<Event, Infallible>>);
 
@@ -58,7 +71,7 @@ struct ShutdownEvents {
 }
 
 impl ShutdownEvents {
-    fn new(cancellation: tokio_util::sync::CancellationToken) -> Self {
+    fn new(cancellation: CancellationToken) -> Self {
         let cancelled = Box::pin(cancellation.clone().cancelled_owned());
         Self {
             cancelled,
@@ -83,7 +96,7 @@ impl Stream for ShutdownEvents {
     }
 }
 
-async fn raw_request(addr: std::net::SocketAddr, path: &str) -> String {
+async fn raw_request(addr: SocketAddr, path: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.expect("connect to test server");
     stream
         .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes())
@@ -94,7 +107,7 @@ async fn raw_request(addr: std::net::SocketAddr, path: &str) -> String {
     response
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_sse_stream_delivers_events_and_releases_its_slot() {
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
@@ -120,7 +133,7 @@ async fn test_sse_stream_delivers_events_and_releases_its_slot() {
     );
     let addr = server.local_addr();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let service = tokio::spawn(server.serve(app, async move {
+    let service = spawn(server.serve(app, async move {
         let _ = shutdown_rx.await;
     }));
 
@@ -141,8 +154,8 @@ async fn test_sse_stream_delivers_events_and_releases_its_slot() {
     assert!(service.await.unwrap().unwrap().graceful);
 }
 
-#[tokio::test]
-async fn sse_events_are_delivered_over_http2() {
+#[tokio_test]
+async fn test_sse_events_are_delivered_over_http2() {
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
         .unwrap();
@@ -167,23 +180,23 @@ async fn sse_events_are_delivered_over_http2() {
     );
     let address = server.local_addr();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let service = tokio::spawn(server.serve(app, async move {
+    let service = spawn(server.serve(app, async move {
         let _ = shutdown_rx.await;
     }));
 
     let mut builder = Client::builder(TokioExecutor::new());
     builder.http2_only(true);
-    let client = builder.build_http::<axum::body::Body>();
+    let client = builder.build_http::<Body>();
     let uri = format!("http://{address}/events").parse().unwrap();
-    let response = tokio::time::timeout(Duration::from_secs(2), client.get(uri))
+    let response = timeout(Duration::from_secs(2), client.get(uri))
         .await
         .expect("HTTP/2 request should complete")
         .expect("HTTP/2 response should be valid");
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body();
     let mut payload = Vec::new();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while let Some(frame) = std::future::poll_fn(|context| Pin::new(&mut body).poll_frame(context)).await {
+    timeout(Duration::from_secs(2), async {
+        while let Some(frame) = poll_fn(|context| Pin::new(&mut body).poll_frame(context)).await {
             let frame = frame.expect("HTTP/2 SSE frame");
             if let Ok(data) = frame.into_data() {
                 payload.extend_from_slice(&data);
@@ -201,8 +214,8 @@ async fn sse_events_are_delivered_over_http2() {
     assert!(service.await.unwrap().unwrap().graceful);
 }
 
-#[tokio::test]
-async fn sse_capacity_rejection_is_a_stable_503_problem_response() {
+#[tokio_test]
+async fn test_sse_capacity_rejection_is_a_stable_503_problem_response() {
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
         .unwrap();
@@ -214,19 +227,16 @@ async fn sse_capacity_rejection_is_a_stable_503_problem_response() {
         Err(error) => error,
     };
     let response = error.into_response();
-    assert_eq!(response.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        response.headers()[axum::http::header::CONTENT_TYPE],
-        "application/problem+json"
-    );
-    let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/problem+json");
+    let body = to_bytes(response.into_body(), 1024).await.unwrap();
     let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(body.contains("\"type\":\"about:blank\""), "{body}");
     assert!(body.contains("\"title\":\"Service Unavailable\""), "{body}");
     assert!(body.contains("\"code\":\"capacity_exceeded\""), "{body}");
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_sse_disconnect_cancels_producer_and_does_not_block_short_requests() {
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
@@ -238,7 +248,7 @@ async fn test_sse_disconnect_cancels_producer_and_does_not_block_short_requests(
     let handler_policy = policy.clone();
     let handler_context = context.clone();
     let (producer_stopped_tx, producer_stopped_rx) = oneshot::channel();
-    let producer_stopped_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(producer_stopped_tx)));
+    let producer_stopped_tx = Arc::new(Mutex::new(Some(producer_stopped_tx)));
     let producer_signal = producer_stopped_tx.clone();
     let app = Router::new()
         .route(
@@ -253,7 +263,7 @@ async fn test_sse_disconnect_cancels_producer_and_does_not_block_short_requests(
                         Err(error) => return error.into_response(),
                     };
                     let cancellation = connection.cancellation_token();
-                    tokio::spawn(async move {
+                    spawn(async move {
                         cancellation.cancelled().await;
                         if let Some(signal) = producer_signal.lock().unwrap().take() {
                             let _ = signal.send(());
@@ -266,7 +276,7 @@ async fn test_sse_disconnect_cancels_producer_and_does_not_block_short_requests(
         .route("/health", get(|| async { "ok" }));
     let addr = server.local_addr();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let service = tokio::spawn(server.serve(app, async move {
+    let service = spawn(server.serve(app, async move {
         let _ = shutdown_rx.await;
     }));
 
@@ -287,7 +297,7 @@ async fn test_sse_disconnect_cancels_producer_and_does_not_block_short_requests(
         }
     }
     let mut wire = Vec::new();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    timeout(Duration::from_secs(1), async {
         let mut chunk = [0_u8; 128];
         while !String::from_utf8_lossy(&wire).contains(": keep-alive\n\n") {
             let count = client.read(&mut chunk).await.unwrap();
@@ -299,9 +309,9 @@ async fn test_sse_disconnect_cancels_producer_and_does_not_block_short_requests(
     .expect("SSE keep-alive comment arrives promptly");
     let wire = String::from_utf8_lossy(&wire);
     assert!(!wire.contains("id:"), "keep-alive must not advance event IDs: {wire}");
-    tokio::time::timeout(Duration::from_secs(1), async {
+    timeout(Duration::from_secs(1), async {
         while policy.active_connections() != 1 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
@@ -313,7 +323,7 @@ async fn test_sse_disconnect_cancels_producer_and_does_not_block_short_requests(
     assert!(rejected.starts_with("HTTP/1.1 503"), "{rejected}");
 
     drop(client);
-    tokio::time::timeout(Duration::from_secs(1), producer_stopped_rx)
+    timeout(Duration::from_secs(1), producer_stopped_rx)
         .await
         .expect("producer observes client disconnect")
         .expect("producer signal is sent");
@@ -324,7 +334,7 @@ async fn test_sse_disconnect_cancels_producer_and_does_not_block_short_requests(
     assert!(service.await.unwrap().unwrap().graceful);
 }
 
-#[tokio::test]
+#[tokio_test]
 async fn test_sse_source_can_send_a_final_event_after_server_shutdown() {
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
@@ -348,14 +358,14 @@ async fn test_sse_source_can_send_a_final_event_after_server_shutdown() {
     let addr = server.local_addr();
     let shutdown_token = context.cancellation_token();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let service = tokio::spawn(server.serve(app, async move {
+    let service = spawn(server.serve(app, async move {
         let _ = shutdown_rx.await;
     }));
-    let client = tokio::spawn(raw_request(addr, "/events"));
+    let client = spawn(raw_request(addr, "/events"));
 
-    tokio::time::timeout(Duration::from_secs(1), async {
+    timeout(Duration::from_secs(1), async {
         while policy.active_connections() != 1 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
@@ -363,7 +373,7 @@ async fn test_sse_source_can_send_a_final_event_after_server_shutdown() {
     shutdown_tx.send(()).unwrap();
     shutdown_token.cancelled().await;
 
-    let response = tokio::time::timeout(Duration::from_secs(1), client)
+    let response = timeout(Duration::from_secs(1), client)
         .await
         .expect("SSE source finishes during graceful shutdown")
         .unwrap();

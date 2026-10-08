@@ -22,28 +22,79 @@ use axum::middleware;
 use axum::middleware::Next;
 use axum::response::Response;
 
+/// Opaque connection identifier attached to a request while serving it.
 #[derive(Clone, Copy)]
-pub(crate) struct ConnectionId(pub(crate) u64);
+pub(crate) struct ConnectionId(
+    /// Numeric value propagated through request extensions.
+    pub(crate) u64,
+);
 
+/// Boxed, sendable future returned by diagnostic middleware.
 #[doc(hidden)]
 pub type DiagnosticFuture = Pin<Box<dyn Future<Output = Response> + Send>>;
+/// Function signature accepted by Axum's diagnostic `from_fn` layer.
 #[doc(hidden)]
 pub type DiagnosticMiddleware = fn(Request<axum::body::Body>, Next) -> DiagnosticFuture;
 
 /// A safe diagnostic record containing only route-level request metadata.
+///
+/// # Examples
+///
+/// ```
+/// use axum::http::Method;
+/// use qubit_web::diagnostic::RequestDiagnostic;
+/// use std::time::Duration;
+///
+/// let diagnostic = RequestDiagnostic::new(
+///     Method::GET,
+///     "/health",
+///     200,
+///     Duration::from_millis(3),
+///     "connection-7",
+///     Some(12),
+/// ).unwrap();
+/// assert!(diagnostic.to_string().contains("route=/health"));
+/// ```
+#[must_use]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestDiagnostic {
+    /// HTTP method observed on the request.
     method: Method,
+    /// Matched route template, without query or fragment data.
     route_template: String,
+    /// Response status code returned by the handler.
     status: u16,
+    /// Elapsed handler time measured by the middleware.
     elapsed: Duration,
+    /// Safe identifier used to correlate this request with a connection.
     connection_id: String,
+    /// Declared request content length, when it was a valid integer.
     bytes: Option<u64>,
 }
 
 impl RequestDiagnostic {
-    /// Builds a diagnostic record, rejecting values that are not route
-    /// templates.
+    /// Builds a record after validating the route, connection ID, and status.
+    ///
+    /// Request content and credentials are not accepted as inputs, preventing
+    /// them from being retained in diagnostic output.
+    ///
+    /// # Parameters
+    ///
+    /// - `method`: HTTP method observed on the request.
+    /// - `route_template`: normalized route template, without query/fragment.
+    /// - `status`: HTTP response status in the range 100 through 599.
+    /// - `elapsed`: time spent handling the request.
+    /// - `connection_id`: correlation identifier without control characters.
+    /// - `bytes`: optional declared request content length.
+    ///
+    /// # Returns
+    ///
+    /// A safe diagnostic record containing only the supplied route metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns a static reason if the route is not normalized, the connection
+    /// ID contains control characters, or the status is outside the HTTP range.
     pub fn new(
         method: Method,
         route_template: impl Into<String>,
@@ -81,6 +132,7 @@ impl RequestDiagnostic {
 }
 
 impl fmt::Display for RequestDiagnostic {
+    /// Formats the allowlisted metadata as a single log-safe line.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -100,18 +152,47 @@ impl fmt::Display for RequestDiagnostic {
 
 /// Creates default tracing diagnostics for an explicitly selected router
 /// branch.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_web::diagnostic::DiagnosticLayer;
+///
+/// let _layer = DiagnosticLayer::new::<()>();
+/// ```
+#[must_use]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DiagnosticLayer;
 
 impl DiagnosticLayer {
     /// Creates a layer that emits only method, matched route template, status,
     /// elapsed time, connection ID, and declared request size.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `S`: router state type required by Axum's middleware layer.
+    ///
+    /// # Returns
+    ///
+    /// An Axum layer that records safe request metadata after the handler runs.
     #[allow(clippy::new_ret_no_self)]
     pub fn new<S>() -> middleware::FromFnLayer<DiagnosticMiddleware, (), S> {
         middleware::from_fn::<_, S>(record_request as DiagnosticMiddleware)
     }
 }
 
+/// Records one request's allowlisted metadata after calling the next handler.
+///
+/// # Parameters
+///
+/// - `request`: incoming request whose route, method, ID, and content length
+///   are inspected.
+/// - `next`: Axum continuation that produces the response.
+///
+/// # Returns
+///
+/// A future that runs the continuation, emits a safe diagnostic when valid,
+/// and yields the original response.
 fn record_request(request: Request<axum::body::Body>, next: Next) -> DiagnosticFuture {
     Box::pin(async move {
         let method = request.method().clone();

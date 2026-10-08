@@ -40,8 +40,12 @@ use qubit_web::WsUpgradePolicy;
 use qubit_web::json_response;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::main as tokio_main;
+use tokio::select;
+use tokio::spawn;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::time::sleep;
 
 #[derive(Clone)]
 struct AppState {
@@ -92,16 +96,16 @@ async fn progress(State(state): State<AppState>) -> Response {
     };
     let cancellation = connection.cancellation_token();
     let (sender, receiver) = mpsc::channel(4);
-    tokio::spawn(async move {
+    spawn(async move {
         for event in ["queued", "working", "complete"] {
-            tokio::select! {
+            select! {
                 biased;
                 _ = cancellation.cancelled() => break,
                 result = sender.send(Event::default().event("progress").data(event)) => {
                     if result.is_err() { break; }
                 }
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            sleep(Duration::from_millis(500)).await;
         }
     });
     connection.into_sse(EventReceiver(receiver)).into_response()
@@ -139,10 +143,9 @@ async fn shutdown(State(state): State<AppState>) -> StatusCode {
     }
 }
 
-#[tokio::main]
+#[tokio_main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let options = ServerOptions::new("127.0.0.1:3001".parse::<SocketAddr>()?)
-        .with_max_transport_connections(128)?;
+    let options = ServerOptions::new("127.0.0.1:3001".parse::<SocketAddr>()?).with_max_transport_connections(128)?;
     let http_limits = HttpLimits::default();
     let server = WebServer::bind_http(options.clone()).await?;
     let context = server.context();
@@ -166,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "listening on http://{}; POST /admin/shutdown to stop",
         server.local_addr()
     );
-    server
+    let _ = server
         .serve(app, async move {
             let _ = shutdown_rx.await;
         })

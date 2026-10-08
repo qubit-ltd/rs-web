@@ -8,6 +8,16 @@
 use std::fmt;
 
 /// A startup or runtime error that does not expose request or credential data.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_web::WebServerError;
+///
+/// let error = WebServerError::BindFailed;
+/// assert_eq!(error.code(), "bind_failed");
+/// ```
+#[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WebServerError {
     /// Server options are invalid.
@@ -22,6 +32,12 @@ pub enum WebServerError {
 
 impl WebServerError {
     /// Returns the stable machine-readable error code.
+    ///
+    /// # Returns
+    ///
+    /// A lowercase code that is stable across display wording changes.
+    #[must_use]
+    #[inline]
     pub const fn code(self) -> &'static str {
         match self {
             Self::InvalidConfig => "invalid_config",
@@ -33,6 +49,7 @@ impl WebServerError {
 }
 
 impl fmt::Display for WebServerError {
+    /// Formats a value-safe human-readable error message.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::InvalidConfig => "invalid server configuration",

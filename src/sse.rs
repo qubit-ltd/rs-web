@@ -7,6 +7,7 @@
 // =============================================================================
 //! Server-sent event connection limits, keep-alive, and cancellation.
 
+use std::error::Error;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -17,13 +18,17 @@ use std::task::Poll;
 use std::time::Duration;
 
 use axum::response::IntoResponse;
+use axum::response::Response;
 use axum::response::sse::Event;
 use axum::response::sse::KeepAlive;
 use axum::response::sse::Sse;
 use futures_core::Stream;
+use tokio_util::sync::CancellationToken;
 
 use crate::ServerContext;
 use crate::SessionGuard;
+use crate::WebServerError;
+use crate::limit::WebRejection;
 
 const DEFAULT_MAX_CONNECTIONS: usize = 128;
 const DEFAULT_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -33,10 +38,25 @@ const DEFAULT_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// Event IDs, `Last-Event-ID`, replay, and application event buffering remain
 /// application responsibilities. A successful write only means that the
 /// transport accepted the data; it does not prove that the client consumed it.
+///
+/// # Examples
+///
+/// ```
+/// use std::num::NonZeroUsize;
+///
+/// use qubit_web::SseConnectionPolicy;
+///
+/// let policy = SseConnectionPolicy::new(NonZeroUsize::new(32).expect("positive limit"));
+/// assert_eq!(policy.active_connections(), 0);
+/// ```
 #[derive(Clone, Debug)]
+#[must_use]
 pub struct SseConnectionPolicy {
+    /// Maximum number of simultaneous SSE connections admitted by this policy.
     max_connections: NonZeroUsize,
+    /// Delay between comment frames used to keep an idle connection open.
     keep_alive_interval: Duration,
+    /// Shared count of active connections reserved through this policy.
     active_connections: Arc<AtomicUsize>,
 }
 
@@ -53,6 +73,14 @@ impl Default for SseConnectionPolicy {
 
 impl SseConnectionPolicy {
     /// Creates a policy with the given maximum number of concurrent streams.
+    ///
+    /// # Parameters
+    ///
+    /// * `max_connections` - Positive simultaneous connection capacity.
+    ///
+    /// # Returns
+    ///
+    /// A policy with the default keep-alive interval and no active streams.
     pub fn new(max_connections: NonZeroUsize) -> Self {
         Self {
             max_connections,
@@ -60,20 +88,39 @@ impl SseConnectionPolicy {
         }
     }
 
+    /// Returns the number of currently active SSE responses.
+    ///
+    /// # Returns
+    ///
+    /// The number of connection reservations not yet released.
+    #[must_use]
+    #[inline]
+    pub fn active_connections(&self) -> usize {
+        self.active_connections.load(Ordering::Acquire)
+    }
+
     /// Sets the interval between SSE keep-alive comment frames.
     ///
     /// A zero interval is rejected to prevent a busy loop.
-    pub fn with_keep_alive_interval(mut self, interval: Duration) -> Result<Self, crate::WebServerError> {
+    ///
+    /// # Parameters
+    ///
+    /// * `interval` - Positive delay between keep-alive comment frames.
+    ///
+    /// # Returns
+    ///
+    /// The updated policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WebServerError::InvalidConfig`] if the interval is
+    /// zero.
+    pub fn with_keep_alive_interval(mut self, interval: Duration) -> Result<Self, WebServerError> {
         if interval.is_zero() {
-            return Err(crate::WebServerError::InvalidConfig);
+            return Err(WebServerError::InvalidConfig);
         }
         self.keep_alive_interval = interval;
         Ok(self)
-    }
-
-    /// Returns the number of currently active SSE responses.
-    pub fn active_connections(&self) -> usize {
-        self.active_connections.load(Ordering::Acquire)
     }
 
     /// Reserves an SSE connection and returns its event-source cancellation
@@ -82,6 +129,19 @@ impl SseConnectionPolicy {
     /// Call this before starting the event producer. Pass the returned token to
     /// producer tasks so they can stop on client disconnect or server shutdown.
     /// A full connection budget is rejected immediately with HTTP 503.
+    ///
+    /// # Parameters
+    ///
+    /// * `context` - Server lifecycle state used for cancellation and session
+    ///   accounting.
+    ///
+    /// # Returns
+    ///
+    /// A reserved connection with a cancellation token for the event producer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SseCapacityExceeded`] when the configured capacity is full.
     pub fn begin(&self, context: &ServerContext) -> Result<SseConnection, SseCapacityExceeded> {
         let mut active = self.active_connections.load(Ordering::Acquire);
         loop {
@@ -112,26 +172,68 @@ impl SseConnectionPolicy {
 
 /// Returned when the configured number of simultaneous SSE streams is already
 /// active.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_web::sse::SseCapacityExceeded;
+///
+/// let error = SseCapacityExceeded;
+/// assert_eq!(format!("{error:?}"), "SseCapacityExceeded");
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
 pub struct SseCapacityExceeded;
 
 impl IntoResponse for SseCapacityExceeded {
-    fn into_response(self) -> axum::response::Response {
-        crate::limit::WebRejection::CapacityExceeded.into_response()
+    fn into_response(self) -> Response {
+        WebRejection::CapacityExceeded.into_response()
     }
 }
 
 /// A reserved SSE slot that owns producer cancellation until its response ends.
+///
+/// # Examples
+///
+/// ```
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), qubit_web::WebServerError> {
+/// use std::num::NonZeroUsize;
+///
+/// use qubit_web::sse::SseConnectionPolicy;
+/// use qubit_web::ServerOptions;
+/// use qubit_web::WebServer;
+///
+/// let server = WebServer::bind_http(ServerOptions::new(
+///     "127.0.0.1:0".parse().expect("socket address"),
+/// )).await?;
+/// let connection = SseConnectionPolicy::new(NonZeroUsize::new(8).expect("positive limit"))
+///     .begin(&server.context())
+///     .expect("available connection slot");
+/// let _cancellation = connection.cancellation_token();
+/// # Ok(())
+/// # }
+/// ```
+#[must_use]
 pub struct SseConnection {
+    /// Keep-alive interval retained until the response stream is constructed.
     keep_alive_interval: Duration,
+    /// Guard that releases the policy slot after the response ends or drops.
     guard: Option<SseConnectionGuard>,
-    cancellation: tokio_util::sync::CancellationToken,
+    /// Token cancelled on stream completion, disconnect, or server shutdown.
+    cancellation: CancellationToken,
 }
 
 impl SseConnection {
     /// Returns the token the event source should observe for
     /// disconnect/shutdown.
-    pub fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
+    ///
+    /// # Returns
+    ///
+    /// A clone that producer tasks can await independently.
+    #[must_use]
+    #[inline]
+    pub fn cancellation_token(&self) -> CancellationToken {
         self.cancellation.clone()
     }
 
@@ -142,10 +244,31 @@ impl SseConnection {
     /// the server context begins shutdown. On shutdown, the source may emit a
     /// final event before ending; the server's shutdown deadline bounds sources
     /// that do not finish. Keep-alive frames are comments without event IDs.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `S` - Sendable event stream with a static lifetime.
+    /// * `E` - Stream error convertible to a boxed sendable standard error.
+    ///
+    /// # Parameters
+    ///
+    /// * `stream` - Application event source wrapped with session lifetime
+    ///   tracking.
+    ///
+    /// # Returns
+    ///
+    /// An Axum response that emits keep-alive comments and releases the slot
+    /// when done.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal reservation guard was already moved out,
+    /// which cannot occur through the public API.
+    #[must_use]
     pub fn into_sse<S, E>(mut self, stream: S) -> impl IntoResponse
     where
         S: Stream<Item = Result<Event, E>> + Send + 'static,
-        E: Into<Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
+        E: Into<Box<dyn Error + Send + Sync>> + Send + 'static,
     {
         let guard = self.guard.take().expect("SSE connection guard is present");
         Sse::new(SessionStream::new(stream, guard))
@@ -153,10 +276,14 @@ impl SseConnection {
     }
 }
 
+/// Owns the counters and cancellation state for one admitted SSE response.
 struct SseConnectionGuard {
+    /// Shared policy connection count decremented on drop.
     active_connections: Arc<AtomicUsize>,
+    /// Server session count guard released when this reservation ends.
     session: Option<SessionGuard>,
-    cancellation: tokio_util::sync::CancellationToken,
+    /// Producer token cancelled after the response stream ends or drops.
+    cancellation: CancellationToken,
 }
 
 impl Drop for SseConnectionGuard {
@@ -167,12 +294,27 @@ impl Drop for SseConnectionGuard {
     }
 }
 
+/// Pins the application stream and retains its reservation for the response
+/// lifetime.
 struct SessionStream<S> {
+    /// Pinned source polled by Axum's SSE body.
     stream: Pin<Box<S>>,
+    /// Reservation released when the source completes or the response is
+    /// dropped.
     guard: Option<SseConnectionGuard>,
 }
 
 impl<S> SessionStream<S> {
+    /// Pins a source and attaches its lifecycle guard.
+    ///
+    /// # Parameters
+    ///
+    /// * `stream` - Application event stream to poll.
+    /// * `guard` - Reservation retained until stream completion or drop.
+    ///
+    /// # Returns
+    ///
+    /// A pinned stream wrapper that owns the reservation.
     fn new(stream: S, guard: SseConnectionGuard) -> Self {
         Self {
             stream: Box::pin(stream),

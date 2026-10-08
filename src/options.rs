@@ -24,16 +24,30 @@ use crate::WebServerError;
 /// assert_eq!(options.max_transport_connections(), 256);
 /// ```
 #[derive(Clone, Debug)]
+#[must_use]
 pub struct ServerOptions {
+    /// Socket address where the server accepts connections.
     pub(crate) addr: SocketAddr,
+    /// Maximum duration allowed for graceful server shutdown.
     pub(crate) shutdown_timeout: Duration,
+    /// Maximum duration allowed to receive an HTTP request header block.
     pub(crate) request_header_timeout: Duration,
-    /// Positive per-server cap covering TLS handshakes and HTTP connection futures.
+    /// Positive per-server cap covering TLS handshakes and HTTP connection
+    /// futures.
     pub(crate) max_transport_connections: NonZeroUsize,
 }
 
 impl ServerOptions {
     /// Creates server options for the explicit listening address.
+    ///
+    /// # Parameters
+    ///
+    /// * `addr` - Socket address on which the server will listen.
+    ///
+    /// # Returns
+    ///
+    /// Options with the supplied address and default timeouts and connection
+    /// cap.
     pub fn new(addr: SocketAddr) -> Self {
         Self {
             addr,
@@ -43,7 +57,45 @@ impl ServerOptions {
         }
     }
 
+    /// Returns the configured listening address.
+    #[must_use]
+    #[inline]
+    pub const fn address(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Returns the graceful shutdown deadline.
+    #[must_use]
+    #[inline]
+    pub const fn shutdown_timeout(&self) -> Duration {
+        self.shutdown_timeout
+    }
+
+    /// Returns the maximum time allowed to receive request headers.
+    #[must_use]
+    #[inline]
+    pub const fn request_header_timeout(&self) -> Duration {
+        self.request_header_timeout
+    }
+
+    /// Returns the maximum number of transport connections for this server
+    /// instance.
+    #[must_use]
+    #[inline]
+    pub const fn max_transport_connections(&self) -> usize {
+        self.max_transport_connections.get()
+    }
+
     /// Sets the maximum time allowed for graceful shutdown.
+    ///
+    /// # Parameters
+    ///
+    /// * `timeout` - Graceful shutdown deadline; zero is rejected during
+    ///   validation.
+    ///
+    /// # Returns
+    ///
+    /// The updated options.
     pub fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = timeout;
         self
@@ -53,18 +105,37 @@ impl ServerOptions {
     ///
     /// The default is 10 seconds, which also bounds an HTTP/1 WebSocket
     /// upgrade request before Axum accepts the upgrade.
+    ///
+    /// # Parameters
+    ///
+    /// * `timeout` - Header receive deadline; zero is rejected during
+    ///   validation.
+    ///
+    /// # Returns
+    ///
+    /// The updated options.
     pub fn with_request_header_timeout(mut self, timeout: Duration) -> Self {
         self.request_header_timeout = timeout;
         self
     }
 
-    /// Sets the maximum number of accepted transport connections owned by this server instance.
+    /// Sets the maximum number of accepted transport connections owned by this
+    /// server instance.
     ///
-    /// The limit includes TLS handshakes and HTTP connection futures. It does not include
-    /// WebSocket sessions after Hyper completes an upgrade; those are governed by the
-    /// WebSocket policy. When the limit is full, the server stops accepting sockets and
-    /// clients may wait in the operating system backlog or fail to connect; no HTTP 503 is
+    /// The limit includes TLS handshakes and HTTP connection futures. It does
+    /// not include WebSocket sessions after Hyper completes an upgrade;
+    /// those are governed by the WebSocket policy. When the limit is full,
+    /// the server stops accepting sockets and clients may wait in the
+    /// operating system backlog or fail to connect; no HTTP 503 is
     /// generated.
+    ///
+    /// # Parameters
+    ///
+    /// * `limit` - Positive maximum number of accepted transport connections.
+    ///
+    /// # Returns
+    ///
+    /// The updated options.
     ///
     /// # Errors
     ///
@@ -74,27 +145,15 @@ impl ServerOptions {
         Ok(self)
     }
 
-    /// Returns the configured listening address.
-    pub const fn address(&self) -> SocketAddr {
-        self.addr
-    }
-
-    /// Returns the graceful shutdown deadline.
-    pub const fn shutdown_timeout(&self) -> Duration {
-        self.shutdown_timeout
-    }
-
-    /// Returns the maximum time allowed to receive request headers.
-    pub const fn request_header_timeout(&self) -> Duration {
-        self.request_header_timeout
-    }
-
-    /// Returns the maximum number of transport connections for this server instance.
-    pub const fn max_transport_connections(&self) -> usize {
-        self.max_transport_connections.get()
-    }
-
     /// Checks that all configured limits are finite and positive.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when all timeouts and connection limits are positive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WebServerError::InvalidConfig`] if either timeout is zero.
     pub fn validate(&self) -> Result<(), WebServerError> {
         if self.shutdown_timeout.is_zero() || self.request_header_timeout.is_zero() {
             return Err(WebServerError::InvalidConfig);

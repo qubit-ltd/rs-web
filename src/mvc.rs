@@ -18,36 +18,76 @@ use crate::limit::HttpLimits;
 use crate::limit::LimitState;
 
 /// One statically declared route produced by a Controller implementation.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_web::mvc::RouteMetadata;
+/// use qubit_web::RouteKind;
+///
+/// let route = RouteMetadata::new("GET", "/health", RouteKind::Short);
+/// assert_eq!(route.path(), "/health");
+/// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[must_use]
 pub struct RouteMetadata {
+    /// HTTP method used to identify conflicts and register the route.
     method: &'static str,
+    /// Normalized route template used by Axum.
     path: &'static str,
+    /// Whether the route is long-lived and exempt from short-request limits.
     kind: RouteKind,
 }
 
 impl RouteMetadata {
     /// Creates route metadata for generated Controller code.
+    ///
+    /// # Parameters
+    ///
+    /// * `method` - Static HTTP method name.
+    /// * `path` - Static normalized route template.
+    /// * `kind` - Classification controlling request-limit treatment.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use qubit_web::mvc::RouteMetadata;
+    /// use qubit_web::RouteKind;
+    ///
+    /// let route = RouteMetadata::new("GET", "/health", RouteKind::Short);
+    /// assert_eq!(route.method(), "GET");
+    /// ```
     pub const fn new(method: &'static str, path: &'static str, kind: RouteKind) -> Self {
         Self { method, path, kind }
     }
 
     /// Returns the HTTP method name.
+    #[must_use]
+    #[inline]
     pub const fn method(&self) -> &'static str {
         self.method
     }
 
     /// Returns the normalized route template.
+    #[must_use]
+    #[inline]
     pub const fn path(&self) -> &'static str {
         self.path
     }
 
     /// Returns the route's long-lived or short-request classification.
+    #[inline]
     pub const fn kind(&self) -> RouteKind {
         self.kind
     }
 }
 
 /// Internal contract implemented by `#[rest_controller]` expansions.
+///
+/// # Type Parameters
+///
+/// * `S` - Cloneable, thread-safe Axum router state shared by registered
+///   routes.
 #[doc(hidden)]
 pub trait ControllerDefinition<S>: Send + Sync + 'static
 where
@@ -61,19 +101,61 @@ where
 }
 
 /// Error returned when two Controllers declare the same method and template.
+///
+/// # Examples
+///
+/// A duplicate declaration is returned as a conflict:
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use axum::Router;
+/// use qubit_web::limit::LimitState;
+/// use qubit_web::mvc::{ControllerDefinition, ControllerRoutes, RouteMetadata};
+/// use qubit_web::RouteKind;
+///
+/// struct Health;
+///
+/// impl ControllerDefinition<()> for Health {
+///     fn route_metadata() -> &'static [RouteMetadata] {
+///         static ROUTES: [RouteMetadata; 1] = [
+///             RouteMetadata::new("GET", "/health", RouteKind::Short),
+///         ];
+///         &ROUTES
+///     }
+///
+///     fn register(self: Arc<Self>, router: Router<()>, _: LimitState) -> Router<()> {
+///         router
+///     }
+/// }
+///
+/// let routes = ControllerRoutes::new().add(Arc::new(Health)).unwrap();
+/// let conflict = match routes.add(Arc::new(Health)) {
+///     Err(conflict) => conflict,
+///     Ok(_) => panic!("duplicate route should be rejected"),
+/// };
+/// assert_eq!(conflict.method(), "GET");
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[must_use]
 pub struct ControllerRouteConflict {
+    /// HTTP method shared by the conflicting declarations.
     method: &'static str,
+    /// Route template shared by the conflicting declarations.
     path: &'static str,
 }
 
 impl ControllerRouteConflict {
     /// Returns the duplicated method.
+    #[must_use]
+    #[inline]
     pub const fn method(&self) -> &'static str {
         self.method
     }
 
     /// Returns the duplicated route template.
+    #[must_use]
+    #[inline]
     pub const fn path(&self) -> &'static str {
         self.path
     }
@@ -88,9 +170,28 @@ impl fmt::Display for ControllerRouteConflict {
 impl std::error::Error for ControllerRouteConflict {}
 
 /// Builds an Axum router from explicitly supplied Controller instances.
+///
+/// # Type Parameters
+///
+/// * `S` - Cloneable, thread-safe application state required by the router.
+///
+/// # Examples
+///
+/// An empty router can be assembled without declaring any controllers:
+///
+/// ```
+/// use qubit_web::mvc::ControllerRoutes;
+///
+/// let router = ControllerRoutes::<()>::new().finish().unwrap();
+/// let _ = router;
+/// ```
+#[must_use]
 pub struct ControllerRoutes<S = ()> {
+    /// Axum router accumulated during assembly.
     router: Router<S>,
+    /// Method/template pairs already declared by added controllers.
     declared: HashSet<(&'static str, &'static str)>,
+    /// Shared limits passed to each registered controller.
     limit_state: LimitState,
 }
 
@@ -108,6 +209,15 @@ where
     S: Clone + Send + Sync + 'static,
 {
     /// Creates an empty Controller router.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use qubit_web::mvc::ControllerRoutes;
+    ///
+    /// let router = ControllerRoutes::<()>::new().finish().unwrap();
+    /// let _ = router;
+    /// ```
     pub fn new() -> Self {
         Self {
             router: Router::new(),
@@ -122,12 +232,38 @@ where
     /// SSE and WebSocket routes keep the same diagnostics but skip the
     /// short-request body, concurrency, and deadline limits. Configure this
     /// before adding Controllers so their routes share one concurrency limit.
+    ///
+    /// # Parameters
+    ///
+    /// * `http_limits` - Policy shared by short routes added afterward.
+    ///
+    /// # Returns
+    ///
+    /// The same builder with the supplied policy installed.
     pub fn with_http_limits(mut self, http_limits: HttpLimits) -> Self {
         self.limit_state = LimitState::new(http_limits);
         self
     }
 
     /// Adds all routes declared by one Controller instance.
+    ///
+    /// # Parameters
+    ///
+    /// * `controller` - Shared controller instance used by registered handlers.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `C` - Controller type generated by the controller attribute macro.
+    ///
+    /// # Returns
+    ///
+    /// The updated builder, or a conflict identifying the duplicate method and
+    /// path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ControllerRouteConflict`] when the controller duplicates a
+    /// method/template pair already declared by this builder.
     #[allow(clippy::should_implement_trait)]
     pub fn add<C>(mut self, controller: Arc<C>) -> Result<Self, ControllerRouteConflict>
     where
@@ -148,12 +284,44 @@ where
     }
 
     /// Finishes assembly and returns the Axum router.
+    ///
+    /// # Returns
+    ///
+    /// The assembled router, currently returned in `Ok` because all route
+    /// conflicts are detected while adding controllers.
+    ///
+    /// # Errors
+    ///
+    /// This implementation does not currently return an error.
     pub fn finish(self) -> Result<Router<S>, ControllerRouteConflict> {
         Ok(self.router)
     }
 }
 
 /// Joins a Controller prefix and child template with exactly one separator.
+///
+/// Empty prefixes or children are handled without introducing duplicate
+/// separators; a root prefix yields a leading slash for non-empty children.
+///
+/// # Parameters
+///
+/// * `prefix` - Controller-level route prefix.
+/// * `child` - Method-level route template.
+///
+/// # Returns
+///
+/// The joined route template.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_web::mvc::join_route_path;
+///
+/// assert_eq!(join_route_path("/api/", "health"), "/api/health");
+/// assert_eq!(join_route_path("/", "health"), "/health");
+/// ```
+#[must_use]
+#[inline]
 pub fn join_route_path(prefix: &str, child: &str) -> String {
     if prefix == "/" {
         if child.is_empty() {
@@ -177,10 +345,14 @@ pub fn join_route_path(prefix: &str, child: &str) -> String {
 }
 
 trait InsertSlash {
+    /// Adds a leading slash when the owned route fragment does not already have
+    /// one.
+    #[must_use]
     fn insert_slash(self) -> String;
 }
 
 impl InsertSlash for String {
+    #[inline]
     fn insert_slash(self) -> String {
         if self.starts_with('/') {
             self

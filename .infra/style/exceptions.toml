@@ -7,6 +7,11 @@ reason = "Runtime lifecycle types share the server shutdown and connection owner
 
 [[exceptions]]
 rule = "multiple-public-types"
+path = "src/config.rs"
+reason = "ConfiguredWeb and its field-safe ConfigOptionsError jointly define the explicit configuration adapter API."
+
+[[exceptions]]
+rule = "multiple-public-types"
 path = "src/limit.rs"
 reason = "Limit configuration, middleware and rejection types form one cohesive public request-limit API."
 

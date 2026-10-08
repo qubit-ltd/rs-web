@@ -30,12 +30,16 @@ use syn::parse2;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 
+/// Parsed arguments for a verb-specific controller mapping attribute.
 struct MappingArgs {
+    /// Literal child path appended to the controller prefix.
     path: LitStr,
+    /// Optional route settings accepted after the path.
     options: Punctuated<Meta, Token![,]>,
 }
 
 impl Parse for MappingArgs {
+    /// Parses the path followed by an optional comma-separated option list.
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let path = input.parse()?;
         let options = if input.is_empty() {
@@ -48,12 +52,16 @@ impl Parse for MappingArgs {
     }
 }
 
+/// Parsed arguments for the multi-method `route` attribute.
 struct RouteArgs {
+    /// Literal child path appended to the controller prefix.
     path: LitStr,
+    /// HTTP method and route-kind settings following the path.
     options: Punctuated<Meta, Token![,]>,
 }
 
 impl Parse for RouteArgs {
+    /// Parses a path and its optional comma-separated route settings.
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let path = input.parse()?;
         let options = if input.is_empty() {
@@ -66,17 +74,28 @@ impl Parse for RouteArgs {
     }
 }
 
+/// Normalized route data used to generate controller registrations.
 struct Route {
+    /// Full path after joining the controller prefix and child path.
     path: String,
+    /// Uppercase HTTP methods handled by this route.
     methods: Vec<String>,
+    /// Transport strategy name, validated as `short`, `sse`, or `ws`.
     kind: String,
 }
 
+/// A controller handler together with its generated route registrations.
 struct Method {
+    /// Routes declared on the handler method.
     routes: Vec<Route>,
+    /// Generated function name used by the router.
     handler: syn::Ident,
 }
 
+/// Expands a controller attribute into its implementation and route definition.
+///
+/// Invalid input is emitted as a compile-time diagnostic instead of panicking.
+#[must_use]
 pub fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
     match expand_inner(args, input) {
         Ok(tokens) => tokens,
@@ -84,6 +103,10 @@ pub fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
     }
 }
 
+/// Parses the controller and generates its handler functions and registrations.
+///
+/// The input must be a non-generic inherent implementation with valid route
+/// attributes and compatible state extractor types.
 fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStream> {
     let prefix = parse2::<LitStr>(args)?;
     let mut implementation = parse2::<ItemImpl>(input)?;
@@ -265,6 +288,7 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
     })
 }
 
+/// Returns the state type when `ty` is an Axum `State<T>` extractor.
 fn state_extractor_type(ty: &Type) -> Option<Type> {
     let Type::Path(path) = ty else { return None };
     let segment = path.path.segments.last()?;
@@ -280,6 +304,7 @@ fn state_extractor_type(ty: &Type) -> Option<Type> {
     })
 }
 
+/// Maps a supported verb-mapping attribute name to its HTTP method.
 fn marker_verb(name: &str) -> Option<&'static str> {
     match name {
         "get_mapping" | "get" => Some("GET"),
@@ -291,6 +316,9 @@ fn marker_verb(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Validates route options and returns methods plus the selected strategy.
+///
+/// `allow_method` is true only for the multi-method `route` attribute.
 fn parse_options(options: Punctuated<Meta, Token![,]>, allow_method: bool) -> syn::Result<(Vec<String>, String)> {
     let mut methods = Vec::new();
     let mut kind = "short".to_owned();
@@ -350,6 +378,7 @@ fn parse_options(options: Punctuated<Meta, Token![,]>, allow_method: bool) -> sy
     Ok((methods, kind))
 }
 
+/// Joins a controller prefix and child path after validating both templates.
 fn make_route(prefix: &str, child: LitStr, methods: Vec<String>, kind: String) -> syn::Result<Route> {
     let child = child.value();
     validate_path(&child, false, child_span(&child))?;
@@ -364,10 +393,14 @@ fn make_route(prefix: &str, child: LitStr, methods: Vec<String>, kind: String) -
     Ok(Route { path, methods, kind })
 }
 
+/// Produces the fallback call-site span used for synthesized path diagnostics.
 fn child_span(_value: &str) -> Span {
     Span::call_site()
 }
 
+/// Checks absolute-path syntax and rejects query or fragment components.
+///
+/// Prefixes cannot end in a slash except for `/`; child paths may be empty.
 fn validate_path(path: &str, prefix: bool, span: Span) -> syn::Result<()> {
     let valid = if prefix {
         path == "/" || (path.starts_with('/') && !path.ends_with('/') && !path.contains("//"))
@@ -387,6 +420,7 @@ fn validate_path(path: &str, prefix: bool, span: Span) -> syn::Result<()> {
     Ok(())
 }
 
+/// Validates path parameter segments, uniqueness, and final wildcard placement.
 fn validate_template(path: &str, span: Span) -> syn::Result<()> {
     let mut names = HashSet::new();
     let segments: Vec<_> = path.split('/').collect();
@@ -435,6 +469,7 @@ fn validate_template(path: &str, span: Span) -> syn::Result<()> {
     Ok(())
 }
 
+/// Enforces the async, immutable `&self`, non-generic handler contract.
 fn validate_method(method: &ImplItemFn) -> syn::Result<()> {
     if method.sig.asyncness.is_none() {
         return Err(syn::Error::new_spanned(
@@ -463,6 +498,7 @@ fn validate_method(method: &ImplItemFn) -> syn::Result<()> {
     Ok(())
 }
 
+/// Generates an Axum handler that forwards extracted arguments to the method.
 fn make_handler(method: &ImplItemFn, handler: &syn::Ident, instance: &syn::Ident, self_ty: &Type) -> TokenStream {
     let method_name = &method.sig.ident;
     let mut params = Vec::new();
@@ -484,6 +520,8 @@ fn make_handler(method: &ImplItemFn, handler: &syn::Ident, instance: &syn::Ident
     }
 }
 
+/// Converts a validated strategy name into its generated `RouteKind`
+/// expression.
 fn route_kind(kind: &str) -> TokenStream {
     match kind {
         "sse" => quote! { ::qubit_web::RouteKind::Sse },
@@ -492,6 +530,7 @@ fn route_kind(kind: &str) -> TokenStream {
     }
 }
 
+/// Creates the Axum method-filter expression for a validated method name.
 fn method_filter(method: &str) -> TokenStream {
     let name = format_ident!("{}", method);
     quote! { ::axum::routing::MethodFilter::#name }

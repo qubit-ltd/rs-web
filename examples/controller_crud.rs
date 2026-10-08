@@ -91,8 +91,7 @@ impl Users {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let options = ServerOptions::new("127.0.0.1:3000".parse::<SocketAddr>()?)
-        .with_max_transport_connections(128)?;
+    let options = ServerOptions::new("127.0.0.1:3000".parse::<SocketAddr>()?).with_max_transport_connections(128)?;
     let http_limits = HttpLimits::default();
     let users = Arc::new(Users::default());
     let controller = ControllerRoutes::new()
@@ -127,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "listening on http://{}; POST /admin/shutdown to stop",
         server.local_addr()
     );
-    server
+    let _ = server
         .serve(app, async move {
             let _ = shutdown_rx.await;
         })

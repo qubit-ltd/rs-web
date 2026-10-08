@@ -13,6 +13,7 @@ use axum::body::Body;
 use axum::body::to_bytes;
 use axum::http::Request;
 use axum::http::StatusCode;
+use axum::response::Response;
 use axum::routing::post;
 use qubit_web::json::BoundedJson;
 use qubit_web::json::JsonLimits;
@@ -36,7 +37,7 @@ fn app() -> Router {
     Router::new().route("/number", post(echo_number))
 }
 
-async fn send(uri: &str, content_type: &str, body: &'static str) -> axum::response::Response {
+async fn send(uri: &str, content_type: &str, body: &'static str) -> Response {
     app()
         .oneshot(
             Request::post(uri)
@@ -48,7 +49,7 @@ async fn send(uri: &str, content_type: &str, body: &'static str) -> axum::respon
         .unwrap()
 }
 
-async fn send_with_limits(body: &'static str, limits: JsonLimits) -> axum::response::Response {
+async fn send_with_limits(body: &'static str, limits: JsonLimits) -> Response {
     Router::new()
         .route("/", post(ignore_json))
         .layer(Extension(limits))
@@ -63,7 +64,7 @@ async fn send_with_limits(body: &'static str, limits: JsonLimits) -> axum::respo
 }
 
 #[tokio::test]
-async fn accepts_json_and_vendor_json_media_types() {
+async fn test_accepts_json_and_vendor_json_media_types() {
     assert_eq!(send("/number", "application/json", "42").await.status(), StatusCode::OK);
     assert_eq!(
         send("/number", "application/vnd.example+json", "42").await.status(),
@@ -84,7 +85,7 @@ async fn accepts_json_and_vendor_json_media_types() {
 }
 
 #[tokio::test]
-async fn rejects_non_utf8_duplicate_and_malformed_content_type_parameters() {
+async fn test_rejects_non_utf8_duplicate_and_malformed_content_type_parameters() {
     for content_type in [
         "application/json; charset=us-ascii",
         "application/json; profile=example",
@@ -101,7 +102,7 @@ async fn rejects_non_utf8_duplicate_and_malformed_content_type_parameters() {
 }
 
 #[tokio::test]
-async fn decodes_u64_max_without_precision_loss() {
+async fn test_decodes_u64_max_without_precision_loss() {
     let response = send("/number", "application/json", "18446744073709551615").await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
@@ -111,7 +112,7 @@ async fn decodes_u64_max_without_precision_loss() {
 }
 
 #[tokio::test]
-async fn rejects_unsupported_media_type() {
+async fn test_rejects_unsupported_media_type() {
     assert_eq!(
         send("/number", "text/plain", "42").await.status(),
         StatusCode::UNSUPPORTED_MEDIA_TYPE
@@ -119,7 +120,7 @@ async fn rejects_unsupported_media_type() {
 }
 
 #[tokio::test]
-async fn rejects_invalid_json_and_target_type_mismatch() {
+async fn test_rejects_invalid_json_and_target_type_mismatch() {
     assert_eq!(
         send("/number", "application/json", "42 trailing").await.status(),
         StatusCode::BAD_REQUEST
@@ -131,7 +132,7 @@ async fn rejects_invalid_json_and_target_type_mismatch() {
 }
 
 #[tokio::test]
-async fn rejects_body_over_input_budget() {
+async fn test_rejects_body_over_input_budget() {
     let limits = JsonLimits::default().with_max_input_bytes(1).unwrap();
     let response = Router::new()
         .route("/", post(echo_number))
@@ -148,13 +149,13 @@ async fn rejects_body_over_input_budget() {
 }
 
 #[tokio::test]
-async fn accepts_input_exactly_at_byte_budget() {
+async fn test_accepts_input_exactly_at_byte_budget() {
     let limits = JsonLimits::default().with_max_input_bytes(2).unwrap();
     assert_eq!(send_with_limits("42", limits).await.status(), StatusCode::OK);
 }
 
 #[tokio::test]
-async fn rejects_structure_budget_exceeded() {
+async fn test_rejects_structure_budget_exceeded() {
     let limits = JsonLimits::default().with_max_sequence_items(1).unwrap();
     let response = Router::new()
         .route("/", post(echo_array))
@@ -171,7 +172,7 @@ async fn rejects_structure_budget_exceeded() {
 }
 
 #[tokio::test]
-async fn rejects_max_depth_budget() {
+async fn test_rejects_max_depth_budget() {
     let limits = JsonLimits::default().with_max_depth(1).unwrap();
     assert_eq!(
         send_with_limits("{\"a\":{\"b\":0}}", limits).await.status(),
@@ -180,7 +181,7 @@ async fn rejects_max_depth_budget() {
 }
 
 #[tokio::test]
-async fn rejects_max_nodes_budget() {
+async fn test_rejects_max_nodes_budget() {
     let limits = JsonLimits::default().with_max_nodes(1).unwrap();
     assert_eq!(
         send_with_limits("[1]", limits).await.status(),
@@ -189,7 +190,7 @@ async fn rejects_max_nodes_budget() {
 }
 
 #[tokio::test]
-async fn rejects_max_map_entries_budget() {
+async fn test_rejects_max_map_entries_budget() {
     let limits = JsonLimits::default().with_max_map_entries(1).unwrap();
     assert_eq!(
         send_with_limits("{\"a\":1,\"b\":2}", limits).await.status(),
@@ -198,7 +199,7 @@ async fn rejects_max_map_entries_budget() {
 }
 
 #[tokio::test]
-async fn rejects_max_key_bytes_budget() {
+async fn test_rejects_max_key_bytes_budget() {
     let limits = JsonLimits::default().with_max_key_bytes(2).unwrap();
     assert_eq!(
         send_with_limits("{\"long\":1}", limits).await.status(),
@@ -207,7 +208,7 @@ async fn rejects_max_key_bytes_budget() {
 }
 
 #[tokio::test]
-async fn rejects_max_string_bytes_budget() {
+async fn test_rejects_max_string_bytes_budget() {
     let limits = JsonLimits::default().with_max_string_bytes(2).unwrap();
     assert_eq!(
         send_with_limits("\"abc\"", limits).await.status(),
@@ -216,7 +217,7 @@ async fn rejects_max_string_bytes_budget() {
 }
 
 #[tokio::test]
-async fn rejects_max_number_bytes_budget() {
+async fn test_rejects_max_number_bytes_budget() {
     let limits = JsonLimits::default().with_max_number_bytes(2).unwrap();
     assert_eq!(
         send_with_limits("123", limits).await.status(),
@@ -225,21 +226,21 @@ async fn rejects_max_number_bytes_budget() {
 }
 
 #[tokio::test]
-async fn output_budget_failure_returns_no_partial_json_response() {
+async fn test_output_budget_failure_returns_no_partial_json_response() {
     let limits = JsonLimits::default().with_max_output_bytes(1).unwrap();
     let error = json_response(&u64::MAX, &limits).unwrap_err();
     assert_eq!(error.code(), "json_output_budget_exceeded");
 }
 
 #[tokio::test]
-async fn output_structure_budget_failure_returns_encoding_error() {
+async fn test_output_structure_budget_failure_returns_encoding_error() {
     let limits = JsonLimits::default().with_max_sequence_items(1).unwrap();
     let error = json_response(&[1_u64, 2], &limits).unwrap_err();
     assert_eq!(error.code(), "json_output_budget_exceeded");
 }
 
 #[tokio::test]
-async fn output_preserves_u64_max_precision() {
+async fn test_output_preserves_u64_max_precision() {
     let response = json_response(&u64::MAX, &JsonLimits::default()).unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-type"], "application/json");

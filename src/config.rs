@@ -13,14 +13,16 @@ use std::time::Duration;
 
 use qubit_config::Config;
 
-use crate::limit::HttpLimits;
 use crate::ServerOptions;
 use crate::WebServerError;
+use crate::limit::HttpLimits;
 
-/// Separates listener settings from policies that callers install on selected routes.
+/// Separates listener settings from policies that callers install on selected
+/// routes.
 ///
-/// `WebServer` consumes only [`ServerOptions`]. The HTTP limits remain inert until
-/// they are explicitly passed to [`crate::ControllerRoutes::with_http_limits`] or
+/// `WebServer` consumes only [`ServerOptions`]. The HTTP limits remain inert
+/// until they are explicitly passed to
+/// [`crate::ControllerRoutes::with_http_limits`] or
 /// [`crate::RequestLimitLayer::new`].
 ///
 /// # Examples
@@ -39,9 +41,12 @@ use crate::WebServerError;
 /// assert_eq!(http_limits.max_body_bytes(), 1024 * 1024);
 /// # }
 /// ```
+#[must_use]
 #[derive(Clone, Debug)]
 pub struct ConfiguredWeb {
+    /// Listener address and shutdown settings used to start the server.
     server_options: ServerOptions,
+    /// HTTP limits retained for explicit installation on short routes.
     http_limits: HttpLimits,
 }
 
@@ -53,6 +58,15 @@ impl ConfiguredWeb {
     /// `transport.max_connections` defaults to 1024. HTTP limits are returned
     /// separately so they can be installed only on appropriate short routes.
     /// This function does not discover or load a global configuration source.
+    ///
+    /// # Parameters
+    ///
+    /// - `config`: explicit values containing the listener and optional policy
+    ///   settings.
+    ///
+    /// # Returns
+    ///
+    /// The listener options and route limits as independent policies.
     ///
     /// # Errors
     ///
@@ -96,8 +110,7 @@ impl ConfiguredWeb {
         if let Some(requests) = max_concurrent_requests {
             http_limits = http_limits
                 .with_max_concurrent_requests(
-                    usize::try_from(requests)
-                        .map_err(|_| ConfigOptionsError::new("http.max_concurrent_requests"))?,
+                    usize::try_from(requests).map_err(|_| ConfigOptionsError::new("http.max_concurrent_requests"))?,
                 )
                 .map_err(|_| ConfigOptionsError::new("http.max_concurrent_requests"))?;
         }
@@ -125,17 +138,34 @@ impl ConfiguredWeb {
         })
     }
 
-    /// Borrows the listener and shutdown settings without exposing route policy.
+    /// Borrows the listener and shutdown settings without exposing route
+    /// policy.
+    ///
+    /// # Returns
+    ///
+    /// The listener settings used to bind and operate the server.
+    #[inline]
     pub const fn server_options(&self) -> &ServerOptions {
         &self.server_options
     }
 
-    /// Copies the route limit defaults for explicit installation on short routes.
+    /// Copies the route limit defaults for explicit installation on short
+    /// routes.
+    ///
+    /// # Returns
+    ///
+    /// The HTTP limits value, independent from the listener settings.
+    #[inline]
     pub const fn http_limits(&self) -> HttpLimits {
         self.http_limits
     }
 
     /// Consumes the configuration result and returns its independent policies.
+    ///
+    /// # Returns
+    ///
+    /// The server options and HTTP limits as a pair.
+    #[inline]
     pub fn into_parts(self) -> (ServerOptions, HttpLimits) {
         (self.server_options, self.http_limits)
     }
@@ -143,23 +173,47 @@ impl ConfiguredWeb {
 
 /// A configuration conversion error that identifies its field without
 /// retaining or displaying the rejected value.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_config::Config;
+/// use qubit_web::ConfiguredWeb;
+///
+/// let error = ConfiguredWeb::from_config(&Config::new()).unwrap_err();
+/// assert_eq!(error.field(), "address");
+/// ```
+#[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConfigOptionsError {
+    /// Name of the setting that failed to parse or validate.
     field: &'static str,
 }
 
 impl ConfigOptionsError {
+    /// Creates an error associated with a configuration key.
+    ///
+    /// # Parameters
+    ///
+    /// - `field`: the key whose value could not be read or validated.
     const fn new(field: &'static str) -> Self {
         Self { field }
     }
 
     /// Returns the configuration field that could not be read or validated.
+    ///
+    /// # Returns
+    ///
+    /// The key name only; the rejected configuration value is not retained.
+    #[must_use]
+    #[inline]
     pub const fn field(&self) -> &'static str {
         self.field
     }
 }
 
 impl fmt::Display for ConfigOptionsError {
+    /// Formats a value-safe message naming the invalid configuration key.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "invalid server configuration field `{}`", self.field)
     }

@@ -21,15 +21,8 @@ use axum::http::Request;
 use axum::http::StatusCode;
 use axum::routing::get;
 use qubit_web::HttpLimits;
-#[allow(unused_imports)]
-use qubit_web::get_mapping;
 use qubit_web::mvc::ControllerRoutes;
-#[allow(unused_imports)]
-use qubit_web::post_mapping;
-#[allow(unused_imports)]
 use qubit_web::rest_controller;
-#[allow(unused_imports)]
-use qubit_web::route;
 use tokio::sync::Semaphore;
 use tower::ServiceExt;
 

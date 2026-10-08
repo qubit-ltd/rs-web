@@ -44,7 +44,10 @@ use serde::Serialize;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tokio::spawn;
 use tokio::sync::oneshot;
+use tokio::task::spawn_blocking;
+use tokio::test as tokio_test;
 
 #[derive(Clone, Deserialize, Serialize)]
 struct Item {
@@ -124,8 +127,8 @@ async fn request(address: SocketAddr, method: &str, path: &str, body: &str) -> S
     response
 }
 
-#[tokio::test]
-async fn one_router_composes_controller_native_sse_ws_limits_and_shutdown() {
+#[tokio_test]
+async fn test_one_router_composes_controller_native_sse_ws_limits_and_shutdown() {
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
         .unwrap();
@@ -133,7 +136,7 @@ async fn one_router_composes_controller_native_sse_ws_limits_and_shutdown() {
     let context = server.context();
     let app = application(context.clone());
     let (stop, stopped) = oneshot::channel();
-    let running = tokio::spawn(server.serve(app, async {
+    let running = spawn(server.serve(app, async {
         let _ = stopped.await;
     }));
     let health = request(address, "GET", "/health", "").await;
@@ -158,8 +161,8 @@ async fn one_router_composes_controller_native_sse_ws_limits_and_shutdown() {
     assert!(running.await.unwrap().unwrap().graceful);
 }
 
-#[tokio::test]
-async fn same_router_supports_https_and_wss_upgrade() {
+#[tokio_test]
+async fn test_same_router_supports_https_and_wss_upgrade() {
     let fixture = |name: &str| {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/tls")
@@ -174,10 +177,10 @@ async fn same_router_supports_https_and_wss_upgrade() {
     let address = server.local_addr();
     let context = server.context();
     let (stop, stopped) = oneshot::channel();
-    let running = tokio::spawn(server.serve(application(context), async {
+    let running = spawn(server.serve(application(context), async {
         let _ = stopped.await;
     }));
-    let response = tokio::task::spawn_blocking(move || {
+    let response = spawn_blocking(move || {
         openssl_request(
             address,
             b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -186,7 +189,7 @@ async fn same_router_supports_https_and_wss_upgrade() {
     .await
     .unwrap();
     assert!(response.starts_with("HTTP/1.1 200"));
-    let wss = tokio::task::spawn_blocking(move || openssl_request(address, b"GET /ws HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")).await.unwrap();
+    let wss = spawn_blocking(move || openssl_request(address, b"GET /ws HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")).await.unwrap();
     assert!(wss.starts_with("HTTP/1.1 101"), "unexpected WSS handshake: {wss}");
     let _ = stop.send(());
     assert!(running.await.unwrap().unwrap().graceful);

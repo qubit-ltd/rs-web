@@ -5,8 +5,10 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::future::pending;
 use std::io;
 use std::io::Write;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -19,6 +21,8 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
+use axum::serve as axum_serve;
+use qubit_web::ServerContext;
 use qubit_web::ServerOptions;
 use qubit_web::WebServer;
 use qubit_web::diagnostic::DiagnosticLayer;
@@ -29,19 +33,22 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::runtime::Builder;
+use tokio::spawn;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tokio::task::yield_now;
+use tokio::test as tokio_test;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::fmt::MakeWriter;
 
-async fn serve(policy: WsUpgradePolicy) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+async fn serve(policy: WsUpgradePolicy) -> (SocketAddr, JoinHandle<()>) {
     serve_with(policy, CancellationToken::new()).await
 }
 
-async fn serve_with(
-    policy: WsUpgradePolicy,
-    shutdown: CancellationToken,
-) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+async fn serve_with(policy: WsUpgradePolicy, shutdown: CancellationToken) -> (SocketAddr, JoinHandle<()>) {
     async fn upgrade(
         State((policy, shutdown)): State<(WsUpgradePolicy, CancellationToken)>,
         headers: HeaderMap,
@@ -67,12 +74,12 @@ async fn serve_with(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
-    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }.with_subscriber(dispatch));
+    let task = spawn(async move { axum_serve(listener, app).await.unwrap() }.with_subscriber(dispatch));
     (addr, task)
 }
 
 #[test]
-fn websocket_payload_is_not_logged_at_trace() {
+fn test_websocket_payload_is_not_logged_at_trace() {
     const SECRET: &str = "ws-payload-secret-sentinel";
     let output = Arc::new(Mutex::new(Vec::new()));
     let writer = SharedWriter(output.clone());
@@ -95,7 +102,7 @@ fn websocket_payload_is_not_logged_at_trace() {
                 send_masked_text(&mut client, SECRET.as_bytes()).await;
                 assert_eq!(read_server_text(&mut client).await, SECRET.as_bytes());
                 send_masked_close(&mut client).await;
-                let (opcode, _) = tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
+                let (opcode, _) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
                     .await
                     .unwrap();
                 assert_eq!(opcode, 8);
@@ -131,15 +138,11 @@ impl<'a> MakeWriter<'a> for SharedWriter {
     }
 }
 
-async fn handshake(addr: std::net::SocketAddr, origin: Option<&str>) -> (TcpStream, StatusCode) {
+async fn handshake(addr: SocketAddr, origin: Option<&str>) -> (TcpStream, StatusCode) {
     handshake_path(addr, "/ws", origin).await
 }
 
-async fn handshake_path(
-    addr: std::net::SocketAddr,
-    path: &str,
-    origin: Option<&str>,
-) -> (TcpStream, StatusCode) {
+async fn handshake_path(addr: SocketAddr, path: &str, origin: Option<&str>) -> (TcpStream, StatusCode) {
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let mut request = format!(
         "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
@@ -219,8 +222,8 @@ async fn read_server_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
     (header[0] & 0x0f, body)
 }
 
-#[tokio::test]
-async fn origin_allowlist_controls_real_loopback_upgrade() {
+#[tokio_test]
+async fn test_origin_allowlist_controls_real_loopback_upgrade() {
     let policy = WsUpgradePolicy::new().allowed_origins(["https://app.example"]);
     let (addr, task) = serve(policy).await;
 
@@ -235,8 +238,8 @@ async fn origin_allowlist_controls_real_loopback_upgrade() {
     task.abort();
 }
 
-#[tokio::test]
-async fn browser_origin_without_allowlist_is_rejected_and_connection_limit_is_enforced() {
+#[tokio_test]
+async fn test_browser_origin_without_allowlist_is_rejected_and_connection_limit_is_enforced() {
     let no_origins = WsUpgradePolicy::new();
     let (addr, task) = serve(no_origins).await;
     let (_, status) = handshake(addr, Some("https://app.example")).await;
@@ -255,9 +258,9 @@ async fn browser_origin_without_allowlist_is_rejected_and_connection_limit_is_en
     rejected_stream.read_exact(&mut body).await.unwrap();
     assert_eq!(body, expected_body);
     first.shutdown().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
+    timeout(Duration::from_secs(1), async {
         while policy.active_connections() != 0 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
@@ -265,8 +268,8 @@ async fn browser_origin_without_allowlist_is_rejected_and_connection_limit_is_en
     task.abort();
 }
 
-#[tokio::test]
-async fn queue_rejects_message_count_and_byte_overflow() {
+#[tokio_test]
+async fn test_queue_rejects_message_count_and_byte_overflow() {
     let count_limited = WsUpgradePolicy::new().queue_limits(1, 64).send_queue();
     count_limited.try_send(Message::text("one")).unwrap();
     assert_eq!(
@@ -287,7 +290,7 @@ async fn queue_rejects_message_count_and_byte_overflow() {
 }
 
 #[test]
-fn zero_policy_limits_are_invalid() {
+fn test_zero_policy_limits_are_invalid() {
     assert!(WsUpgradePolicy::new().max_connections(0).validate().is_err());
     assert!(WsUpgradePolicy::new().max_frame_bytes(0).validate().is_err());
     assert!(WsUpgradePolicy::new().max_message_bytes(0).validate().is_err());
@@ -302,22 +305,22 @@ fn zero_policy_limits_are_invalid() {
     );
 }
 
-#[tokio::test]
-async fn session_exits_on_shutdown_and_releases_connection_permit() {
+#[tokio_test]
+async fn test_session_exits_on_shutdown_and_releases_connection_permit() {
     let policy = Arc::new(WsUpgradePolicy::new().shutdown_timeout(Duration::from_millis(250)));
     let shutdown = CancellationToken::new();
     let (addr, task) = serve_with((*policy).clone(), shutdown.clone()).await;
     let (mut client, status) = handshake(addr, None).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
-    tokio::time::timeout(Duration::from_secs(1), async {
+    timeout(Duration::from_secs(1), async {
         while policy.active_connections() != 1 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
     .unwrap();
     shutdown.cancel();
-    let (opcode, _) = tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
+    let (opcode, _) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
         .unwrap();
     assert_eq!(opcode, 8);
@@ -327,9 +330,9 @@ async fn session_exits_on_shutdown_and_releases_connection_permit() {
         "permit remains held while awaiting close ack"
     );
     send_masked_close(&mut client).await;
-    tokio::time::timeout(Duration::from_secs(1), async {
+    timeout(Duration::from_secs(1), async {
         while policy.active_connections() != 0 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
@@ -337,8 +340,8 @@ async fn session_exits_on_shutdown_and_releases_connection_permit() {
     task.abort();
 }
 
-#[tokio::test]
-async fn context_upgrade_uses_the_server_absolute_shutdown_deadline() {
+#[tokio_test]
+async fn test_context_upgrade_uses_the_server_absolute_shutdown_deadline() {
     let server = WebServer::bind_http(
         ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(500)),
     )
@@ -355,8 +358,8 @@ async fn context_upgrade_uses_the_server_absolute_shutdown_deadline() {
         .route("/token", get(token_ws_upgrade))
         .with_state((policy.clone(), context.clone()));
     let address = server.local_addr();
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let serving = tokio::spawn(server.serve(app, async move {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let serving = spawn(server.serve(app, async move {
         let _ = shutdown_rx.await;
     }));
     let (_, rejected) = handshake(address, Some("https://evil.example")).await;
@@ -365,22 +368,22 @@ async fn context_upgrade_uses_the_server_absolute_shutdown_deadline() {
 
     let (mut client, status) = handshake(address, Some("https://app.example")).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
-    tokio::time::timeout(Duration::from_secs(1), async {
+    timeout(Duration::from_secs(1), async {
         while context.active_sessions() != 1 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
     .expect("the upgraded WebSocket should register its active session");
     shutdown_tx.send(()).unwrap();
-    let (opcode, _) = tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
+    let (opcode, _) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
         .unwrap();
     assert_eq!(opcode, 8);
 
-    let early_release = tokio::time::timeout(Duration::from_millis(100), async {
+    let early_release = timeout(Duration::from_millis(100), async {
         while policy.active_connections() != 0 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await;
@@ -392,9 +395,9 @@ async fn context_upgrade_uses_the_server_absolute_shutdown_deadline() {
     assert_eq!(policy.active_connections(), 1);
 
     send_masked_close(&mut client).await;
-    tokio::time::timeout(Duration::from_secs(1), async {
+    timeout(Duration::from_secs(1), async {
         while policy.active_connections() != 0 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
@@ -404,7 +407,7 @@ async fn context_upgrade_uses_the_server_absolute_shutdown_deadline() {
 }
 
 async fn context_ws_upgrade(
-    State((policy, context)): State<(WsUpgradePolicy, qubit_web::ServerContext)>,
+    State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -414,7 +417,7 @@ async fn context_ws_upgrade(
 }
 
 async fn token_ws_upgrade(
-    State((policy, context)): State<(WsUpgradePolicy, qubit_web::ServerContext)>,
+    State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -423,8 +426,8 @@ async fn token_ws_upgrade(
     })
 }
 
-#[tokio::test]
-async fn token_upgrade_does_not_register_an_active_server_session() {
+#[tokio_test]
+async fn test_token_upgrade_does_not_register_an_active_server_session() {
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
         .unwrap();
@@ -434,24 +437,23 @@ async fn token_upgrade_does_not_register_an_active_server_session() {
         .route("/token", get(token_ws_upgrade))
         .with_state((policy, context.clone()));
     let address = server.local_addr();
-    let serving = tokio::spawn(server.serve(app, std::future::pending::<()>()));
+    let serving = spawn(server.serve(app, pending::<()>()));
 
     let (mut client, status) = handshake_path(address, "/token", None).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
     assert_eq!(context.active_sessions(), 0);
     send_masked_close(&mut client).await;
-    tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
+    timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
         .unwrap();
     assert_eq!(context.active_sessions(), 0);
     serving.abort();
 }
 
-#[tokio::test]
-async fn context_session_is_released_after_shutdown_deadline_without_peer_ack() {
+#[tokio_test]
+async fn test_context_session_is_released_after_shutdown_deadline_without_peer_ack() {
     let server = WebServer::bind_http(
-        ServerOptions::new("127.0.0.1:0".parse().unwrap())
-            .with_shutdown_timeout(Duration::from_millis(100)),
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(100)),
     )
     .await
     .unwrap();
@@ -461,30 +463,30 @@ async fn context_session_is_released_after_shutdown_deadline_without_peer_ack() 
         .route("/ws", get(context_ws_upgrade))
         .with_state((policy.clone(), context.clone()));
     let address = server.local_addr();
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let serving = tokio::spawn(server.serve(app, async move {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let serving = spawn(server.serve(app, async move {
         let _ = shutdown_rx.await;
     }));
 
     let (mut client, status) = handshake(address, None).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
-    tokio::time::timeout(Duration::from_secs(1), async {
+    timeout(Duration::from_secs(1), async {
         while context.active_sessions() != 1 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
     .expect("the upgraded WebSocket should register its active session");
 
     shutdown_tx.send(()).unwrap();
-    let (opcode, _) = tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
+    let (opcode, _) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
         .unwrap();
     assert_eq!(opcode, 8);
 
-    tokio::time::timeout(Duration::from_secs(1), async {
+    timeout(Duration::from_secs(1), async {
         while context.active_sessions() != 0 || policy.active_connections() != 0 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
@@ -492,8 +494,8 @@ async fn context_session_is_released_after_shutdown_deadline_without_peer_ack() 
     assert!(serving.await.unwrap().unwrap().graceful);
 }
 
-#[tokio::test]
-async fn shutdown_close_deadline_releases_connection_without_peer_ack() {
+#[tokio_test]
+async fn test_shutdown_close_deadline_releases_connection_without_peer_ack() {
     let policy = WsUpgradePolicy::new()
         .max_connections(1)
         .shutdown_timeout(Duration::from_millis(30));
@@ -502,13 +504,13 @@ async fn shutdown_close_deadline_releases_connection_without_peer_ack() {
     let (mut client, status) = handshake(addr, None).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
     shutdown.cancel();
-    let (opcode, _) = tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
+    let (opcode, _) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
         .unwrap();
     assert_eq!(opcode, 8);
-    tokio::time::timeout(Duration::from_millis(300), async {
+    timeout(Duration::from_millis(300), async {
         while policy.active_connections() != 0 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
@@ -516,20 +518,20 @@ async fn shutdown_close_deadline_releases_connection_without_peer_ack() {
     task.abort();
 }
 
-#[tokio::test]
-async fn peer_close_is_acknowledged_before_connection_permit_is_released() {
+#[tokio_test]
+async fn test_peer_close_is_acknowledged_before_connection_permit_is_released() {
     let policy = WsUpgradePolicy::new().max_connections(1);
     let (addr, task) = serve(policy.clone()).await;
     let (mut client, status) = handshake(addr, None).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
     send_masked_close(&mut client).await;
-    let (opcode, _) = tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
+    let (opcode, _) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
         .unwrap();
     assert_eq!(opcode, 8);
-    tokio::time::timeout(Duration::from_secs(1), async {
+    timeout(Duration::from_secs(1), async {
         while policy.active_connections() != 0 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
@@ -537,34 +539,34 @@ async fn peer_close_is_acknowledged_before_connection_permit_is_released() {
     task.abort();
 }
 
-#[tokio::test]
-async fn ping_gets_pong_and_idle_timeout_closes_session() {
+#[tokio_test]
+async fn test_ping_gets_pong_and_idle_timeout_closes_session() {
     let policy = WsUpgradePolicy::new().idle_timeout(Duration::from_millis(50));
     let (addr, task) = serve(policy).await;
     let (mut client, status) = handshake(addr, None).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
     send_masked_control(&mut client, 9, b"probe").await;
-    let (opcode, payload) = tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
+    let (opcode, payload) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
         .unwrap();
     assert_eq!(opcode, 10);
     assert_eq!(payload, b"probe");
-    let (opcode, _) = tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
+    let (opcode, _) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
         .unwrap();
     assert_eq!(opcode, 8);
     task.abort();
 }
 
-#[tokio::test]
-async fn oversized_reassembled_message_is_closed_by_axum_limit() {
+#[tokio_test]
+async fn test_oversized_reassembled_message_is_closed_by_axum_limit() {
     let policy = WsUpgradePolicy::new().max_frame_bytes(32).max_message_bytes(4);
     let (addr, task) = serve(policy).await;
     let (mut client, status) = handshake(addr, None).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
     send_masked_frame(&mut client, false, 1, b"123").await;
     send_masked_frame(&mut client, true, 0, b"45").await;
-    let (opcode, payload) = tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
+    let (opcode, payload) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
         .unwrap();
     assert_eq!(opcode, 8);
@@ -572,14 +574,14 @@ async fn oversized_reassembled_message_is_closed_by_axum_limit() {
     task.abort();
 }
 
-#[tokio::test]
-async fn oversized_single_frame_is_rejected_even_when_message_limit_is_larger() {
+#[tokio_test]
+async fn test_oversized_single_frame_is_rejected_even_when_message_limit_is_larger() {
     let policy = WsUpgradePolicy::new().max_frame_bytes(4).max_message_bytes(16);
     let (addr, task) = serve(policy).await;
     let (mut client, status) = handshake(addr, None).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
     send_masked_text(&mut client, b"12345").await;
-    let (opcode, payload) = tokio::time::timeout(Duration::from_secs(1), read_server_frame(&mut client))
+    let (opcode, payload) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
         .unwrap();
     assert_eq!(opcode, 8);

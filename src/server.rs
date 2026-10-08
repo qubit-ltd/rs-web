@@ -34,7 +34,17 @@ use crate::ServerOptions;
 use crate::WebServerError;
 
 /// Classification shared by route registration and request policies.
+///
+/// # Examples
+///
+/// ```
+/// use qubit_web::RouteKind;
+///
+/// let kind = RouteKind::WebSocket;
+/// assert_ne!(kind, RouteKind::Short);
+/// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[must_use]
 pub enum RouteKind {
     /// A bounded, short-lived HTTP request.
     Short,
@@ -45,15 +55,45 @@ pub enum RouteKind {
 }
 
 /// Shared cancellation state for application-owned long-lived sessions.
+///
+/// # Examples
+///
+/// ```
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), qubit_web::WebServerError> {
+/// use qubit_web::ServerOptions;
+/// use qubit_web::WebServer;
+///
+/// let options = ServerOptions::new("127.0.0.1:0".parse().expect("socket address"));
+/// let server = WebServer::bind_http(options).await?;
+/// let context = server.context();
+/// let _shutdown = context.cancellation_token();
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Debug)]
+#[must_use]
 pub struct ServerContext {
+    /// Token cancelled when graceful shutdown starts.
     cancellation: CancellationToken,
+    /// Atomic count of guards currently retained by long-lived sessions.
     active_sessions: Arc<AtomicUsize>,
+    /// Grace period allowed after shutdown begins.
     shutdown_timeout: Duration,
+    /// Shared deadline initialized once when shutdown starts.
     shutdown_deadline: Arc<Mutex<Option<tokio::time::Instant>>>,
 }
 
 impl ServerContext {
+    /// Creates empty session state with the configured shutdown grace period.
+    ///
+    /// # Parameters
+    ///
+    /// * `shutdown_timeout` - Grace period applied after cancellation begins.
+    ///
+    /// # Returns
+    ///
+    /// A context with no registered sessions and no shutdown deadline.
     fn new(shutdown_timeout: Duration) -> Self {
         Self {
             cancellation: CancellationToken::new(),
@@ -64,16 +104,32 @@ impl ServerContext {
     }
 
     /// Returns a cloneable token cancelled when server shutdown begins.
+    ///
+    /// # Returns
+    ///
+    /// A token that is cancelled when the shared shutdown process starts.
+    #[must_use]
+    #[inline]
     pub fn cancellation_token(&self) -> CancellationToken {
         self.cancellation.clone()
     }
 
     /// Returns the server's graceful-shutdown deadline for long-lived sessions.
+    ///
+    /// # Returns
+    ///
+    /// The configured grace period used to calculate the absolute deadline.
+    #[must_use]
+    #[inline]
     pub const fn shutdown_timeout(&self) -> Duration {
         self.shutdown_timeout
     }
 
     /// Returns the absolute graceful-shutdown deadline after shutdown starts.
+    ///
+    /// # Returns
+    ///
+    /// Returns `None` before shutdown begins and the shared deadline afterward.
     pub fn shutdown_deadline(&self) -> Option<tokio::time::Instant> {
         *self
             .shutdown_deadline
@@ -81,11 +137,53 @@ impl ServerContext {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Returns the number of currently registered sessions.
+    ///
+    /// The count covers long-lived sessions whose owners registered a guard,
+    /// including SSE and WebSocket sessions that use the context-aware upgrade
+    /// API. It does not count ordinary HTTP requests, pending handshakes, or
+    /// WebSocket upgrades made with only a cancellation token.
+    ///
+    /// # Returns
+    ///
+    /// The number of registered session guards that have not yet been dropped.
+    #[must_use]
+    #[inline]
+    pub fn active_sessions(&self) -> usize {
+        self.active_sessions.load(Ordering::Acquire)
+    }
+
+    /// Registers an active long-lived session until the returned guard drops.
+    ///
+    /// # Returns
+    ///
+    /// A guard that decrements the active count when dropped.
+    pub fn register_session(&self) -> SessionGuard {
+        self.active_sessions.fetch_add(1, Ordering::AcqRel);
+        SessionGuard {
+            active_sessions: self.active_sessions.clone(),
+        }
+    }
+
+    /// Returns the shared deadline storage used by WebSocket lifecycle
+    /// tracking.
+    ///
+    /// # Returns
+    ///
+    /// A shared handle updated when the server begins shutdown.
     #[cfg(feature = "ws")]
     pub(crate) fn shutdown_deadline_handle(&self) -> Arc<Mutex<Option<tokio::time::Instant>>> {
         self.shutdown_deadline.clone()
     }
 
+    /// Starts cancellation once and returns the deadline shared with all
+    /// sessions.
+    ///
+    /// # Returns
+    ///
+    /// The first shutdown deadline, or the existing deadline if shutdown began
+    /// earlier.
+    #[must_use]
     fn begin_shutdown(&self) -> tokio::time::Instant {
         let deadline = tokio::time::Instant::now() + self.shutdown_timeout;
         let mut state = self
@@ -97,29 +195,31 @@ impl ServerContext {
         self.cancellation.cancel();
         deadline
     }
-
-    /// Registers an active long-lived session until the returned guard drops.
-    pub fn register_session(&self) -> SessionGuard {
-        self.active_sessions.fetch_add(1, Ordering::AcqRel);
-        SessionGuard {
-            active_sessions: self.active_sessions.clone(),
-        }
-    }
-
-    /// Returns the number of currently registered sessions.
-    ///
-    /// The count covers long-lived sessions whose owners registered a guard,
-    /// including SSE and WebSocket sessions that use the context-aware upgrade
-    /// API. It does not count ordinary HTTP requests, pending handshakes, or
-    /// WebSocket upgrades made with only a cancellation token.
-    pub fn active_sessions(&self) -> usize {
-        self.active_sessions.load(Ordering::Acquire)
-    }
 }
 
 /// RAII registration for one active SSE or WebSocket session.
+///
+/// # Examples
+///
+/// ```
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), qubit_web::WebServerError> {
+/// use qubit_web::ServerOptions;
+/// use qubit_web::WebServer;
+///
+/// let options = ServerOptions::new("127.0.0.1:0".parse().expect("socket address"));
+/// let server = WebServer::bind_http(options).await?;
+/// let context = server.context();
+/// let guard = context.register_session();
+/// assert_eq!(context.active_sessions(), 1);
+/// drop(guard);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
+#[must_use]
 pub struct SessionGuard {
+    /// Shared count decremented when this guard is dropped.
     active_sessions: Arc<AtomicUsize>,
 }
 
@@ -130,7 +230,23 @@ impl Drop for SessionGuard {
 }
 
 /// Summary of a completed graceful shutdown.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use qubit_web::ShutdownReport;
+///
+/// let report = ShutdownReport {
+///     graceful: true,
+///     forced_connections: None,
+///     elapsed: Duration::from_millis(25),
+/// };
+/// assert!(report.graceful);
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[must_use]
 pub struct ShutdownReport {
     /// Whether all connections finished before the shutdown deadline.
     pub graceful: bool,
@@ -143,11 +259,32 @@ pub struct ShutdownReport {
 }
 
 /// A bound HTTP server whose lifecycle remains under host control.
+///
+/// # Examples
+///
+/// ```
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), qubit_web::WebServerError> {
+/// use qubit_web::ServerOptions;
+/// use qubit_web::WebServer;
+///
+/// let options = ServerOptions::new("127.0.0.1:0".parse().expect("socket address"));
+/// let server = WebServer::bind_http(options).await?;
+/// assert_ne!(server.local_addr().port(), 0);
+/// # Ok(())
+/// # }
+/// ```
+#[must_use]
 pub struct WebServer {
+    /// Bound TCP listener accepting incoming transport sockets.
     listener: TcpListener,
+    /// Actual bound address, including any operating-system allocated port.
     local_addr: SocketAddr,
+    /// Validated timeouts and connection-cap policy used while serving.
     options: ServerOptions,
+    /// Shared shutdown and session-tracking state.
     context: ServerContext,
+    /// TLS acceptor when this server was created from HTTPS configuration.
     #[cfg(feature = "tls-rustls")]
     tls_acceptor: Option<TlsAcceptor>,
 }
@@ -162,6 +299,20 @@ impl std::fmt::Debug for WebServer {
 
 impl WebServer {
     /// Binds an HTTP socket after validating options.
+    ///
+    /// # Parameters
+    ///
+    /// * `options` - Validated address, timeouts, and connection-cap policy.
+    ///
+    /// # Returns
+    ///
+    /// A server owning the bound listener and shared shutdown context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WebServerError::InvalidConfig`] for invalid options or
+    /// [`WebServerError::BindFailed`] when binding or querying the address
+    /// fails.
     pub async fn bind_http(options: ServerOptions) -> Result<Self, WebServerError> {
         options.validate()?;
         let context = ServerContext::new(options.shutdown_timeout);
@@ -179,17 +330,104 @@ impl WebServer {
         })
     }
 
+    /// Binds an HTTPS socket after validating options and TLS credentials.
+    ///
+    /// # Parameters
+    ///
+    /// * `options` - Address and connection policy for the HTTPS listener.
+    /// * `config` - TLS credentials and protocol configuration.
+    ///
+    /// # Returns
+    ///
+    /// A server bound to the configured HTTPS address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WebServerError::InvalidConfig`] for invalid options or
+    /// [`WebServerError::BindFailed`] when binding or address lookup fails.
+    #[cfg(feature = "tls-rustls")]
+    pub async fn bind_https(options: ServerOptions, config: crate::tls::TlsConfig) -> Result<Self, WebServerError> {
+        options.validate()?;
+        let listener = TcpListener::bind(options.addr)
+            .await
+            .map_err(|_| WebServerError::BindFailed)?;
+        Self::from_tls_listener(options, listener, config)
+    }
+
+    /// Constructs a server from a listener prepared by the TLS module.
+    ///
+    /// # Parameters
+    ///
+    /// * `options` - Validated server policy.
+    /// * `listener` - Bound listener prepared for HTTPS.
+    /// * `config` - TLS configuration used for incoming handshakes.
+    ///
+    /// # Returns
+    ///
+    /// A server that applies TLS to accepted transport connections.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WebServerError::InvalidConfig`] or
+    /// [`WebServerError::BindFailed`] if validation or address lookup fails.
+    #[cfg(feature = "tls-rustls")]
+    pub(crate) fn from_tls_listener(
+        options: ServerOptions,
+        listener: TcpListener,
+        config: crate::tls::TlsConfig,
+    ) -> Result<Self, WebServerError> {
+        options.validate()?;
+        let context = ServerContext::new(options.shutdown_timeout);
+        let local_addr = listener.local_addr().map_err(|_| WebServerError::BindFailed)?;
+        Ok(Self {
+            listener,
+            local_addr,
+            options,
+            context,
+            tls_acceptor: Some(TlsAcceptor::from(config.rustls_config().get_inner())),
+        })
+    }
+
     /// Returns the actual listening address, including an allocated port.
+    ///
+    /// # Returns
+    ///
+    /// The bound address, including an operating-system allocated port when
+    /// used.
+    #[must_use]
+    #[inline]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
     /// Returns the context shared with long-lived application sessions.
+    ///
+    /// # Returns
+    ///
+    /// A clone sharing cancellation and session-count state with this server.
+    #[inline]
     pub fn context(&self) -> ServerContext {
         self.context.clone()
     }
 
     /// Runs the application Router until the host's shutdown future completes.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `F` - Sendable future that resolves when the host requests shutdown.
+    ///
+    /// # Parameters
+    ///
+    /// * `app` - Axum router serving accepted HTTP and upgraded connections.
+    /// * `shutdown` - Host-controlled shutdown notification future.
+    ///
+    /// # Returns
+    ///
+    /// A report describing graceful completion or deadline-forced shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WebServerError::ServeFailed`] when the accept loop fails.
     pub async fn serve<F>(self, app: Router<()>, shutdown: F) -> Result<ShutdownReport, WebServerError>
     where
         F: Future<Output = ()> + Send,
@@ -283,37 +521,20 @@ impl WebServer {
             Ok(report)
         }
     }
-
-    /// Constructs a server from a listener prepared by the TLS module.
-    #[cfg(feature = "tls-rustls")]
-    pub(crate) fn from_tls_listener(
-        options: ServerOptions,
-        listener: TcpListener,
-        config: crate::tls::TlsConfig,
-    ) -> Result<Self, WebServerError> {
-        options.validate()?;
-        let context = ServerContext::new(options.shutdown_timeout);
-        let local_addr = listener.local_addr().map_err(|_| WebServerError::BindFailed)?;
-        Ok(Self {
-            listener,
-            local_addr,
-            options,
-            context,
-            tls_acceptor: Some(TlsAcceptor::from(config.rustls_config().get_inner())),
-        })
-    }
-
-    /// Binds an HTTPS socket after validating options and TLS credentials.
-    #[cfg(feature = "tls-rustls")]
-    pub async fn bind_https(options: ServerOptions, config: crate::tls::TlsConfig) -> Result<Self, WebServerError> {
-        options.validate()?;
-        let listener = TcpListener::bind(options.addr)
-            .await
-            .map_err(|_| WebServerError::BindFailed)?;
-        Self::from_tls_listener(options, listener, config)
-    }
 }
 
+/// Adapts one TCP or TLS stream into an HTTP connection with upgrades enabled.
+///
+/// # Type Parameters
+///
+/// * `S` - Asynchronous bidirectional stream used by Hyper.
+///
+/// # Parameters
+///
+/// * `stream` - Accepted transport stream, optionally after TLS negotiation.
+/// * `app` - Router cloned into each request service call.
+/// * `watcher` - Graceful shutdown watcher for this connection.
+/// * `request_header_timeout` - Deadline for receiving HTTP request headers.
 async fn serve_connection<S>(
     stream: S,
     app: Router<()>,
