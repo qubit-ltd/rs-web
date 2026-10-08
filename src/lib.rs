@@ -51,6 +51,8 @@ pub mod ws;
 
 #[cfg(feature = "config")]
 pub use config::ConfigOptionsError;
+#[cfg(feature = "config")]
+pub use config::ConfiguredWeb;
 pub use error::WebServerError;
 #[cfg(feature = "json")]
 pub use json::BoundedJson;

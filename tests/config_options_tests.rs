@@ -14,8 +14,8 @@ use axum::http::Request;
 use axum::http::StatusCode;
 use axum::routing::post;
 use qubit_config::Config;
+use qubit_web::ConfiguredWeb;
 use qubit_web::RequestLimitLayer;
-use qubit_web::ServerOptions;
 use qubit_web::WebServer;
 use tower::ServiceExt;
 
@@ -33,10 +33,12 @@ async fn maps_loopback_address_and_accepts_a_valid_shutdown_timeout() {
     config.set("http.max_concurrent_requests", 8u64).unwrap();
     config.set("http.request_timeout_ms", 1500u64).unwrap();
 
-    let options = ServerOptions::from_config(&config).unwrap();
+    config.set("transport.max_connections", 3u64).unwrap();
+    let configured = ConfiguredWeb::from_config(&config).unwrap();
+    let (options, limits) = configured.into_parts();
     assert_eq!(options.address(), "127.0.0.1:0".parse().unwrap());
+    assert_eq!(options.max_transport_connections(), 3);
     assert_eq!(options.shutdown_timeout(), std::time::Duration::from_millis(2500));
-    let limits = options.http_limits();
     assert_eq!(limits.max_body_bytes(), 4096);
     assert_eq!(limits.max_concurrent_requests(), 8);
     assert_eq!(limits.request_timeout(), std::time::Duration::from_millis(1500));
@@ -55,10 +57,10 @@ async fn maps_loopback_address_and_accepts_a_valid_shutdown_timeout() {
 async fn configured_http_limits_apply_when_attached_to_a_router_branch() {
     let mut config = config_with("127.0.0.1:0", 2500);
     config.set("http.max_body_bytes", 3u64).unwrap();
-    let options = ServerOptions::from_config(&config).unwrap();
+    let configured = ConfiguredWeb::from_config(&config).unwrap();
     let app = Router::new()
         .route("/body", post(|_: Bytes| async { "ok" }))
-        .layer(RequestLimitLayer::new(options.http_limits()));
+        .layer(RequestLimitLayer::new(configured.http_limits()));
 
     let response = app
         .oneshot(Request::post("/body").body(Body::from("four")).unwrap())
@@ -68,16 +70,33 @@ async fn configured_http_limits_apply_when_attached_to_a_router_branch() {
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
+#[tokio::test]
+async fn configured_limits_do_not_change_an_unlayered_native_router() {
+    let mut config = config_with("127.0.0.1:0", 2500);
+    config.set("http.max_body_bytes", 3u64).unwrap();
+    let configured = ConfiguredWeb::from_config(&config).unwrap();
+    let app = Router::new().route("/body", post(|_: Bytes| async { "accepted" }));
+
+    let response = app
+        .oneshot(Request::post("/body").body(Body::from("four")).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(configured.http_limits().max_body_bytes(), 3);
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 #[test]
 fn uses_the_standard_shutdown_timeout_when_omitted() {
     let mut config = Config::new();
     config.set("address", "127.0.0.1:0").unwrap();
 
-    let options = ServerOptions::from_config(&config).unwrap();
+    let configured = ConfiguredWeb::from_config(&config).unwrap();
+    let options = configured.server_options();
 
     assert_eq!(options.shutdown_timeout(), std::time::Duration::from_secs(30));
     assert_eq!(options.request_header_timeout(), std::time::Duration::from_secs(10));
-    let limits = options.http_limits();
+    let limits = configured.http_limits();
     assert_eq!(limits.max_body_bytes(), 1024 * 1024);
     assert_eq!(limits.max_concurrent_requests(), 256);
     assert_eq!(limits.request_timeout(), std::time::Duration::from_secs(30));
@@ -88,7 +107,7 @@ fn uses_the_standard_shutdown_timeout_when_omitted() {
 fn rejects_an_invalid_address_without_echoing_its_value() {
     let config = config_with("private-address-sentinel", 1000);
 
-    let error = ServerOptions::from_config(&config).unwrap_err();
+    let error = ConfiguredWeb::from_config(&config).unwrap_err();
 
     assert_eq!(error.field(), "address");
     assert!(!error.to_string().contains("private-address-sentinel"));
@@ -98,14 +117,14 @@ fn rejects_an_invalid_address_without_echoing_its_value() {
 fn rejects_configuration_values_with_the_wrong_type() {
     let mut config = Config::new();
     config.set("address", 123u64).unwrap();
-    assert_eq!(ServerOptions::from_config(&config).unwrap_err().field(), "address");
+    assert_eq!(ConfiguredWeb::from_config(&config).unwrap_err().field(), "address");
 
     for field in ["shutdown_timeout_ms", "http.max_body_bytes", "http.request_timeout_ms"] {
         let mut config = Config::new();
         config.set("address", "127.0.0.1:0").unwrap();
         config.set(field, "private-value-sentinel").unwrap();
 
-        let error = ServerOptions::from_config(&config).unwrap_err();
+        let error = ConfiguredWeb::from_config(&config).unwrap_err();
 
         assert_eq!(error.field(), field);
         assert!(!error.to_string().contains("private-value-sentinel"));
@@ -120,7 +139,7 @@ fn reports_a_malformed_limit_by_field_without_echoing_its_value() {
         .set("http.max_concurrent_requests", "private-limit-sentinel")
         .unwrap();
 
-    let error = ServerOptions::from_config(&config).unwrap_err();
+    let error = ConfiguredWeb::from_config(&config).unwrap_err();
 
     assert_eq!(error.field(), "http.max_concurrent_requests");
     assert!(!error.to_string().contains("private-limit-sentinel"));
@@ -131,7 +150,7 @@ fn reports_a_malformed_limit_by_field_without_echoing_its_value() {
 fn rejects_a_zero_shutdown_timeout() {
     let config = config_with("127.0.0.1:0", 0);
 
-    let error = ServerOptions::from_config(&config).unwrap_err();
+    let error = ConfiguredWeb::from_config(&config).unwrap_err();
 
     assert_eq!(error.field(), "shutdown_timeout_ms");
 }
@@ -142,7 +161,7 @@ fn rejects_zero_http_limits_and_preserves_the_field_path() {
     config.set("address", "127.0.0.1:0").unwrap();
     config.set("http.max_body_bytes", 0u64).unwrap();
 
-    let error = ServerOptions::from_config(&config).unwrap_err();
+    let error = ConfiguredWeb::from_config(&config).unwrap_err();
 
     assert_eq!(error.field(), "http.max_body_bytes");
 }
@@ -157,8 +176,32 @@ fn rejects_zero_concurrency_and_request_timeout_limits() {
         config.set("address", "127.0.0.1:0").unwrap();
         config.set(config_key, 0u64).unwrap();
 
-        let error = ServerOptions::from_config(&config).unwrap_err();
+        let error = ConfiguredWeb::from_config(&config).unwrap_err();
 
         assert_eq!(error.field(), field);
+    }
+}
+
+#[test]
+fn defaults_transport_connection_limit_to_1024_and_reports_invalid_values() {
+    let mut config = Config::new();
+    config.set("address", "127.0.0.1:0").unwrap();
+
+    let configured = ConfiguredWeb::from_config(&config).unwrap();
+    assert_eq!(configured.server_options().max_transport_connections(), 1024);
+
+    for invalid in ["zero", "wrong_type"] {
+        let mut config = Config::new();
+        config.set("address", "127.0.0.1:0").unwrap();
+        if invalid == "zero" {
+            config.set("transport.max_connections", 0u64).unwrap();
+        } else {
+            config.set("transport.max_connections", "private-sentinel").unwrap();
+        }
+
+        let error = ConfiguredWeb::from_config(&config).unwrap_err();
+
+        assert_eq!(error.field(), "transport.max_connections");
+        assert!(!error.to_string().contains("private-sentinel"));
     }
 }

@@ -10,7 +10,6 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use crate::WebServerError;
-use crate::limit::HttpLimits;
 
 /// Validated settings used before a server starts accepting connections.
 ///
@@ -31,7 +30,6 @@ pub struct ServerOptions {
     pub(crate) request_header_timeout: Duration,
     /// Positive per-server cap covering TLS handshakes and HTTP connection futures.
     pub(crate) max_transport_connections: NonZeroUsize,
-    pub(crate) http_limits: HttpLimits,
 }
 
 impl ServerOptions {
@@ -42,7 +40,6 @@ impl ServerOptions {
             shutdown_timeout: Duration::from_secs(30),
             request_header_timeout: Duration::from_secs(10),
             max_transport_connections: NonZeroUsize::new(1024).expect("default transport limit is non-zero"),
-            http_limits: HttpLimits::default(),
         }
     }
 
@@ -77,13 +74,6 @@ impl ServerOptions {
         Ok(self)
     }
 
-    /// Sets the shared finite limits available to short-request router
-    /// branches.
-    pub fn with_http_limits(mut self, limits: HttpLimits) -> Self {
-        self.http_limits = limits;
-        self
-    }
-
     /// Returns the configured listening address.
     pub const fn address(&self) -> SocketAddr {
         self.addr
@@ -102,17 +92,6 @@ impl ServerOptions {
     /// Returns the maximum number of transport connections for this server instance.
     pub const fn max_transport_connections(&self) -> usize {
         self.max_transport_connections.get()
-    }
-
-    /// Returns the configured short-request limit defaults.
-    ///
-    /// `WebServer` does not rewrite a caller-built `Router` to classify its
-    /// routes. Pass this value to [`crate::ControllerRoutes::with_http_limits`]
-    /// or [`crate::RequestLimitLayer::new`] for the branches that should use
-    /// these defaults; explicitly classified SSE and WebSocket branches skip
-    /// the short-request layer.
-    pub const fn http_limits(&self) -> HttpLimits {
-        self.http_limits
     }
 
     /// Checks that all configured limits are finite and positive.

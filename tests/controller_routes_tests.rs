@@ -58,6 +58,18 @@ impl Users {
         "events"
     }
 
+    #[route("/slow-events", method = "GET", kind = "sse")]
+    async fn slow_events(&self) -> &'static str {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        "events"
+    }
+
+    #[route("/slow-socket", method = "GET", kind = "ws")]
+    async fn slow_socket(&self) -> &'static str {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        "socket"
+    }
+
     #[post_mapping("/short-payload")]
     async fn short_payload(&self, body: Bytes) -> String {
         String::from_utf8_lossy(&body).into_owned()
@@ -146,6 +158,33 @@ async fn controller_short_routes_enforce_configured_body_limit_but_stream_routes
         assert_eq!(response.status(), StatusCode::OK, "{path}");
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(&body[..], b"xx", "{path}");
+    }
+}
+
+#[tokio::test]
+async fn controller_stream_routes_skip_short_request_deadline() {
+    let controller = ControllerRoutes::new()
+        .with_http_limits(
+            HttpLimits::default()
+                .with_request_timeout(Duration::from_millis(5))
+                .unwrap(),
+        )
+        .add(Arc::new(Users {
+            prefix: "user".to_owned(),
+        }))
+        .unwrap()
+        .finish()
+        .unwrap();
+    let app = Router::new().merge(controller).with_state(AppState("state"));
+
+    for path in ["/users/slow-events", "/users/slow-socket"] {
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
     }
 }
 
