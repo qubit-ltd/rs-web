@@ -5,8 +5,10 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use trybuild::TestCases;
+
 #[test]
-fn invalid_controller_declarations_fail_at_compile_time() {
-    let cases = trybuild::TestCases::new();
+fn test_invalid_controller_declarations_fail_at_compile_time() {
+    let cases = TestCases::new();
     cases.compile_fail("tests/ui/controller_*.rs");
 }

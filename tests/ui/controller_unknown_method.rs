@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use qubit_web::rest_controller;
+use qubit_web::route;
 
 struct Controller;
 
