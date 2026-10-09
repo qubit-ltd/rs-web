@@ -44,7 +44,6 @@ const DEFAULT_MESSAGE_BYTES: usize = 1024 * 1024;
 const DEFAULT_QUEUE_MESSAGES: usize = 64;
 const DEFAULT_QUEUE_BYTES: usize = 1024 * 1024;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Limits and lifecycle policy for WebSocket sessions.
 ///
@@ -104,7 +103,6 @@ impl WsUpgradePolicy {
                 queue_messages: DEFAULT_QUEUE_MESSAGES,
                 queue_bytes: DEFAULT_QUEUE_BYTES,
                 idle_timeout: DEFAULT_IDLE_TIMEOUT,
-                shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
                 allowed_origins: None,
                 invalid_limits: false,
             }),
@@ -251,26 +249,6 @@ impl WsUpgradePolicy {
         self.map_inner(|inner| {
             inner.invalid_limits |= timeout.is_zero();
             inner.idle_timeout = timeout;
-        })
-    }
-
-    /// Sets how long an `on_upgrade` session waits for the peer's close
-    /// acknowledgement when no server deadline is available.
-    ///
-    /// `on_upgrade` uses the `ServerContext` shared absolute shutdown deadline
-    /// when one is available; this timeout is the local fallback.
-    ///
-    /// # Parameters
-    ///
-    /// * `timeout` - Positive wait for a peer close acknowledgement.
-    ///
-    /// # Returns
-    ///
-    /// The updated policy; zero is reported by `validate`.
-    pub fn shutdown_timeout(self, timeout: Duration) -> Self {
-        self.map_inner(|inner| {
-            inner.invalid_limits |= timeout.is_zero();
-            inner.shutdown_timeout = timeout;
         })
     }
 

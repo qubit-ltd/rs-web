@@ -28,8 +28,6 @@ pub(in crate::ws) struct PolicyInner {
     pub(in crate::ws) queue_bytes: usize,
     /// Maximum idle interval before a session is closed.
     pub(in crate::ws) idle_timeout: Duration,
-    /// Maximum time allowed for the peer to acknowledge a shutdown close frame.
-    pub(in crate::ws) shutdown_timeout: Duration,
     /// Exact allowed Origin values; `None` rejects requests that provide
     /// Origin.
     pub(in crate::ws) allowed_origins: Option<Vec<String>>,

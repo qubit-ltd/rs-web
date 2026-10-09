@@ -338,19 +338,14 @@ fn test_zero_policy_limits_are_invalid() {
     assert!(WsUpgradePolicy::new().queue_limits(0, 1).validate().is_err());
     assert!(WsUpgradePolicy::new().queue_limits(1, 0).validate().is_err());
     assert!(WsUpgradePolicy::new().idle_timeout(Duration::ZERO).validate().is_err());
-    assert!(
-        WsUpgradePolicy::new()
-            .shutdown_timeout(Duration::ZERO)
-            .validate()
-            .is_err()
-    );
 }
 
 #[tokio_test]
 async fn test_session_exits_on_shutdown_and_releases_connection_permit() {
-    let policy = Arc::new(WsUpgradePolicy::new().shutdown_timeout(Duration::from_millis(250)));
+    let policy = Arc::new(WsUpgradePolicy::new());
     let shutdown = CancellationToken::new();
-    let (addr, task) = serve_with((*policy).clone(), shutdown.clone()).await;
+    let (addr, task) =
+        serve_with_shutdown_timeout((*policy).clone(), shutdown.clone(), Duration::from_millis(250)).await;
     let (mut client, status) = handshake(addr, None).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
     timeout(Duration::from_secs(1), async {
@@ -506,8 +501,7 @@ async fn test_context_upgrade_uses_the_server_absolute_shutdown_deadline() {
     let context = server.context();
     let policy = WsUpgradePolicy::new()
         .max_connections(1)
-        .allowed_origins(["https://app.example"])
-        .shutdown_timeout(Duration::from_millis(30));
+        .allowed_origins(["https://app.example"]);
     assert_eq!(context.active_sessions(), 0);
     let app = Router::new()
         .route("/ws", get(context_ws_upgrade))
@@ -544,7 +538,7 @@ async fn test_context_upgrade_uses_the_server_absolute_shutdown_deadline() {
     .await;
     assert!(
         early_release.is_err(),
-        "the per-policy 30 ms timeout must not replace the server deadline"
+        "the server deadline must remain in effect before its configured timeout"
     );
     assert_eq!(context.active_sessions(), 1);
     assert_eq!(policy.active_connections(), 1);
@@ -731,9 +725,7 @@ async fn test_context_session_is_released_after_shutdown_deadline_without_peer_a
     .await
     .unwrap();
     let context = server.context();
-    let policy = WsUpgradePolicy::new()
-        .max_connections(1)
-        .shutdown_timeout(Duration::from_secs(5));
+    let policy = WsUpgradePolicy::new().max_connections(1);
     let app = Router::new()
         .route("/ws", get(context_ws_upgrade))
         .with_state((policy.clone(), context.clone()));
@@ -770,9 +762,7 @@ async fn test_context_session_is_released_after_shutdown_deadline_without_peer_a
 
 #[tokio_test]
 async fn test_shutdown_close_deadline_releases_connection_without_peer_ack() {
-    let policy = WsUpgradePolicy::new()
-        .max_connections(1)
-        .shutdown_timeout(Duration::from_millis(30));
+    let policy = WsUpgradePolicy::new().max_connections(1);
     let shutdown = CancellationToken::new();
     let (addr, task) = serve_with_shutdown_timeout(policy.clone(), shutdown.clone(), Duration::from_millis(30)).await;
     let (mut client, status) = handshake(addr, None).await;
