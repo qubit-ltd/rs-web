@@ -71,6 +71,8 @@ let app = Router::new()
 
 The example fragments assume application handlers `submit`, `progress`, and `websocket`; the full runnable composition is in [`examples/prompt_stream.rs`](../examples/prompt_stream.rs). Controller routes already receive default limits; call `ControllerRoutes::with_http_limits` before adding them to replace those limits. Controller `sse` and `ws` routes skip the short-request layer. Keep SSE and WebSocket routes outside `RequestLimitLayer`: the layer's deadline also covers response streaming and is intended for short requests.
 
+`ControllerRoutes::add` checks the complete set of Controller route declarations before registering them. It returns `ControllerRouteError` for duplicate method/path pairs, invalid paths, or matching-template conflicts such as parameter aliases and overlapping wildcards. Different methods can share one template, and `finish()` returns the `Router` directly. This check covers declarations collected by the builder; later merges with native Axum routers retain Axum's own behavior.
+
 ### Share SSE and WebSocket policies through application state
 
 Create each long-lived connection policy once during startup and keep it in the Axum state. A handler clones the policy from `State<AppState>` before using it:
@@ -153,7 +155,7 @@ let report = server.serve(app, shutdown_signal).await?;
 assert!(report.graceful);
 ```
 
-On shutdown, the server atomically closes admission for new managed SSE and WebSocket sessions, stops accepting new connections, and notifies active sessions. It waits for HTTP connections and registered sessions against the same configured deadline. `graceful` is true only if both finish before that deadline. Otherwise `unfinished_managed_sessions` records the managed session count at the deadline; the report does not claim that arbitrary application background tasks have stopped. `forced_connections` is `None` because Axum does not expose a reliable count.
+On shutdown, the server atomically closes admission for new managed SSE and WebSocket sessions, stops accepting new connections, and notifies active sessions. It waits for HTTP connections and registered sessions against the same configured deadline, set by `ServerOptions` and shared with WebSocket sessions through `ServerContext`; `WsUpgradePolicy` has no separate shutdown timeout. `graceful` is true only if both finish before that deadline. Otherwise `unfinished_managed_sessions` records the managed session count at the deadline; the report does not claim that arbitrary application background tasks have stopped. `forced_connections` is `None` because Axum does not expose a reliable count.
 
 Run the demonstration service with:
 

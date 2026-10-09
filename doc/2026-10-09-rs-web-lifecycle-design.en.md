@@ -10,6 +10,8 @@ SSE and WebSocket capacity limits are separate policy domains, not a total servi
 
 The server stops accepting connections, closes session admission, and notifies active sessions when shutdown starts. It waits for HTTP connection tasks and managed sessions against one absolute deadline. `ShutdownReport::graceful` is true only when both groups finish before that deadline. `unfinished_managed_sessions` records the managed session count at the deadline. The report does not claim that arbitrary application work has stopped. `forced_connections` remains `None` because Axum does not expose a provable count.
 
+The shutdown duration is configured once through `ServerOptions` and carried by `ServerContext`; `WsUpgradePolicy` has no policy-level shutdown timeout. WebSocket reader and writer shutdown use the server's shared absolute deadline.
+
 ## Transport idle timeout
 
 `ServerOptions::transport_idle_timeout` defaults to 30 seconds and must be nonzero. Configuration uses `transport.idle_timeout_ms`, also defaulting to `30000`. A TCP/TLS transport with no active request handler or response body is closed after this idle interval, including a connection that never sends its first HTTP/2 request. Active handlers and bodies pause the idle timer, so a long-lived SSE response is not closed as idle. HTTP/2 PING frames do not reset request activity. The separate `request_header_timeout` remains 10 seconds for HTTP/1 headers and TLS handshake; an idle timeout does not bound a stalled active request.
@@ -26,4 +28,4 @@ All clones of a WebSocket send queue share its closed state. After the peer or s
 
 `WebServerError` retains socket bind, local-address, and accept failures as `io::Error` sources. Callers can inspect `std::error::Error::source()` for diagnostics. Default `Display` and `Debug` output omit the underlying OS error text; TLS and configuration errors do not expose potentially sensitive source chains.
 
-Version 0.2.0 has intentional breaking changes: token-only WebSocket upgrades are removed in favor of `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)`, `WebServerError` is no longer a copyable source-free enum, and SSE admission distinguishes capacity exhaustion from shutdown rejection.
+Version 0.2.0 has intentional breaking changes: token-only WebSocket upgrades are removed in favor of `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)`, WebSocket shutdown timing is configured only through `ServerOptions` and `ServerContext`, `WebServerError` is no longer a copyable source-free enum, and SSE admission distinguishes capacity exhaustion from shutdown rejection.

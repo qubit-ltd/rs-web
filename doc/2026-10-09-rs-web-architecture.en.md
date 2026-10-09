@@ -6,14 +6,14 @@
 
 `WebServer` owns the bound TCP listener, per-server transport policy, and shared `ServerContext`. It accepts and caps transport connections, optionally performs TLS negotiation, and adapts each stream into Hyper with upgrade support. Hyper dispatches requests through the application's Axum `Router<()>`.
 
-Applications can construct that router directly or use `ControllerRoutes` with the controller macros. Controller routes receive method/path conflict checks and route metadata. Controller `short` routes receive the builder's default request budget; native Axum routes receive no such budget unless the application installs a layer on selected branches. Limits are scoped to those routes and are not a server-wide policy. Diagnostic middleware logs allowlisted request metadata: method, matched route template, response status, elapsed time, connection ID, and optional declared request size.
+Applications can construct that router directly or use `ControllerRoutes` with the controller macros. `ControllerRoutes::add` preflights complete route templates and returns `ControllerRouteError` for duplicate method/path declarations, invalid paths, and matching-template conflicts before registration. `finish()` returns the Axum `Router` directly. Later merges with native Axum routers retain Axum's own conflict behavior. Controller `short` routes receive the builder's default request budget; native Axum routes receive no such budget unless the application installs a layer on selected branches. Limits are scoped to those routes and are not a server-wide policy. Diagnostic middleware logs allowlisted request metadata: method, matched route template, response status, elapsed time, connection ID, and optional declared request size.
 
 The main module responsibilities are:
 
 | Module | Responsibility |
 | --- | --- |
 | `server` | Bind HTTP/HTTPS listeners, run the Axum router, cap transport connections, coordinate shutdown, and report shutdown results. |
-| `mvc` | Assemble controller routes, reject duplicate method/path declarations, and expose route metadata. |
+| `mvc` | Assemble controller routes, reject duplicate methods and conflicting route templates before registration, and expose route metadata. |
 | `limit` | Provide body, concurrency, and time budgets for ordinary short requests. Controller short routes receive defaults; native Axum branches opt in by installing a layer. |
 | `json` | Enforce strict JSON input/output byte and structural limits when the `json` feature is enabled. |
 | `sse` | Admit bounded server-sent event streams and track them as managed sessions. |
@@ -50,7 +50,7 @@ SSE and WebSocket routes are long-lived and must not be put behind short-request
 
 `ServerOptions` defaults to a 10-second HTTP/1 header and TLS handshake timeout, a 30-second idle transport timeout, and a 30-second graceful shutdown deadline. The idle timeout closes a TCP/TLS connection only while no request handler or response body is active; it does not bound a stalled active request. Long-lived response bodies therefore pause transport-idle expiry.
 
-On shutdown, the server stops accepting sockets, closes managed-session admission, signals active sessions, and waits for HTTP connection tasks and managed SSE/WS sessions against one absolute deadline. `ShutdownReport::graceful` is true only if both groups finish in time. The report records unfinished managed sessions; it cannot claim arbitrary application background work has stopped. `forced_connections` is `None` because Axum does not expose a provable count.
+On shutdown, the server stops accepting sockets, closes managed-session admission, signals active sessions, and waits for HTTP connection tasks and managed SSE/WS sessions against one absolute deadline. `ServerOptions` sets the timeout and `ServerContext` supplies the shared deadline to WebSocket sessions; `WsUpgradePolicy` has no separate shutdown timeout. `ShutdownReport::graceful` is true only if both groups finish in time. The report records unfinished managed sessions; it cannot claim arbitrary application background work has stopped. `forced_connections` is `None` because Axum does not expose a provable count.
 
 `ConfiguredWeb` parses an explicit configuration object. It returns `ServerOptions` separately from `HttpLimits`. Controller short routes already use `HttpLimits::default()`; pass the configured limits to `with_http_limits` to replace that policy. For native Axum routes, install `RequestLimitLayer` on selected short branches. `WebServer` does not modify the Router. With `config`, transport defaults are `transport.max_connections = 1024` and `transport.idle_timeout_ms = 30000`; HTTP policy keys include `http.max_body_bytes`, `http.max_concurrent_requests`, and `http.request_timeout_ms`. TLS is optional and configured separately through `TlsConfig`; PEM load failures are reduced to `TlsInvalid` without exposing key material or paths.
 

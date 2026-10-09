@@ -6,14 +6,14 @@
 
 `WebServer` 持有已绑定的 TCP listener、每个服务实例的传输策略和共享的 `ServerContext`。它接收并限制传输连接，可选执行 TLS 握手，再将连接适配为支持 upgrade 的 Hyper 连接。Hyper 将请求交给应用的 Axum `Router<()>`。
 
-应用可以直接构造 router，也可以使用 `ControllerRoutes` 和 controller 宏。Controller 路由会检查 method/path 冲突并提供路由元数据。短请求预算由应用安装在选定的 controller 路由或 router 分支上；除非应用明确安装到相应位置，否则不会全局生效。诊断中间件记录允许列表中的请求元数据：method、匹配的路由模板、响应状态码、耗时、连接 ID，以及可选的声明请求体长度。
+应用可以直接构造 router，也可以使用 `ControllerRoutes` 和 controller 宏。`ControllerRoutes::add` 会在注册前检查完整路由模板，并对重复 method/path、无效路径和匹配模板冲突返回 `ControllerRouteError`；`finish()` 直接返回 Axum `Router`。之后与原生 Axum Router 合并仍遵循 Axum 自身的冲突行为。短请求预算由应用安装在选定的 controller 路由或 router 分支上；除非应用明确安装到相应位置，否则不会全局生效。诊断中间件记录允许列表中的请求元数据：method、匹配的路由模板、响应状态码、耗时、连接 ID，以及可选的声明请求体长度。
 
 主要模块职责如下：
 
 | 模块 | 职责 |
 | --- | --- |
 | `server` | 绑定 HTTP/HTTPS listener、运行 Axum router、限制传输连接、协调停服并生成停服报告。 |
-| `mvc` | 装配 controller 路由、拒绝重复的 method/path 声明并提供路由元数据。 |
+| `mvc` | 装配 controller 路由，在注册前拒绝重复 method 和冲突的路由模板，并提供路由元数据。 |
 | `limit` | 为普通短请求提供可选的请求体、并发和处理时间预算。 |
 | `json` | 启用 `json` feature 时限制严格 JSON 输入/输出的字节数和结构规模。 |
 | `sse` | 接纳有容量上限的 server-sent event 流，并将其登记为受管会话。 |
@@ -50,7 +50,7 @@ SSE 和 WebSocket 都是长连接路由，不应套用短请求并发/期限中�
 
 `ServerOptions` 默认将 HTTP/1 请求头及 TLS 握手期限设为 10 秒，将传输空闲期限和优雅停服期限各设为 30 秒。仅在没有活跃请求 handler 或响应体时，空闲期限才会关闭 TCP/TLS 连接；它不会限制已经开始但停滞的活跃请求。长连接响应体活跃期间，传输空闲计时暂停。
 
-停服开始时，服务停止接收 socket、关闭受管会话登记入口、通知已有会话，并使用同一个绝对期限等待 HTTP connection task 和受管 SSE/WS 会话。只有两组任务都按期结束，`ShutdownReport::graceful` 才为 `true`。报告记录未结束的受管会话，但不保证任意应用后台工作也已停止。Axum 无法提供可证明的强制关闭连接数，因此 `forced_connections` 为 `None`。
+停服开始时，服务停止接收 socket、关闭受管会话登记入口、通知已有会话，并使用同一个绝对期限等待 HTTP connection task 和受管 SSE/WS 会话。期限由 `ServerOptions` 设置，并由 `ServerContext` 提供给 WebSocket 会话；`WsUpgradePolicy` 不再单独设置停服期限。只有两组任务都按期结束，`ShutdownReport::graceful` 才为 `true`。报告记录未结束的受管会话，但不保证任意应用后台工作也已停止。Axum 无法提供可证明的强制关闭连接数，因此 `forced_connections` 为 `None`。
 
 `ConfiguredWeb` 解析应用显式传入的配置对象，并分别返回 `ServerOptions` 与 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；把配置值传给 `with_http_limits` 可替换该策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。启用 `config` 时，传输配置默认值为 `transport.max_connections = 1024` 和 `transport.idle_timeout_ms = 30000`；HTTP 策略键包括 `http.max_body_bytes`、`http.max_concurrent_requests` 和 `http.request_timeout_ms`。TLS 是可选项，通过独立的 `TlsConfig` 配置；PEM 加载失败会归并为 `TlsInvalid`，不会暴露密钥材料或路径。
 
