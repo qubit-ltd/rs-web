@@ -22,6 +22,8 @@ pub enum JsonRejection {
     InvalidJson,
     /// The input exceeded a configured byte or structural budget.
     BudgetExceeded,
+    /// The request body could not be read completely.
+    BodyReadFailed,
     /// The request did not use a supported JSON media type.
     UnsupportedMediaType,
 }
@@ -40,6 +42,11 @@ impl IntoResponse for JsonRejection {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "json_budget_exceeded",
                 "JSON Budget Exceeded",
+            ),
+            Self::BodyReadFailed => (
+                StatusCode::BAD_REQUEST,
+                "json_body_read_failed",
+                "Failed to read JSON body",
             ),
             Self::UnsupportedMediaType => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,

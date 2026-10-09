@@ -15,10 +15,12 @@ use axum::http::Request;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::post;
+use futures_util::stream;
 use qubit_web::json::BoundedJson;
 use qubit_web::json::JsonLimits;
 use qubit_web::json::json_response;
 use serde::de::IgnoredAny;
+use std::io;
 use tower::ServiceExt;
 
 async fn echo_number(BoundedJson(value): BoundedJson<u64>) -> String {
@@ -146,6 +148,34 @@ async fn test_rejects_body_over_input_budget() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8(response_body.to_vec())
+        .unwrap()
+        .contains("json_budget_exceeded"));
+}
+
+#[tokio::test]
+async fn test_body_read_failure_is_not_reported_as_budget_exceeded() {
+    let sentinel = "private body read failure detail";
+    let body = Body::from_stream(stream::once(async move {
+        Err::<&'static str, io::Error>(io::Error::other(sentinel))
+    }));
+    let response = Router::new()
+        .route("/", post(echo_number))
+        .oneshot(
+            Request::post("/")
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_body = String::from_utf8(response_body.to_vec()).unwrap();
+    assert!(response_body.contains("json_body_read_failed"));
+    assert!(!response_body.contains(sentinel));
 }
 
 #[tokio::test]

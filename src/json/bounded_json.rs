@@ -70,7 +70,15 @@ where
         let (_, body) = request.into_parts();
         let bytes = to_bytes(body, limits.max_input_bytes.get())
             .await
-            .map_err(|_| JsonRejection::BudgetExceeded)?;
+            .map_err(|error| {
+                if std::error::Error::source(&error)
+                    .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
+                {
+                    JsonRejection::BudgetExceeded
+                } else {
+                    JsonRejection::BodyReadFailed
+                }
+            })?;
         let mut decoder = JsonDecoder::with_limits(limits.decode_limits());
         decoder.decode_utf8::<T>(&bytes).map(BoundedJson).map_err(|error| {
             if error.kind() == JsonDecodeErrorKind::Budget {
