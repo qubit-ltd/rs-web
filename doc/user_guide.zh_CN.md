@@ -147,12 +147,15 @@ transport 许可用满后，accept loop 会在 accept 新 socket 前等待。客
 
 `request_header_timeout` 默认 10 秒，用于限制 HTTP/1 请求头；HTTPS TLS 握手也沿用该期限。`transport_idle_timeout` 默认 30 秒，在 handler 和响应体都不活跃时回收空闲 HTTP/1/2 连接。活跃请求停滞不会由空闲期限中断；此类情况应使用路由限额或部署层策略处理。它与 `HttpLimits::with_request_timeout` 不同，后者只在短路由显式安装 `RequestLimitLayer` 后生效。
 
+对 WebSocket，`WsUpgradePolicy::idle_timeout` 也限制入站消息交付给应用时无进展的最长时间。若应用没有调用 `WsSession::recv()`，导致容量为 64 条消息的入站通道满载，期限到达后会话会以关闭码 `1013`（原因 `inbound backpressure`）关闭。应定期排空消息，并在接收后再转交较长的业务处理。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达；对端或会话关闭后，它会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。
+
 | 现象 | 检查方式 |
 | --- | --- |
 | 过载时客户端等待或连接失败 | 检查该实例的 transport 额度和系统 backlog。accept 之前不会有保证的 503。 |
 | 请求体超过上限但仍成功 | 确认路由装了 `RequestLimitLayer`，或 Controller 分支使用 `with_http_limits`；并确认 handler/extractor 实际读取请求体。 |
 | SSE 在普通请求期限到达时关闭 | 从该流式分支移除 `RequestLimitLayer`，改用 `SseConnectionPolicy` 的连接策略。 |
 | WS 建立后 `active_sessions()` 仍为 0 | 调用 `WsUpgradePolicy::on_upgrade` 并传入服务的 `ServerContext`；原生 Axum upgrade 不属于受管会话统计。 |
+| 入站负载下 WebSocket 以 `1013` 关闭 | 应用可能没有及时调用 `WsSession::recv()`。入站通道容量为 64 条消息；若通道持续满载且 `idle_timeout` 内交付没有进展，会话就会关闭。应持续读取消息，或先接收再交给应用管理的任务处理；根据预期处理间隔设置合适的 `idle_timeout`。 |
 | 配置解析失败 | 查看 `ConfigOptionsError::field()`，检查地址、正数限额/期限和整数类型。错误文本不会包含配置值。 |
 | HTTPS/WSS 无法连接 | 检查证书链、私钥匹配和客户端信任；TLS 阶段失败时请求还没进入 HTTP 路由。 |
 | 关闭时间超过预期 | 检查 shutdown timeout，并确认 handler/流生产者会响应取消。 |

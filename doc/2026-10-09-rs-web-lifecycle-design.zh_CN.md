@@ -12,6 +12,10 @@
 
 `ServerOptions::transport_idle_timeout` 默认 30 秒，且不能为零。配置键是 `transport.idle_timeout_ms`，缺省值为 `30000`。TCP/TLS 连接在没有活跃 handler 或响应体时达到空闲期限后关闭；这也包括尚未发送首个 HTTP/2 请求的连接。handler 和响应体活跃期间，空闲计时暂停，因此长连接 SSE 不会被误判为空闲。HTTP/2 PING 不会重置请求活动时间。独立的 `request_header_timeout` 仍为 HTTP/1 请求头及 TLS 握手设置 10 秒期限；空闲期限不会中断停滞中的活跃请求。
 
+## WebSocket 队列与入站交付
+
+WebSocket 发送队列的所有克隆共享关闭状态。对端或会话关闭后，`try_send` 会返回 `Closed`；成功入队不保证消息已通过网络送达。入站通道容量为 64 条消息。`WsUpgradePolicy::idle_timeout` 表示读取入站消息或向应用交付消息时无进展的最长时间。若应用不调用 `WsSession::recv()` 且交付在该期限内持续受阻，会话会以关闭码 `1013`、原因 `inbound backpressure` 关闭。应用应持续接收消息，并在收到后再转交较长的业务处理。
+
 ## Origin 与应用认证
 
 `WsUpgradePolicy::new()` 默认允许不携带 Origin 的请求继续进入应用认证。请求若携带 Origin，则默认拒绝；只有配置 `allowed_origins` 并精确匹配后才会接纳。应用仍须在调用 `on_upgrade` 前完成认证。Origin 校验不等同于身份认证。

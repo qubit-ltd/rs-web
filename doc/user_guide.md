@@ -147,12 +147,15 @@ When all transport permits are occupied, the accept loop waits before accepting 
 
 `request_header_timeout` defaults to 10 seconds. It bounds HTTP/1 request headers and is also used for the HTTPS TLS handshake. `transport_idle_timeout` defaults to 30 seconds and closes idle HTTP/1 and HTTP/2 transports when no handler or response body is active. It does not time out a stalled active request; use route limits or deployment-level policies for that case. This is separate from `HttpLimits::with_request_timeout`, which applies only after `RequestLimitLayer` is installed on a short route.
 
+For WebSockets, `WsUpgradePolicy::idle_timeout` also limits the time without progress while delivering an inbound message to the application. If the 64-message inbound channel is full because the application is not calling `WsSession::recv()`, expiry closes the session with code `1013` (`inbound backpressure`). Drain messages regularly and hand off longer processing after receiving each message. `WsSession::try_send` returning success means only that the message entered the outbound queue; it does not guarantee network delivery. After the peer or session closes, it returns `WsSendError::Closed` (or `Closed` when matching the variant).
+
 | Symptom | Check |
 | --- | --- |
 | Client waits or connection fails during overload | Check per-instance transport capacity and OS backlog. Do not expect a 503 before accept. |
 | A request exceeds the body cap but succeeds | Confirm that the route has `RequestLimitLayer` or its controller branch uses `with_http_limits`; confirm the body is consumed by the handler/extractor. |
 | SSE closes at the ordinary request deadline | Remove `RequestLimitLayer` from that streaming branch and use `SseConnectionPolicy` limits. |
 | `active_sessions()` stays at zero for a WS | Call `WsUpgradePolicy::on_upgrade` with the server's `ServerContext`; native Axum upgrades are outside managed-session reporting. |
+| A WebSocket closes with code `1013` under inbound load | The application may not be calling `WsSession::recv()` fast enough. The inbound channel holds 64 messages; if it remains full and delivery makes no progress for `idle_timeout`, the session closes. Read messages continuously or move processing to application-managed work after receiving them; choose an `idle_timeout` that allows the expected processing gaps. |
 | Configuration is rejected | Inspect `ConfigOptionsError::field()`; check address, positive timeout/limit values, and integer types. Error text intentionally does not include rejected values. |
 | HTTPS or WSS cannot connect | Check certificate chain/key pairing and client trust. A TLS failure occurs before HTTP routing. |
 | Shutdown exceeds expectations | Check the configured shutdown timeout and whether application handlers or stream producers respond to cancellation. |
