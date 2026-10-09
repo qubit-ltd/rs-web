@@ -31,6 +31,34 @@ use tower::ServiceExt;
 
 static INVALID_PATH_REGISTER_CALLED: AtomicBool = AtomicBool::new(false);
 
+#[test]
+fn controller_route_errors_have_readable_messages() {
+    assert_eq!(
+        ControllerRouteError::DuplicateMethod {
+            method: "GET",
+            path: "/users/{id}",
+        }
+        .to_string(),
+        "duplicate Controller route: GET /users/{id}"
+    );
+    assert_eq!(
+        ControllerRouteError::PatternConflict {
+            path: "/users/{name}",
+            existing_path: "/users/{id}".to_owned(),
+        }
+        .to_string(),
+        "Controller route pattern /users/{name} conflicts with /users/{id}"
+    );
+    assert_eq!(
+        ControllerRouteError::InvalidPath {
+            path: "/users/{id",
+            reason: "missing closing brace".to_owned(),
+        }
+        .to_string(),
+        "invalid Controller route path /users/{id: missing closing brace"
+    );
+}
+
 #[derive(Clone)]
 struct AppState(&'static str);
 
