@@ -15,20 +15,8 @@ use std::sync::PoisonError;
 use axum::extract::ws::Message;
 use tokio::sync::Notify;
 
+use super::internal::QueueState;
 use super::ws_send_error::WsSendError;
-
-/// Tracks queued and in-flight message counts and byte charges under one lock.
-#[derive(Debug)]
-pub(super) struct QueueState {
-    /// Messages accepted but not yet removed by the writer task.
-    pub(super) messages: VecDeque<Message>,
-    /// Bytes retained in queued messages and current in-flight sends.
-    pub(super) queued_bytes: usize,
-    /// Messages removed from the queue but not yet completed by the sink.
-    in_flight_messages: usize,
-    /// Whether the queue rejects new messages and discards pending messages.
-    closed: bool,
-}
 
 /// A nonblocking bounded queue for outbound WebSocket messages.
 ///
@@ -181,22 +169,6 @@ impl WsSendQueue {
             state.in_flight_messages += 1;
         }
         message
-    }
-}
-
-/// Closes a send queue when its owning task exits.
-pub(in crate::ws) struct CloseQueueOnDrop(WsSendQueue);
-
-impl CloseQueueOnDrop {
-    /// Creates a guard that closes `queue` when dropped.
-    pub(in crate::ws) fn new(queue: WsSendQueue) -> Self {
-        Self(queue)
-    }
-}
-
-impl Drop for CloseQueueOnDrop {
-    fn drop(&mut self) {
-        self.0.close();
     }
 }
 

@@ -11,6 +11,13 @@ use std::sync::Mutex;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
+#[path = "session_state.rs"]
+mod session_state;
+#[path = "session_tracker_inner.rs"]
+mod session_tracker_inner;
+use session_state::SessionState;
+pub(in crate::server::web_server) use session_tracker_inner::SessionTrackerInner;
+
 use super::session_guard::SessionGuard;
 use super::session_registration_error::SessionRegistrationError;
 
@@ -18,19 +25,6 @@ use super::session_registration_error::SessionRegistrationError;
 #[derive(Clone, Debug)]
 pub(crate) struct SessionTracker {
     inner: Arc<SessionTrackerInner>,
-}
-
-#[derive(Debug)]
-pub(super) struct SessionTrackerInner {
-    pub(super) state: Mutex<SessionState>,
-    pub(super) updates: watch::Sender<usize>,
-}
-
-#[derive(Debug)]
-pub(super) struct SessionState {
-    pub(super) active: usize,
-    pub(super) draining: bool,
-    pub(super) completed_during_shutdown: Vec<Instant>,
 }
 
 impl SessionTracker {

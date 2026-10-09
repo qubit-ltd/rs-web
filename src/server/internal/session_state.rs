@@ -5,10 +5,11 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Adapts explicit [`qubit_config::Config`] values to server options.
+use tokio::time::Instant;
 
-mod config_options_error;
-mod configured_web;
-
-pub use config_options_error::ConfigOptionsError;
-pub use configured_web::ConfiguredWeb;
+#[derive(Debug)]
+pub(in crate::server::web_server) struct SessionState {
+    pub(in crate::server::web_server) active: usize,
+    pub(in crate::server::web_server) draining: bool,
+    pub(in crate::server::web_server) completed_during_shutdown: Vec<Instant>,
+}

@@ -5,10 +5,9 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Adapts explicit [`qubit_config::Config`] values to server options.
-
-mod config_options_error;
-mod configured_web;
-
-pub use config_options_error::ConfigOptionsError;
-pub use configured_web::ConfiguredWeb;
+/// Opaque connection identifier attached to a request while serving it.
+#[derive(Clone, Copy)]
+pub(crate) struct ConnectionId(
+    /// Numeric value propagated through request extensions.
+    pub(crate) u64,
+);

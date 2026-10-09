@@ -7,6 +7,18 @@
 // =============================================================================
 //! Private WebSocket reader, writer, and close helpers.
 
+mod close_queue_on_drop;
+mod delivery_result;
+mod policy_inner;
+mod queue_state;
+mod upgrade_lifecycle;
+
+pub(in crate::ws) use close_queue_on_drop::CloseQueueOnDrop;
+pub(in crate::ws) use delivery_result::DeliveryResult;
+pub(in crate::ws) use policy_inner::PolicyInner;
+pub(in crate::ws) use queue_state::QueueState;
+pub(in crate::ws) use upgrade_lifecycle::UpgradeLifecycle;
+
 mod close;
 mod reader;
 mod session_lifecycle;

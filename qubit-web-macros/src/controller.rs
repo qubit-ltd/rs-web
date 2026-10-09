@@ -24,73 +24,15 @@ use syn::Meta;
 use syn::PathArguments;
 use syn::Token;
 use syn::Type;
-use syn::parse::Parse;
-use syn::parse::ParseStream;
 use syn::parse2;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 
-/// Parsed arguments for a verb-specific controller mapping attribute.
-struct MappingArgs {
-    /// Literal child path appended to the controller prefix.
-    path: LitStr,
-    /// Optional route settings accepted after the path.
-    options: Punctuated<Meta, Token![,]>,
-}
-
-impl Parse for MappingArgs {
-    /// Parses the path followed by an optional comma-separated option list.
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let path = input.parse()?;
-        let options = if input.is_empty() {
-            Punctuated::new()
-        } else {
-            input.parse::<Token![,]>()?;
-            Punctuated::parse_terminated(input)?
-        };
-        Ok(Self { path, options })
-    }
-}
-
-/// Parsed arguments for the multi-method `route` attribute.
-struct RouteArgs {
-    /// Literal child path appended to the controller prefix.
-    path: LitStr,
-    /// HTTP method and route-kind settings following the path.
-    options: Punctuated<Meta, Token![,]>,
-}
-
-impl Parse for RouteArgs {
-    /// Parses a path and its optional comma-separated route settings.
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let path = input.parse()?;
-        let options = if input.is_empty() {
-            Punctuated::new()
-        } else {
-            input.parse::<Token![,]>()?;
-            Punctuated::parse_terminated(input)?
-        };
-        Ok(Self { path, options })
-    }
-}
-
-/// Normalized route data used to generate controller registrations.
-struct Route {
-    /// Full path after joining the controller prefix and child path.
-    path: String,
-    /// Uppercase HTTP methods handled by this route.
-    methods: Vec<String>,
-    /// Transport strategy name, validated as `short`, `sse`, or `ws`.
-    kind: String,
-}
-
-/// A controller handler together with its generated route registrations.
-struct Method {
-    /// Routes declared on the handler method.
-    routes: Vec<Route>,
-    /// Generated function name used by the router.
-    handler: syn::Ident,
-}
+mod internal;
+use internal::MappingArgs;
+use internal::Method;
+use internal::Route;
+use internal::RouteArgs;
 
 /// Expands a controller attribute into its implementation and route definition.
 ///

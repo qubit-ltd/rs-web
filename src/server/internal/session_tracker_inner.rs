@@ -5,10 +5,14 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Adapts explicit [`qubit_config::Config`] values to server options.
+use std::sync::Mutex;
 
-mod config_options_error;
-mod configured_web;
+use tokio::sync::watch;
 
-pub use config_options_error::ConfigOptionsError;
-pub use configured_web::ConfiguredWeb;
+use super::session_state::SessionState;
+
+#[derive(Debug)]
+pub(in crate::server::web_server) struct SessionTrackerInner {
+    pub(in crate::server::web_server) state: Mutex<SessionState>,
+    pub(in crate::server::web_server) updates: watch::Sender<usize>,
+}

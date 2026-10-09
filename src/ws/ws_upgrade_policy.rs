@@ -25,10 +25,10 @@ use tokio::spawn;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
+use super::internal::PolicyInner;
 use super::internal::SessionLifecycle;
+use super::internal::UpgradeLifecycle;
 use super::internal::reader_loop;
 use super::internal::server_shutting_down_response;
 use super::internal::writer_loop;
@@ -46,43 +46,16 @@ const DEFAULT_QUEUE_BYTES: usize = 1024 * 1024;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
-struct UpgradeLifecycle {
-    /// Cancellation inherited by the upgraded session.
-    shutdown: CancellationToken,
-    /// Grace period allowed for the peer's close acknowledgement.
-    shutdown_timeout: Duration,
-    /// Shared absolute shutdown deadline, when a server context is available.
-    server_deadline: Option<Arc<Mutex<Option<Instant>>>>,
-}
-
-/// Immutable connection, frame, queue, and timeout settings shared by policy
-/// clones.
-#[derive(Clone, Debug)]
-struct PolicyInner {
-    /// Semaphore tracking concurrent upgraded connections.
-    connections: Arc<Semaphore>,
-    /// Configured connection capacity used alongside available permits.
-    max_connections: usize,
-    /// Maximum size of one WebSocket frame.
-    max_frame_bytes: usize,
-    /// Maximum size of one reassembled WebSocket message.
-    max_message_bytes: usize,
-    /// Maximum number of outbound messages queued or currently being sent.
-    queue_messages: usize,
-    /// Maximum total bytes held by queued or in-flight outbound messages.
-    queue_bytes: usize,
-    /// Maximum idle interval before a session is closed.
-    idle_timeout: Duration,
-    /// Maximum time allowed for the peer to acknowledge a shutdown close frame.
-    shutdown_timeout: Duration,
-    /// Exact allowed Origin values; `None` rejects requests that provide
-    /// Origin.
-    allowed_origins: Option<Vec<String>>,
-    /// Whether any configured finite limit was set to an invalid value.
-    invalid_limits: bool,
-}
-
 /// Limits and lifecycle policy for WebSocket sessions.
+///
+/// Each call to [`new`](Self::new) or [`default`](Self::default) creates an
+/// independent connection-capacity domain. Cloning a policy shares its domain.
+/// To apply one limit across routes or handlers, create the policy once during
+/// application startup, store it in application state, and use clones obtained
+/// from that state (for example, through Axum's
+/// [`axum::extract::State`]). [`active_connections`](Self::active_connections)
+/// counts upgrades in this domain, including its clones; it does not count
+/// connections admitted by other policies or all server sessions.
 ///
 /// # Examples
 ///
@@ -110,6 +83,11 @@ impl Default for WsUpgradePolicy {
 impl WsUpgradePolicy {
     /// Creates a policy with finite defaults: 128 sessions, 64 KiB frames,
     /// 1 MiB messages, a 64-message/1 MiB queue, and a 60-second idle timeout.
+    ///
+    /// The returned policy starts an independent connection-capacity domain.
+    /// Cloning it shares that domain. Create it once at application startup and
+    /// reuse clones from application state when routes or handlers must share
+    /// the same limit.
     ///
     /// # Returns
     ///
@@ -145,6 +123,9 @@ impl WsUpgradePolicy {
 
     /// Returns the number of active upgraded connections.
     ///
+    /// This counts only upgrades using this policy's capacity domain,
+    /// including clones of this policy.
+    ///
     /// # Returns
     ///
     /// The configured capacity minus permits currently available for upgrades.
@@ -155,6 +136,13 @@ impl WsUpgradePolicy {
     }
 
     /// Sets the maximum number of simultaneous upgraded connections.
+    ///
+    /// The returned policy uses a new connection-capacity domain with the
+    /// requested limit. Because configuration updates use copy-on-write,
+    /// existing policy clones keep their previous configuration and domain.
+    /// Already admitted sessions also retain permits in the previous domain;
+    /// they are not included in this policy's
+    /// [`active_connections`](Self::active_connections) count.
     ///
     /// # Parameters
     ///

@@ -22,9 +22,10 @@ use tokio::time::timeout;
 use tokio::time::timeout_at;
 use tokio_util::sync::CancellationToken;
 
+use super::DeliveryResult;
 use super::SessionLifecycle;
 use super::close::get_close_deadline;
-use crate::ws::ws_send_queue::CloseQueueOnDrop;
+use crate::ws::internal::CloseQueueOnDrop;
 use crate::ws::ws_send_queue::WsSendQueue;
 
 /// Receives frames, applies idle/shutdown deadlines, and forwards input to the
@@ -175,14 +176,6 @@ fn handle_delivery(
             true
         }
     }
-}
-
-/// Result of forwarding a frame to the bounded application channel.
-enum DeliveryResult {
-    Delivered,
-    ReceiverClosed,
-    Cancelled,
-    TimedOut,
 }
 
 /// Delivers one inbound frame unless cancellation wins the race.

@@ -23,7 +23,7 @@ use super::SessionLifecycle;
 use super::close::get_close_deadline;
 use super::close::send_close_and_wait;
 use crate::server::SessionGuard;
-use crate::ws::ws_send_queue::CloseQueueOnDrop;
+use crate::ws::internal::CloseQueueOnDrop;
 use crate::ws::ws_send_queue::WsSendQueue;
 use crate::ws::ws_send_queue::message_size;
 

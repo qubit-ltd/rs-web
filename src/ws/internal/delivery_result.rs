@@ -5,10 +5,10 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Adapts explicit [`qubit_config::Config`] values to server options.
-
-mod config_options_error;
-mod configured_web;
-
-pub use config_options_error::ConfigOptionsError;
-pub use configured_web::ConfiguredWeb;
+/// Result of forwarding a frame to the bounded application channel.
+pub(in crate::ws) enum DeliveryResult {
+    Delivered,
+    ReceiverClosed,
+    Cancelled,
+    TimedOut,
+}
