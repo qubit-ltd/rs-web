@@ -56,15 +56,13 @@ pub(in crate::ws) fn get_close_deadline(
     deadline.expect("close deadline is set")
 }
 
-/// Drains queued messages and performs the WebSocket close handshake on
-/// shutdown.
-///
-/// Builds the stable problem response used when server shutdown closes WS
-/// admission.
+/// Builds the stable problem response returned when server shutdown rejects a
+/// WebSocket request.
 ///
 /// # Returns
 ///
-/// An HTTP 503 response with the `server_shutting_down` problem code.
+/// An HTTP 503 response with the `application/problem+json` content type and
+/// the `server_shutting_down` problem code.
 pub(in crate::ws) fn server_shutting_down_response() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,

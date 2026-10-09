@@ -55,13 +55,18 @@ pub struct WsSession {
 }
 
 impl WsSession {
-    /// Receives the next application message, returning `None` on close,
-    /// shutdown, or the configured idle deadline.
+    /// Receives the next application message.
+    ///
+    /// A peer close frame may be returned as `Some(Ok(Message::Close(...)))`
+    /// when the inbound channel has capacity. A later call returns `None` after
+    /// the channel closes. If the close frame cannot be queued, or cancellation
+    /// or the idle deadline wins, the method can return `None` without first
+    /// returning a close frame.
     ///
     /// # Returns
     ///
-    /// `Some(Ok(message))` for an inbound frame, `Some(Err(error))` for a
-    /// transport error, and `None` after close, cancellation, or idle timeout.
+    /// An inbound message or read error when delivered to the application;
+    /// `None` after close, cancellation, or the idle deadline.
     ///
     /// # Errors
     ///
