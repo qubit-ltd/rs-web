@@ -10,7 +10,8 @@
 //! The macros declare routes on an inherent Controller implementation; the
 //! main `qubit-web` crate re-exports them and provides the route builder:
 //!
-//! ```ignore
+//! ```rust
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::sync::Arc;
 //! use qubit_web::{ControllerRoutes, rest_controller, get_mapping};
 //!
@@ -22,8 +23,10 @@
 //!     async fn check(&self) -> &'static str { "ok" }
 //! }
 //!
-//! let router = ControllerRoutes::new().add(Arc::new(Health))?.finish()?;
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! let router = ControllerRoutes::<()>::new().add(Arc::new(Health))?.finish()?;
+//! let _ = router;
+//! # Ok(())
+//! # }
 //! ```
 
 mod controller;
