@@ -65,6 +65,7 @@ config = ["dep:qubit-config"]
 
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "matched-path", "query", "tokio"] }
+matchit = "0.8"
 http-body-util = "0.1"
 futures-core = "0.3"
 futures-util = { version = "0.3", features = ["sink"], optional = true }

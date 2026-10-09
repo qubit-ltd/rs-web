@@ -25,7 +25,6 @@ fn test_macro_crate_documentation_example_compiles() {
     let router = ControllerRoutes::<()>::new()
         .add(Arc::new(Health))
         .expect("add Health controller")
-        .finish()
-        .expect("finish ControllerRoutes");
+        .finish();
     let _ = router;
 }

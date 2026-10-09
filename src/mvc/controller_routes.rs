@@ -5,13 +5,14 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::Router;
 
 use super::ControllerDefinition;
-use super::ControllerRouteConflict;
+use super::ControllerRouteError;
 use crate::limit::HttpLimits;
 use crate::limit::LimitState;
 
@@ -28,15 +29,15 @@ use crate::limit::LimitState;
 /// ```
 /// use qubit_web::mvc::ControllerRoutes;
 ///
-/// let router = ControllerRoutes::<()>::new().finish().unwrap();
+/// let router = ControllerRoutes::<()>::new().finish();
 /// let _ = router;
 /// ```
 #[must_use]
 pub struct ControllerRoutes<S = ()> {
     /// Axum router accumulated during assembly.
     router: Router<S>,
-    /// Method/template pairs already declared by added controllers.
-    declared: HashSet<(&'static str, &'static str)>,
+    /// Methods already declared for each complete route template.
+    declared: HashMap<&'static str, HashSet<&'static str>>,
     /// Shared limits passed to each registered controller.
     limit_state: LimitState,
 }
@@ -64,13 +65,13 @@ where
     /// ```
     /// use qubit_web::mvc::ControllerRoutes;
     ///
-    /// let router = ControllerRoutes::<()>::new().finish().unwrap();
+    /// let router = ControllerRoutes::<()>::new().finish();
     /// let _ = router;
     /// ```
     pub fn new() -> Self {
         Self {
             router: Router::new(),
-            declared: HashSet::new(),
+            declared: HashMap::new(),
             limit_state: LimitState::new(HttpLimits::default()),
         }
     }
@@ -107,26 +108,58 @@ where
     ///
     /// # Returns
     ///
-    /// The updated builder, or a conflict identifying the duplicate method and
-    /// path.
+    /// The updated builder after every route declaration passes preflight.
     ///
     /// # Errors
     ///
-    /// Returns [`ControllerRouteConflict`] when the controller duplicates a
-    /// method/template pair already declared by this builder.
+    /// Returns [`ControllerRouteError::DuplicateMethod`] for an exact duplicate
+    /// method and path, [`ControllerRouteError::PatternConflict`] for distinct
+    /// templates that match the same paths, or
+    /// [`ControllerRouteError::InvalidPath`] for an invalid route template.
+    /// No routes are registered unless every declaration passes preflight.
     #[allow(clippy::should_implement_trait)]
-    pub fn add<C>(mut self, controller: Arc<C>) -> Result<Self, ControllerRouteConflict>
+    pub fn add<C>(mut self, controller: Arc<C>) -> Result<Self, ControllerRouteError>
     where
         C: ControllerDefinition<S>,
     {
-        for route in C::route_metadata() {
-            if self.declared.contains(&(route.method(), route.path())) {
-                return Err(ControllerRouteConflict::new(route.method(), route.path()));
-            }
+        let mut declared = self.declared.clone();
+        let mut matcher = matchit::Router::<()>::new();
+        for path in self.declared.keys() {
+            matcher
+                .insert(*path, ())
+                .map_err(|error| ControllerRouteError::InvalidPath {
+                    path,
+                    reason: error.to_string(),
+                })?;
         }
-        self.declared
-            .extend(C::route_metadata().iter().map(|route| (route.method(), route.path())));
+        for route in C::route_metadata() {
+            if declared
+                .get(route.path())
+                .is_some_and(|methods| methods.contains(route.method()))
+            {
+                return Err(ControllerRouteError::DuplicateMethod {
+                    method: route.method(),
+                    path: route.path(),
+                });
+            }
+            if !declared.contains_key(route.path())
+                && let Err(error) = matcher.insert(route.path(), ())
+            {
+                return match error {
+                    matchit::InsertError::Conflict { with } => Err(ControllerRouteError::PatternConflict {
+                        path: route.path(),
+                        existing_path: with,
+                    }),
+                    error => Err(ControllerRouteError::InvalidPath {
+                        path: route.path(),
+                        reason: error.to_string(),
+                    }),
+                };
+            }
+            declared.entry(route.path()).or_default().insert(route.method());
+        }
         self.router = C::register(controller, self.router, self.limit_state.clone());
+        self.declared = declared;
         Ok(self)
     }
 
@@ -134,13 +167,8 @@ where
     ///
     /// # Returns
     ///
-    /// The assembled router, currently returned in `Ok` because all route
-    /// conflicts are detected while adding controllers.
-    ///
-    /// # Errors
-    ///
-    /// This implementation does not currently return an error.
-    pub fn finish(self) -> Result<Router<S>, ControllerRouteConflict> {
-        Ok(self.router)
+    /// The assembled router.
+    pub fn finish(self) -> Router<S> {
+        self.router
     }
 }

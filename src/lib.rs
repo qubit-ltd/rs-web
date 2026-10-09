@@ -51,7 +51,7 @@
 //!
 //! let router = ControllerRoutes::<()>::new()
 //!     .add(Arc::new(Health)).unwrap()
-//!     .finish().unwrap();
+//!     .finish();
 //! let _ = router;
 //! ```
 
@@ -93,7 +93,7 @@ pub use json::json_response;
 pub use limit::HttpLimits;
 pub use limit::RequestLimitLayer;
 pub use limit::WebRejection;
-pub use mvc::ControllerRouteConflict;
+pub use mvc::ControllerRouteError;
 pub use mvc::ControllerRoutes;
 pub use mvc::RouteMetadata;
 pub use options::ServerOptions;

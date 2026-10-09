@@ -833,6 +833,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "matchit",
  "qubit-budget",
  "qubit-config",
  "qubit-json",

@@ -70,7 +70,7 @@ impl Items {
 }
 
 fn application(context: ServerContext) -> Router<()> {
-    let items = ControllerRoutes::new().add(Arc::new(Items)).unwrap().finish().unwrap();
+    let items = ControllerRoutes::new().add(Arc::new(Items)).unwrap().finish();
     let sse = SseConnectionPolicy::default();
     let ws = WsUpgradePolicy::new();
     let ws_context = context.clone();

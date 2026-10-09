@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let controller = ControllerRoutes::new()
         .with_http_limits(http_limits)
         .add(users)?
-        .finish()?;
+        .finish();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let shutdown_tx = Arc::new(Mutex::new(Some(shutdown_tx)));
     let app = Router::new()

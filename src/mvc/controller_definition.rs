@@ -14,6 +14,12 @@ use crate::limit::LimitState;
 
 /// Internal contract implemented by `#[rest_controller]` expansions.
 ///
+/// Implementations must keep `route_metadata` accurate: it must describe every
+/// route inserted by `register`, with the same path and method. The assembly
+/// builder preflights this metadata before calling `register`; a manual
+/// implementation that diverges from it, or inserts conflicting routes itself,
+/// can still trigger Axum's route conflict panic.
+///
 /// # Type Parameters
 ///
 /// * `S` - Cloneable, thread-safe Axum router state shared by registered

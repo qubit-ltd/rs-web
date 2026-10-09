@@ -7,6 +7,8 @@
 // =============================================================================
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::Router;
@@ -21,10 +23,13 @@ use axum::http::Request;
 use axum::http::StatusCode;
 use axum::routing::get;
 use qubit_web::HttpLimits;
+use qubit_web::mvc::ControllerRouteError;
 use qubit_web::mvc::ControllerRoutes;
 use qubit_web::rest_controller;
 use tokio::sync::Semaphore;
 use tower::ServiceExt;
+
+static INVALID_PATH_REGISTER_CALLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 struct AppState(&'static str);
@@ -119,8 +124,7 @@ async fn controller_short_routes_enforce_configured_body_limit_but_stream_routes
         .with_http_limits(limits)
         .add(users)
         .unwrap()
-        .finish()
-        .unwrap();
+        .finish();
     let app = Router::new().merge(controller).with_state(AppState("state"));
 
     let response = app
@@ -166,8 +170,7 @@ async fn controller_stream_routes_skip_short_request_deadline() {
             prefix: "user".to_owned(),
         }))
         .unwrap()
-        .finish()
-        .unwrap();
+        .finish();
     let app = Router::new().merge(controller).with_state(AppState("state"));
 
     for path in ["/users/slow-events", "/users/slow-socket"] {
@@ -188,8 +191,7 @@ async fn controller_short_routes_apply_default_body_limit() {
             prefix: "user".to_owned(),
         }))
         .unwrap()
-        .finish()
-        .unwrap();
+        .finish();
     let app = Router::new().merge(controller).with_state(AppState("state"));
     let body = vec![b'x'; 1024 * 1024 + 1];
     let response = app
@@ -217,8 +219,7 @@ async fn short_controller_routes_share_the_configured_concurrency_limit() {
         .with_http_limits(HttpLimits::default().with_max_concurrent_requests(1).unwrap())
         .add(controller)
         .unwrap()
-        .finish()
-        .unwrap();
+        .finish();
     let app = Router::new().merge(routes).with_state(AppState("state"));
 
     let first_app = app.clone();
@@ -264,7 +265,7 @@ async fn controller_routes_mounts_controller_with_native_extractors() {
     let users = Arc::new(Users {
         prefix: "user".to_owned(),
     });
-    let controller = ControllerRoutes::new().add(users).unwrap().finish().unwrap();
+    let controller = ControllerRoutes::new().add(users).unwrap().finish();
     let app = Router::new()
         .route("/native", get(|| async { "native" }))
         .route("/state", get(|State(state): State<AppState>| async move { state.0 }))
@@ -336,8 +337,159 @@ async fn duplicate_method_and_path_across_controllers_is_reported() {
         }))
         .unwrap()
         .add(Arc::new(Duplicate));
-    let error = result.err().unwrap();
-    assert_eq!(error.method(), "GET");
-    assert_eq!(error.path(), "/users/{id}");
-    assert!(error.to_string().contains("GET /users/{id}"));
+    assert!(matches!(
+        result,
+        Err(ControllerRouteError::DuplicateMethod {
+            method: "GET",
+            path: "/users/{id}",
+        })
+    ));
+}
+
+#[test]
+fn parameter_aliases_across_controllers_return_pattern_conflict_without_panicking() {
+    struct NamedUser;
+    #[rest_controller("/users")]
+    impl NamedUser {
+        #[get_mapping("/{name}")]
+        async fn show(&self, Path(_name): Path<String>) -> &'static str {
+            "user"
+        }
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ControllerRoutes::new()
+            .add(Arc::new(Users {
+                prefix: "one".to_owned(),
+            }))
+            .unwrap()
+            .add(Arc::new(NamedUser))
+    }));
+    let Err(ControllerRouteError::PatternConflict { path, existing_path }) =
+        result.expect("route addition should return a conflict instead of panicking")
+    else {
+        panic!("expected a parameter alias conflict");
+    };
+    assert_eq!(path, "/users/{name}");
+    assert_eq!(existing_path, "/users/{id}");
+}
+
+#[test]
+fn parameter_aliases_within_one_controller_return_pattern_conflict() {
+    struct Aliases;
+    #[rest_controller("/users")]
+    impl Aliases {
+        #[get_mapping("/{id}")]
+        async fn by_id(&self, Path(_id): Path<String>) -> &'static str {
+            "id"
+        }
+        #[post_mapping("/{name}")]
+        async fn by_name(&self, Path(_name): Path<String>) -> &'static str {
+            "name"
+        }
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ControllerRoutes::<()>::new().add(Arc::new(Aliases))
+    }));
+    let Err(ControllerRouteError::PatternConflict { path, existing_path }) =
+        result.expect("route addition should return a conflict instead of panicking")
+    else {
+        panic!("expected an in-controller parameter alias conflict");
+    };
+    assert_eq!(path, "/users/{name}");
+    assert_eq!(existing_path, "/users/{id}");
+}
+
+#[test]
+fn wildcard_and_parameter_overlap_returns_pattern_conflict() {
+    struct Wildcard;
+    #[rest_controller("/files")]
+    impl Wildcard {
+        #[get_mapping("/{*rest}")]
+        async fn rest(&self, Path(_rest): Path<HashMap<String, String>>) -> &'static str {
+            "rest"
+        }
+    }
+    struct File;
+    #[rest_controller("/files")]
+    impl File {
+        #[post_mapping("/{id}")]
+        async fn one(&self, Path(_id): Path<String>) -> &'static str {
+            "file"
+        }
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ControllerRoutes::<()>::new()
+            .add(Arc::new(Wildcard))
+            .unwrap()
+            .add(Arc::new(File))
+    }));
+    assert!(matches!(
+        result.expect("route addition should not panic"),
+        Err(ControllerRouteError::PatternConflict { .. })
+    ));
+}
+
+#[test]
+fn manually_declared_invalid_path_returns_invalid_path_error() {
+    struct InvalidPath;
+
+    impl qubit_web::mvc::ControllerDefinition<()> for InvalidPath {
+        fn route_metadata() -> &'static [qubit_web::mvc::RouteMetadata] {
+            static ROUTES: [qubit_web::mvc::RouteMetadata; 1] = [qubit_web::mvc::RouteMetadata::new(
+                "GET",
+                "/users/{id",
+                qubit_web::RouteKind::Short,
+            )];
+            &ROUTES
+        }
+
+        fn register(self: Arc<Self>, router: Router<()>, _: qubit_web::limit::LimitState) -> Router<()> {
+            INVALID_PATH_REGISTER_CALLED.store(true, Ordering::Relaxed);
+            router
+        }
+    }
+
+    INVALID_PATH_REGISTER_CALLED.store(false, Ordering::Relaxed);
+    let result = ControllerRoutes::new().add(Arc::new(InvalidPath));
+    let Err(ControllerRouteError::InvalidPath { path, reason }) = result else {
+        panic!("invalid route metadata should be rejected");
+    };
+    assert_eq!(path, "/users/{id");
+    assert!(!reason.is_empty());
+    assert!(!INVALID_PATH_REGISTER_CALLED.load(Ordering::Relaxed));
+}
+
+#[test]
+fn same_path_different_methods_and_static_parameter_paths_can_coexist() {
+    struct PostUser;
+    #[rest_controller("/users")]
+    impl PostUser {
+        #[post_mapping("/{id}")]
+        async fn update(&self, Path(_id): Path<String>) -> &'static str {
+            "updated"
+        }
+    }
+    struct StaticUser;
+    #[rest_controller("/users")]
+    impl StaticUser {
+        #[get_mapping("/current")]
+        async fn current(&self) -> &'static str {
+            "current"
+        }
+    }
+
+    let router = ControllerRoutes::new()
+        .add(Arc::new(Users {
+            prefix: "one".to_owned(),
+        }))
+        .unwrap()
+        .add(Arc::new(PostUser))
+        .unwrap()
+        .add(Arc::new(StaticUser))
+        .unwrap()
+        .finish();
+    let _ = router;
 }
