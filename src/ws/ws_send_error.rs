@@ -8,6 +8,9 @@
 
 /// Error returned when an outbound message cannot be queued.
 ///
+/// A message accepted before shutdown may still be discarded if it remains
+/// pending when the session closes.
+///
 /// # Examples
 ///
 /// ```
@@ -21,6 +24,6 @@
 pub enum WsSendError {
     /// The queue reached either its item or byte limit.
     Backpressure,
-    /// The session has started shutting down.
+    /// The send queue is closed or the session has started shutting down.
     Closed,
 }

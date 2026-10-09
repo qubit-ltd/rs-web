@@ -7,7 +7,6 @@
 // =============================================================================
 //! Application-facing WebSocket session handle.
 
-use std::sync::PoisonError;
 use std::time::Duration;
 
 use axum::Error;
@@ -21,7 +20,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::ws_send_error::WsSendError;
 use super::ws_send_queue::WsSendQueue;
-use super::ws_send_queue::message_size;
 
 /// One upgraded connection with bounded outbound buffering and coordinated
 /// reader/writer shutdown.
@@ -101,7 +99,9 @@ impl WsSession {
     /// # Errors
     ///
     /// Returns [`WsSendError::Closed`] after shutdown or
-    /// [`WsSendError::Backpressure`] when queue capacity is exhausted.
+    /// [`WsSendError::Backpressure`] when queue capacity is exhausted. A
+    /// message accepted before shutdown may be discarded if it is still
+    /// pending when the session closes.
     #[inline]
     pub fn try_send(&self, message: Message) -> Result<(), WsSendError> {
         if self.shutdown.is_cancelled() {
@@ -113,8 +113,10 @@ impl WsSession {
     /// Sends a close frame and discards queued messages.
     ///
     /// The close operation waits at most the configured session shutdown
-    /// timeout, then aborts reader and writer tasks and clears queued data.
+    /// timeout, then aborts reader and writer tasks. It immediately closes the
+    /// outbound queue, discarding pending messages and rejecting future sends.
     pub async fn close(&mut self) {
+        self.queue.close();
         self.shutdown.cancel();
         let wait_for_tasks = async {
             let _ = join!(&mut self.writer, &mut self.reader);
@@ -124,22 +126,12 @@ impl WsSession {
             self.reader.abort();
             let _ = join!(&mut self.writer, &mut self.reader);
         }
-        self.clear_queue();
-    }
-
-    /// Drops queued messages while preserving accounting for any in-flight
-    /// send.
-    fn clear_queue(&self) {
-        let mut state = self.queue.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let queued_bytes = state.messages.iter().map(message_size).sum::<usize>();
-        state.messages.clear();
-        state.queued_bytes = state.queued_bytes.saturating_sub(queued_bytes);
     }
 }
 
 impl Drop for WsSession {
     fn drop(&mut self) {
+        self.queue.close();
         self.shutdown.cancel();
-        self.clear_queue();
     }
 }

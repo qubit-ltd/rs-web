@@ -7,7 +7,6 @@
 // =============================================================================
 //! Inbound WebSocket reader loop.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -17,7 +16,6 @@ use axum::extract::ws::WebSocket;
 use futures_util::StreamExt;
 use futures_util::stream::SplitStream;
 use tokio::select;
-use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -26,6 +24,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::SessionLifecycle;
 use super::close::get_close_deadline;
+use crate::ws::ws_send_queue::CloseQueueOnDrop;
+use crate::ws::ws_send_queue::WsSendQueue;
 
 /// Receives frames, applies idle/shutdown deadlines, and forwards input to the
 /// session.
@@ -34,32 +34,32 @@ use super::close::get_close_deadline;
 ///
 /// * `stream` - Socket half read by the session task.
 /// * `incoming` - Bounded channel used to deliver frames to the application.
-/// * `writer_notify` - Signal waking the writer for ping/close handling.
+/// * `queue` - Shared outbound queue used to wake the writer and reject sends
+///   after the reader exits.
 /// * `lifecycle` - Shared cancellation, close-code and deadline policy.
 /// * `close_ack` - Signal used to coordinate peer close acknowledgement.
-/// * `idle_timeout` - Maximum time without inbound frames before shutdown.
+/// * `idle_timeout` - Maximum time without a received frame or successful
+///   delivery to the application before shutdown.
 pub(in crate::ws) async fn reader_loop(
     mut stream: SplitStream<WebSocket>,
     incoming: mpsc::Sender<Result<Message, Error>>,
-    writer_notify: Arc<Notify>,
+    queue: WsSendQueue,
     lifecycle: SessionLifecycle,
     close_ack: oneshot::Sender<()>,
     idle_timeout: Duration,
 ) {
-    let SessionLifecycle {
-        shutdown,
-        close_code,
-        close_deadline,
-        server_deadline,
-        shutdown_timeout,
-    } = lifecycle;
+    let _close_queue_on_drop = CloseQueueOnDrop::new(queue.clone());
     let mut close_ack = Some(close_ack);
     let mut deadline = None;
     loop {
         let next = select! {
             biased;
-            _ = shutdown.cancelled(), if deadline.is_none() => {
-                deadline = Some(get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout));
+            _ = lifecycle.shutdown.cancelled(), if deadline.is_none() => {
+                deadline = Some(get_close_deadline(
+                    &lifecycle.close_deadline,
+                    lifecycle.server_deadline.as_ref(),
+                    lifecycle.shutdown_timeout,
+                ));
                 continue;
             }
             result = async {
@@ -72,21 +72,20 @@ pub(in crate::ws) async fn reader_loop(
         };
         match next {
             Ok(Some(Ok(message @ Message::Ping(_)))) => {
-                writer_notify.notify_one();
-                if !deliver_incoming(&incoming, &shutdown, Ok(message)).await {
-                    if shutdown.is_cancelled() {
-                        deadline = Some(get_close_deadline(
-                            &close_deadline,
-                            server_deadline.as_ref(),
-                            shutdown_timeout,
-                        ));
-                        continue;
-                    }
-                    break;
+                queue.notify.notify_one();
+                if handle_delivery(
+                    deliver_incoming(&incoming, &lifecycle.shutdown, Ok(message), idle_timeout).await,
+                    &queue,
+                    &lifecycle,
+                    &mut deadline,
+                ) {
+                    continue;
                 }
+                break;
             }
             Ok(Some(Ok(message @ Message::Close(_)))) => {
-                writer_notify.notify_one();
+                queue.close();
+                queue.notify.notify_one();
                 if let Some(ack) = close_ack.take() {
                     let _ = ack.send(());
                 }
@@ -94,53 +93,96 @@ pub(in crate::ws) async fn reader_loop(
                 break;
             }
             Ok(Some(Ok(message))) => {
-                if !deliver_incoming(&incoming, &shutdown, Ok(message)).await {
-                    if shutdown.is_cancelled() {
-                        deadline = Some(get_close_deadline(
-                            &close_deadline,
-                            server_deadline.as_ref(),
-                            shutdown_timeout,
-                        ));
-                        continue;
-                    }
-                    break;
+                if handle_delivery(
+                    deliver_incoming(&incoming, &lifecycle.shutdown, Ok(message), idle_timeout).await,
+                    &queue,
+                    &lifecycle,
+                    &mut deadline,
+                ) {
+                    continue;
                 }
+                break;
             }
             Ok(Some(Err(error))) => {
+                queue.close();
                 let display = error.to_string().to_ascii_lowercase();
-                close_code.store(
+                lifecycle.close_code.store(
                     if display.contains("too long") { 1009 } else { 1002 },
                     Ordering::Release,
                 );
                 let _ = incoming.try_send(Err(error));
-                shutdown.cancel();
+                lifecycle.shutdown.cancel();
                 if deadline.is_none() {
                     deadline = Some(get_close_deadline(
-                        &close_deadline,
-                        server_deadline.as_ref(),
-                        shutdown_timeout,
+                        &lifecycle.close_deadline,
+                        lifecycle.server_deadline.as_ref(),
+                        lifecycle.shutdown_timeout,
                     ));
                 }
             }
             Ok(None) => {
+                queue.close();
                 if let Some(ack) = close_ack.take() {
                     let _ = ack.send(());
                 }
                 break;
             }
             Err(_) if deadline.is_none() => {
-                close_code.store(1001, Ordering::Release);
+                lifecycle.close_code.store(1001, Ordering::Release);
                 deadline = Some(get_close_deadline(
-                    &close_deadline,
-                    server_deadline.as_ref(),
-                    shutdown_timeout,
+                    &lifecycle.close_deadline,
+                    lifecycle.server_deadline.as_ref(),
+                    lifecycle.shutdown_timeout,
                 ));
-                shutdown.cancel();
+                lifecycle.shutdown.cancel();
             }
             Err(_) => break,
         }
     }
     drop(close_ack);
+}
+
+/// Applies the state transition for one attempted inbound delivery.
+fn handle_delivery(
+    delivery: DeliveryResult,
+    queue: &WsSendQueue,
+    lifecycle: &SessionLifecycle,
+    deadline: &mut Option<tokio::time::Instant>,
+) -> bool {
+    match delivery {
+        DeliveryResult::Delivered => true,
+        DeliveryResult::ReceiverClosed => {
+            queue.close();
+            false
+        }
+        DeliveryResult::Cancelled => {
+            *deadline = Some(get_close_deadline(
+                &lifecycle.close_deadline,
+                lifecycle.server_deadline.as_ref(),
+                lifecycle.shutdown_timeout,
+            ));
+            true
+        }
+        DeliveryResult::TimedOut => {
+            queue.close();
+            lifecycle.close_code.store(1013, Ordering::Release);
+            lifecycle.shutdown.cancel();
+            *deadline = Some(get_close_deadline(
+                &lifecycle.close_deadline,
+                lifecycle.server_deadline.as_ref(),
+                lifecycle.shutdown_timeout,
+            ));
+            true
+        }
+    }
+}
+
+/// Result of forwarding a frame to the bounded application channel.
+enum DeliveryResult {
+    Delivered,
+    ReceiverClosed,
+    Cancelled,
+    TimedOut,
 }
 
 /// Delivers one inbound frame unless cancellation wins the race.
@@ -150,18 +192,24 @@ pub(in crate::ws) async fn reader_loop(
 /// * `incoming` - Bounded channel consumed by the application session.
 /// * `shutdown` - Token that interrupts delivery during shutdown.
 /// * `message` - Frame or read error to deliver.
+/// * `idle_timeout` - Maximum time the application channel may remain full.
 ///
 /// # Returns
 ///
-/// `true` when the channel accepts the item, otherwise `false`.
+/// The outcome of delivery, cancellation, receiver closure, or timeout.
 async fn deliver_incoming(
     incoming: &mpsc::Sender<Result<Message, Error>>,
     shutdown: &CancellationToken,
     message: Result<Message, Error>,
-) -> bool {
+    idle_timeout: Duration,
+) -> DeliveryResult {
     select! {
         biased;
-        _ = shutdown.cancelled() => false,
-        result = incoming.send(message) => result.is_ok(),
+        _ = shutdown.cancelled() => DeliveryResult::Cancelled,
+        result = timeout(idle_timeout, incoming.send(message)) => match result {
+            Ok(Ok(())) => DeliveryResult::Delivered,
+            Ok(Err(_)) => DeliveryResult::ReceiverClosed,
+            Err(_) => DeliveryResult::TimedOut,
+        },
     }
 }

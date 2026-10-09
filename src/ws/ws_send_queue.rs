@@ -26,9 +26,14 @@ pub(super) struct QueueState {
     pub(super) queued_bytes: usize,
     /// Messages removed from the queue but not yet completed by the sink.
     in_flight_messages: usize,
+    /// Whether the queue rejects new messages and discards pending messages.
+    closed: bool,
 }
 
 /// A nonblocking bounded queue for outbound WebSocket messages.
+///
+/// Closing the queue rejects future sends and discards pending messages while
+/// preserving accounting for messages already being sent.
 ///
 /// # Examples
 ///
@@ -71,6 +76,7 @@ impl WsSendQueue {
                 messages: VecDeque::new(),
                 queued_bytes: 0,
                 in_flight_messages: 0,
+                closed: false,
             })),
             notify: Arc::new(Notify::new()),
             max_messages,
@@ -113,11 +119,16 @@ impl WsSendQueue {
     ///
     /// # Errors
     ///
-    /// Returns [`WsSendError::Backpressure`] when either capacity bound would
-    /// be exceeded.
+    /// Returns [`WsSendError::Closed`] after the queue is closed, or
+    /// [`WsSendError::Backpressure`] when either capacity bound would be
+    /// exceeded. A message accepted before closure may be discarded if it is
+    /// still pending when the queue closes.
     pub fn try_send(&self, message: Message) -> Result<(), WsSendError> {
         let bytes = message_size(&message);
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.closed {
+            return Err(WsSendError::Closed);
+        }
         if state.messages.len() + state.in_flight_messages >= self.max_messages
             || bytes > self.max_bytes.saturating_sub(state.queued_bytes)
         {
@@ -128,6 +139,22 @@ impl WsSendQueue {
         drop(state);
         self.notify.notify_one();
         Ok(())
+    }
+
+    /// Closes the queue, rejecting future messages and discarding pending ones.
+    ///
+    /// Messages already removed by the writer remain charged until
+    /// [`Self::finish_message`] completes. Repeated calls have no additional
+    /// effect.
+    pub(in crate::ws) fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.closed {
+            return;
+        }
+        state.closed = true;
+        let queued_bytes = state.messages.iter().map(message_size).sum::<usize>();
+        state.messages.clear();
+        state.queued_bytes = state.queued_bytes.saturating_sub(queued_bytes);
     }
 
     /// Releases byte and item capacity after a writer finishes sending a
@@ -154,6 +181,22 @@ impl WsSendQueue {
             state.in_flight_messages += 1;
         }
         message
+    }
+}
+
+/// Closes a send queue when its owning task exits.
+pub(in crate::ws) struct CloseQueueOnDrop(WsSendQueue);
+
+impl CloseQueueOnDrop {
+    /// Creates a guard that closes `queue` when dropped.
+    pub(in crate::ws) fn new(queue: WsSendQueue) -> Self {
+        Self(queue)
+    }
+}
+
+impl Drop for CloseQueueOnDrop {
+    fn drop(&mut self) {
+        self.0.close();
     }
 }
 
@@ -197,5 +240,32 @@ mod tests {
         queue.finish_message(message_size(&in_flight));
         assert!(queue.is_empty());
         queue.try_send(Message::text("two")).unwrap();
+    }
+
+    #[test]
+    fn close_rejects_new_messages_and_clears_only_pending() {
+        let queue = WsSendQueue::new(2, 6);
+        queue.try_send(Message::text("one")).unwrap();
+        queue.try_send(Message::text("two")).unwrap();
+        let in_flight = queue.take_next().unwrap();
+
+        queue.close();
+        queue.close();
+
+        assert_eq!(queue.try_send(Message::text("x")), Err(WsSendError::Closed));
+        assert_eq!(queue.len(), 1);
+
+        queue.finish_message(message_size(&in_flight));
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn closing_a_queue_closes_its_clones() {
+        let queue = WsSendQueue::new(2, 6);
+        let clone = queue.clone();
+
+        queue.close();
+
+        assert_eq!(clone.try_send(Message::text("x")), Err(WsSendError::Closed));
     }
 }

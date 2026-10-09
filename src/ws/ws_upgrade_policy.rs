@@ -249,11 +249,12 @@ impl WsUpgradePolicy {
         })
     }
 
-    /// Sets the maximum interval without an inbound message before closing.
+    /// Sets the maximum interval without inbound progress before closing.
     ///
     /// # Parameters
     ///
-    /// * `timeout` - Positive inbound idle interval.
+    /// * `timeout` - Positive maximum interval without a received frame or
+    ///   successful delivery of a frame to the application.
     ///
     /// # Returns
     ///
@@ -265,11 +266,11 @@ impl WsUpgradePolicy {
         })
     }
 
-    /// Sets how long a session waits for the peer's close acknowledgement.
+    /// Sets how long an `on_upgrade` session waits for the peer's close
+    /// acknowledgement when no server deadline is available.
     ///
-    /// The server has its own shutdown deadline. Set this no greater than the
-    /// server deadline; `on_upgrade` receives its cancellation token but not
-    /// the server's deadline value.
+    /// `on_upgrade` uses the `ServerContext` shared absolute shutdown deadline
+    /// when one is available; this timeout is the local fallback.
     ///
     /// # Parameters
     ///
@@ -477,13 +478,13 @@ impl WsUpgradePolicy {
                     server_deadline: server_deadline.clone(),
                     shutdown_timeout,
                 };
-                let reader_notify = queue.notify.clone();
+                let reader_queue = queue.clone();
                 let idle_timeout = policy.inner.idle_timeout;
                 let reader = spawn(async move {
                     reader_loop(
                         stream,
                         incoming_tx,
-                        reader_notify,
+                        reader_queue,
                         reader_lifecycle,
                         close_ack_sender,
                         idle_timeout,

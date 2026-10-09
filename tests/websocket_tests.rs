@@ -31,6 +31,12 @@ type DelayedUpgradeChannels = (
     Arc<Mutex<Option<oneshot::Sender<()>>>>,
     Arc<Mutex<Option<oneshot::Receiver<()>>>>,
 );
+type PeerCloseTestState = (
+    WsUpgradePolicy,
+    ServerContext,
+    Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    Arc<Mutex<Option<oneshot::Sender<WsSendError>>>>,
+);
 use qubit_web::diagnostic::DiagnosticLayer;
 use qubit_web::ws::WsSendError;
 use qubit_web::ws::WsUpgradePolicy;
@@ -373,6 +379,121 @@ async fn test_session_exits_on_shutdown_and_releases_connection_permit() {
     .await
     .unwrap();
     task.abort();
+}
+
+#[tokio_test]
+async fn test_peer_close_closes_send_queue_before_handler_resumes() {
+    async fn upgrade(
+        State((policy, context, release_rx, result_tx)): State<PeerCloseTestState>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        let release = release_rx.lock().unwrap().take().unwrap();
+        let result_tx = result_tx.clone();
+        policy.on_upgrade(ws, &headers, context, move |session| async move {
+            let _ = release.await;
+            let result = session.try_send(Message::text("late")).unwrap_err();
+            result_tx.lock().unwrap().take().unwrap().send(result).unwrap();
+        })
+    }
+
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new();
+    let (release_tx, release_rx) = oneshot::channel();
+    let (result_tx, result_rx) = oneshot::channel();
+    let app = Router::new().route("/ws", get(upgrade)).with_state((
+        policy.clone(),
+        context.clone(),
+        Arc::new(Mutex::new(Some(release_rx))),
+        Arc::new(Mutex::new(Some(result_tx))),
+    ));
+    let serving = spawn(
+        server
+            .serve(app, pending::<()>())
+            .with_subscriber(tracing::dispatcher::get_default(Clone::clone)),
+    );
+
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    send_masked_close(&mut client).await;
+    timeout(Duration::from_secs(1), async {
+        while policy.active_connections() != 0 {
+            yield_now().await;
+        }
+    })
+    .await
+    .expect("peer Close should release the connection permit");
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(1), result_rx)
+            .await
+            .expect("handler should resume")
+            .unwrap(),
+        WsSendError::Closed
+    );
+    timeout(Duration::from_secs(1), async {
+        while context.active_sessions() != 0 {
+            yield_now().await;
+        }
+    })
+    .await
+    .expect("handler exit should release its managed session");
+    serving.abort();
+}
+
+#[tokio_test]
+async fn test_inbound_backpressure_closes_with_try_again_later() {
+    async fn upgrade(
+        State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, |session| async move {
+            let _session = session;
+            pending::<()>().await;
+        })
+    }
+
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new().idle_timeout(Duration::from_millis(50));
+    let app = Router::new()
+        .route("/ws", get(upgrade))
+        .with_state((policy.clone(), context.clone()));
+    let serving = spawn(
+        server
+            .serve(app, pending::<()>())
+            .with_subscriber(tracing::dispatcher::get_default(Clone::clone)),
+    );
+
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    send_masked_text(&mut client, b"x").await;
+    for _ in 0..64 {
+        send_masked_text(&mut client, b"x").await;
+    }
+    let (opcode, payload) = timeout(Duration::from_secs(2), read_server_frame(&mut client))
+        .await
+        .expect("stalled inbound delivery should produce a Close frame");
+    assert_eq!(opcode, 8);
+    assert!(payload.len() >= 2, "Close frame should include a status code");
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1013);
+    send_masked_close(&mut client).await;
+    timeout(Duration::from_secs(1), async {
+        while policy.active_connections() != 0 || context.active_sessions() != 0 {
+            yield_now().await;
+        }
+    })
+    .await
+    .expect("backpressured session should release its connection and registration");
+    serving.abort();
 }
 
 #[tokio_test]

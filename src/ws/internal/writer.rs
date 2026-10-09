@@ -23,6 +23,7 @@ use super::SessionLifecycle;
 use super::close::get_close_deadline;
 use super::close::send_close_and_wait;
 use crate::server::SessionGuard;
+use crate::ws::ws_send_queue::CloseQueueOnDrop;
 use crate::ws::ws_send_queue::WsSendQueue;
 use crate::ws::ws_send_queue::message_size;
 
@@ -42,6 +43,7 @@ pub(in crate::ws) async fn writer_loop(
         server_deadline,
         shutdown_timeout,
     } = lifecycle;
+    let _close_queue_on_drop = CloseQueueOnDrop::new(queue.clone());
     loop {
         if shutdown.is_cancelled() {
             let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);

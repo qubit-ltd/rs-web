@@ -111,10 +111,10 @@ pub(in crate::ws) async fn send_close_and_wait(
 fn server_shutdown_close(code: u16) -> Message {
     Message::Close(Some(CloseFrame {
         code,
-        reason: if code == 1001 {
-            "server shutdown"
-        } else {
-            "protocol limit"
+        reason: match code {
+            1001 => "server shutdown",
+            1013 => "inbound backpressure",
+            _ => "protocol limit",
         }
         .into(),
     }))
