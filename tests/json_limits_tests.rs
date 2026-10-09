@@ -199,6 +199,10 @@ async fn test_rejects_structure_budget_exceeded() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8(response_body.to_vec())
+        .unwrap()
+        .contains("json_budget_exceeded"));
 }
 
 #[tokio::test]
