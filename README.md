@@ -17,8 +17,15 @@ The default feature set is empty. `json` enables bounded JSON helpers, `ws` enab
 
 The runnable examples show the complete path: create `ServerOptions` with a transport connection cap, construct `HttpLimits` separately, install those limits on short routes, bind, serve the router, and stop through `/admin/shutdown`.
 
+In terminal A, start the example and wait until it prints its listening address:
+
 ```sh
 cargo run --example controller_crud --all-features
+```
+
+Then, in terminal B, request the health and user routes, and stop the service:
+
+```sh
 curl -i http://127.0.0.1:3000/health
 curl -i -X POST http://127.0.0.1:3000/users \
   -H 'content-type: application/json' -d '{"name":"Ada"}'
@@ -31,21 +38,26 @@ When using the `config` feature, `ConfiguredWeb::from_config` returns `ServerOpt
 
 ## Streaming example
 
-`prompt_stream` runs bounded JSON, a cancellable SSE producer, and a WebSocket echo handler. Run it with:
+`prompt_stream` runs bounded JSON, a cancellable SSE producer, and a WebSocket echo handler. In terminal A, start it and wait until it prints the listening address:
 
 ```sh
 cargo run --example prompt_stream --all-features
+```
+
+In terminal B, submit a prompt, observe the SSE progress events, then stop the service:
+
+```sh
 curl -i -X POST http://127.0.0.1:3001/prompt \
   -H 'content-type: application/json' -d '{"prompt":"Summarize this"}'
 curl -N http://127.0.0.1:3001/prompt/demo-1/events
 curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 ```
 
-The sample bearer token is `demo-only`; it illustrates a handler check and is not authentication. A WebSocket client may connect to `ws://127.0.0.1:3001/prompt/demo-1/ws` with `Authorization: Bearer demo-only` and, if it sends an Origin, the allowed Origin `http://localhost:3000`. The endpoints demonstrate transport only: they do not run an Agent, save prompts, or persist jobs.
+The sample bearer token is `demo-only`; it illustrates a handler check and is not authentication. A WebSocket client may connect to `ws://127.0.0.1:3001/prompt/demo-1/ws` with `Authorization: Bearer demo-only` and, if it sends an Origin, the allowed Origin `http://localhost:3000`. The endpoints demonstrate transport only: they do not run an Agent, save prompts, or persist jobs. See the [English user guide](doc/user_guide.md) for policy sharing, capacity planning, and shutdown details; the [Chinese user guide](doc/user_guide.zh_CN.md) covers the same workflow.
 
 ## Limits and operational boundaries
 
-- The per-`WebServer` transport connection limit defaults to 1024 and can be configured with `ServerOptions::with_max_transport_connections`. It covers TLS handshakes and HTTP connection futures. When full, accepting pauses and clients may wait in the operating system backlog or fail to connect; this does not promise an HTTP 503. An upgraded WebSocket uses its own `WsUpgradePolicy` capacity. SSE remains an HTTP connection; size its transport and SSE budgets for the expected long-lived streams.
+- Each `SseConnectionPolicy` and `WsUpgradePolicy` created with `new` or `default` opens an independent capacity domain; cloning a policy shares its domain. Create each policy once in `AppState` and clone it from handlers using `State<AppState>` when routes should share capacity. See the [English user guide](doc/user_guide.md) or [Chinese user guide](doc/user_guide.zh_CN.md) for an example. The per-`WebServer` transport connection limit defaults to 1024 and can be configured with `ServerOptions::with_max_transport_connections`. It covers TLS handshakes and HTTP connection futures. When full, accepting pauses and clients may wait in the operating system backlog or fail to connect; this does not promise an HTTP 503. These policy budgets are separate from the transport limit; SSE remains an HTTP connection.
 - `HttpLimits` applies finite body size, concurrency, and processing-time limits to ordinary short requests only where the application installs `ControllerRoutes::with_http_limits` or `RequestLimitLayer`. Controller `short` routes are covered by the configured Controller policy; `sse` and `ws` routes skip the short-request layer. Native Axum routes need an explicit layer on each selected branch.
 - The default HTTP/1 request-header timeout is 10 seconds and also bounds an HTTP/1 WebSocket upgrade request before its headers arrive. The transport idle timeout defaults to 30 seconds (`ServerOptions::with_transport_idle_timeout` or `transport.idle_timeout_ms`); it closes connections with no active request or response body, including idle HTTP/2 connections, while active requests and SSE bodies keep the connection active.
 - Use `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)` to reserve a managed session before returning the upgrade response. Origin is optional by default: requests without Origin proceed to application authentication, while requests with Origin are rejected unless it exactly matches `allowed_origins`. An absent Origin does not authenticate a client. After the peer or session closes, `try_send` returns `Closed`; successful enqueueing alone does not guarantee network delivery. If the application does not read inbound messages and delivery makes no progress within `idle_timeout`, the session closes with WebSocket code `1013` (try again later).

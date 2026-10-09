@@ -6,6 +6,8 @@
 
 `ServerContext::try_register_session()` atomically reserves a managed session unless shutdown has begun. `active_sessions()` includes managed SSE connections and WebSocket upgrades admitted through `WsUpgradePolicy::on_upgrade`, even while the upgrade response is pending. SSE and WS admission after shutdown begins is rejected. Ordinary HTTP requests, native Axum upgrades, and arbitrary application background tasks are not managed sessions.
 
+SSE and WebSocket capacity limits are separate policy domains, not a total service-wide session cap. Each `SseConnectionPolicy::new`/`default` and `WsUpgradePolicy::new`/`default` creates an independent domain; clones of the same policy share its domain. The default capacity is 128 connections per policy instance. Creating policies separately for different routes therefore adds their capacities. To enforce one shared limit across routes, create a policy once at startup, store it in application state, and use clones from that state. `ServerContext::active_sessions()` is shutdown accounting, not an additional numeric admission limit.
+
 The server stops accepting connections, closes session admission, and notifies active sessions when shutdown starts. It waits for HTTP connection tasks and managed sessions against one absolute deadline. `ShutdownReport::graceful` is true only when both groups finish before that deadline. `unfinished_managed_sessions` records the managed session count at the deadline. The report does not claim that arbitrary application work has stopped. `forced_connections` remains `None` because Axum does not expose a provable count.
 
 ## Transport idle timeout

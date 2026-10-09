@@ -1,10 +1,17 @@
-# 文档索引
+# Documentation index
 
-- [用户指南（English）](user_guide.md)：从配置、路由装配到运行、验收和排障的完整接入流程。
-- [用户指南（简体中文）](user_guide.zh_CN.md)：中文独立编写的同场景指南。
-- [rs-web 首版 PRD（2026-10-08）](2026-10-08-rs-web-prd.md)：产品需求与历史验收基准，页首附当前实现状态。
-- [rs-web 详细设计方案（2026-10-08）](2026-10-08-rs-web-design.md)：技术决策及其实现对照，保留原始决策脉络。
-- [rs-web 生命周期设计摘要（English, 2026-10-09）](2026-10-09-rs-web-lifecycle-design.en.md)：现行停服、空闲连接、Origin 和 I/O 错误合同的英文摘要。
-- [rs-web 生命周期设计摘要（简体中文，2026-10-09）](2026-10-09-rs-web-lifecycle-design.zh_CN.md)：现行 API 取舍和生命周期边界的中文摘要。
+## Current architecture and usage
 
-本目录同时保存当前接入说明和历史决策记录。现行生命周期合同以 2026-10-09 中英文摘要和用户指南为准；2026-10-08 设计文档用于了解历史决策，不代表当前 API。
+- [rs-web architecture overview (English, 2026-10-09)](2026-10-09-rs-web-architecture.en.md): current module map, resource boundaries, failure stages, and application responsibilities.
+- [rs-web 架构概览（简体中文，2026-10-09）](2026-10-09-rs-web-architecture.zh_CN.md)：现行模块关系、资源边界、失败阶段和应用责任。
+- [rs-web lifecycle and resource boundary design (English, 2026-10-09)](2026-10-09-rs-web-lifecycle-design.en.md): current shutdown, connection, Origin, and I/O error contracts.
+- [rs-web 生命周期与资源边界设计摘要（简体中文，2026-10-09）](2026-10-09-rs-web-lifecycle-design.zh_CN.md)：现行生命周期边界与 API 合同。
+- [User guide (English)](user_guide.md): end-to-end setup, routing, operation, acceptance, and troubleshooting.
+- [用户指南（简体中文）](user_guide.zh_CN.md)：按接入场景独立编写的完整指南。
+
+## Historical decisions
+
+- [rs-web first PRD (2026-10-08)](2026-10-08-rs-web-prd.md): original requirements and acceptance baseline, with implementation status at the top.
+- [rs-web detailed design record (2026-10-08)](2026-10-08-rs-web-design.md): technical decisions and implementation notes, preserving the original decision history.
+
+The 2026-10-08 documents record historical decisions and may describe superseded proposals. Current behavior is described by the architecture overview, lifecycle summaries, and user guides above.

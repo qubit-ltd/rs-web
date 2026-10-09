@@ -6,6 +6,8 @@
 
 `ServerContext::try_register_session()` 会在一个原子操作中登记会话；停服开始后，新的登记失败。`active_sessions()` 包含受管 SSE，以及通过 `WsUpgradePolicy::on_upgrade` 接纳的 WebSocket；即使升级响应尚未完成，计数也已增加。停服后，新的 SSE/WS 接纳会被拒绝。普通 HTTP 请求、原生 Axum upgrade 和任意应用后台任务不属于受管会话。
 
+SSE 与 WebSocket 容量限制属于彼此独立的策略域，不是整个服务统一的会话上限。每次调用 `SseConnectionPolicy::new`/`default` 或 `WsUpgradePolicy::new`/`default` 都会创建独立容量域；同一策略的克隆共享该域。两类策略各自的默认容量都是每个策略实例 128 个连接。因此，为不同路由分别创建策略会累加可接纳容量。若要让多条路由共用一个上限，应在应用启动时创建一个策略并放入应用状态，再使用从该状态取得的克隆。`ServerContext::active_sessions()` 用于停服统计，不是额外的数值接纳上限。
+
 停服时服务停止接收连接、关闭会话登记入口并通知现有会话。HTTP 连接任务与受管会话共用一个绝对截止时间。只有两者都在期限内结束，`ShutdownReport::graceful` 才为 `true`；`unfinished_managed_sessions` 记录截止时仍未结束的受管会话数。报告不表示任意应用工作都已停止。由于 Axum 无法提供可证明的强制关闭连接数量，`forced_connections` 保持为 `None`。
 
 ## 传输空闲期限

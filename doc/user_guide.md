@@ -71,6 +71,56 @@ let app = Router::new()
 
 The example fragments assume application handlers `submit`, `progress`, and `websocket`; the full runnable composition is in [`examples/prompt_stream.rs`](../examples/prompt_stream.rs). Controller routes can instead install the same policy using `ControllerRoutes::with_http_limits`. Keep SSE and WebSocket routes outside `RequestLimitLayer`: the layer's deadline also covers response streaming and is intended for short requests.
 
+### Share SSE and WebSocket policies through application state
+
+Create each long-lived connection policy once during startup and keep it in the Axum state. A handler clones the policy from `State<AppState>` before using it:
+
+```rust,ignore
+use axum::extract::State;
+use axum::extract::WebSocketUpgrade;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
+use qubit_web::{ServerContext, SseConnectionPolicy, WebServer, WsUpgradePolicy};
+
+#[derive(Clone)]
+struct AppState {
+    context: ServerContext,
+    sse: SseConnectionPolicy,
+    ws: WsUpgradePolicy,
+}
+
+// Call once while assembling the application, before Router::with_state.
+fn app_state(server: &WebServer) -> AppState {
+    AppState {
+        context: server.context(),
+        sse: SseConnectionPolicy::default(),
+        ws: WsUpgradePolicy::new().allowed_origins(["http://localhost:3000"]),
+    }
+}
+
+async fn progress(State(state): State<AppState>) -> Response {
+    let policy = state.sse.clone();
+    let connection = match policy.begin(&state.context) {
+        Ok(connection) => connection,
+        Err(error) => return error.into_response(),
+    };
+    // Pass the application's event stream here. Its cancellation token can
+    // stop the producer after disconnect or server shutdown.
+    connection.into_sse(event_stream).into_response()
+}
+
+async fn websocket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let policy = state.ws.clone();
+    policy.on_upgrade(ws, &headers, state.context.clone(), |_session| async move {})
+}
+```
+
+The `event_stream` value represents the application's event stream; the runnable [`prompt_stream` example](../examples/prompt_stream.rs) shows producer construction and cancellation handling. The fragment assumes the existing `server` and an Axum state assembly function. Cloning either policy shares its connection-capacity domain, so all routes using clones draw from one configured allowance. Calling `SseConnectionPolicy::default()` or `WsUpgradePolicy::new()` again creates an independent domain; requests handled by that new instance do not consume the original policy's allowance. These are separate caps: SSE has its own session cap and remains within the HTTP transport cap, while an upgraded WebSocket uses its policy cap after the HTTP upgrade completes.
+
 For a configuration-driven service, pass `configured.http_limits()` to the controller builder or `RequestLimitLayer::new` on the selected route branch. `WebServer` receives a completed Axum `Router` and never silently rewrites it.
 
 For HTTPS, load trusted certificate material before binding and pass it to `WebServer::bind_https`:

@@ -71,6 +71,55 @@ let app = Router::new()
 
 片段中的 `submit`、`progress` 和 `websocket` 是应用自己的 handler；完整组合可参考 [`examples/prompt_stream.rs`](../examples/prompt_stream.rs)。Controller 路由也可以通过 `ControllerRoutes::with_http_limits` 安装同一策略。SSE/WS 路由不要套用 `RequestLimitLayer`：它的期限还会覆盖响应流，只适合短请求。
 
+### 在应用状态中共享 SSE 和 WebSocket policy
+
+应用启动时各创建一次长连接 policy，放进 Axum 的 state。handler 从 `State<AppState>` 取出后克隆，再调用策略：
+
+```rust,ignore
+use axum::extract::State;
+use axum::extract::WebSocketUpgrade;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
+use qubit_web::{ServerContext, SseConnectionPolicy, WebServer, WsUpgradePolicy};
+
+#[derive(Clone)]
+struct AppState {
+    context: ServerContext,
+    sse: SseConnectionPolicy,
+    ws: WsUpgradePolicy,
+}
+
+// 在组装应用、调用 Router::with_state 之前调用一次。
+fn app_state(server: &WebServer) -> AppState {
+    AppState {
+        context: server.context(),
+        sse: SseConnectionPolicy::default(),
+        ws: WsUpgradePolicy::new().allowed_origins(["http://localhost:3000"]),
+    }
+}
+
+async fn progress(State(state): State<AppState>) -> Response {
+    let policy = state.sse.clone();
+    let connection = match policy.begin(&state.context) {
+        Ok(connection) => connection,
+        Err(error) => return error.into_response(),
+    };
+    // 在这里传入应用的事件流。断连或停服时，取消令牌可通知生产任务停止。
+    connection.into_sse(event_stream).into_response()
+}
+
+async fn websocket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let policy = state.ws.clone();
+    policy.on_upgrade(ws, &headers, state.context.clone(), |_session| async move {})
+}
+```
+
+`event_stream` 表示应用自己的事件流；[`prompt_stream 示例`](../examples/prompt_stream.rs)展示了如何创建生产任务并响应取消。此片段假设应用已有 `server`，并会在组装 Axum state 时调用 `app_state`。克隆 policy 会共享同一个连接额度，因此多个路由取出的克隆共同计数。再次调用 `SseConnectionPolicy::default()` 或 `WsUpgradePolicy::new()` 则会建立独立额度，新实例接纳的连接不会占用原 policy 的额度。两类额度也各自独立：SSE 有自己的会话上限，同时仍占用 HTTP transport 额度；WebSocket 完成 HTTP upgrade 后改由其 policy 的会话上限管理。
+
 使用配置适配器时，把 `configured.http_limits()` 传给 Controller builder，或在选定的短路由上创建 `RequestLimitLayer`。`WebServer` 接收完整的 Axum `Router`，不会暗中修改它。
 
 启用 HTTPS 时，在绑定前加载可信证书材料，再传给 `WebServer::bind_https`：
