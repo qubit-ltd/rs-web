@@ -6,7 +6,7 @@
 
 `WebServer` owns the bound TCP listener, per-server transport policy, and shared `ServerContext`. It accepts and caps transport connections, optionally performs TLS negotiation, and adapts each stream into Hyper with upgrade support. Hyper dispatches requests through the application's Axum `Router<()>`.
 
-Applications can construct that router directly or use `ControllerRoutes` with the controller macros. Controller routes receive method/path conflict checks and route metadata. Short request budgets are installed on selected controller routes or router branches; they do not apply globally unless the application installs them there. Diagnostic middleware logs allowlisted request metadata: method, matched route template, response status, elapsed time, connection ID, and optional declared request size.
+Applications can construct that router directly or use `ControllerRoutes` with the controller macros. Controller routes receive method/path conflict checks and route metadata. Controller `short` routes receive the builder's default request budget; native Axum routes receive no such budget unless the application installs a layer on selected branches. Limits are scoped to those routes and are not a server-wide policy. Diagnostic middleware logs allowlisted request metadata: method, matched route template, response status, elapsed time, connection ID, and optional declared request size.
 
 The main module responsibilities are:
 
@@ -14,7 +14,7 @@ The main module responsibilities are:
 | --- | --- |
 | `server` | Bind HTTP/HTTPS listeners, run the Axum router, cap transport connections, coordinate shutdown, and report shutdown results. |
 | `mvc` | Assemble controller routes, reject duplicate method/path declarations, and expose route metadata. |
-| `limit` | Provide opt-in body, concurrency, and time budgets for ordinary short requests. |
+| `limit` | Provide body, concurrency, and time budgets for ordinary short requests. Controller short routes receive defaults; native Axum branches opt in by installing a layer. |
 | `json` | Enforce strict JSON input/output byte and structural limits when the `json` feature is enabled. |
 | `sse` | Admit bounded server-sent event streams and track them as managed sessions. |
 | `ws` | Validate WebSocket policy and Origin, reserve capacity, and manage inbound/outbound session I/O when the `ws` feature is enabled. |
@@ -29,7 +29,7 @@ Each limit protects a specific resource. Its configured count must not be read a
 | Domain | Default | Scope and overload behavior |
 | --- | --- | --- |
 | Accepted transport connections | 1,024 per `WebServer` | Includes TLS handshakes and HTTP connection futures. When full, the accept loop stops accepting; clients may wait in the OS backlog or fail to connect. No HTTP 503 is generated. |
-| Ordinary short requests | 256 in flight per installed `HttpLimits` branch | Enabled only where the application installs `RequestLimitLayer` or `ControllerRoutes::with_http_limits`. Full capacity returns a capacity rejection. Separate branches have separate states unless deliberately shared. |
+| Controller short requests | 256 in flight per `ControllerRoutes` builder | `ControllerRoutes::new()` applies `HttpLimits::default()`: 1 MiB per body and a 30-second handler/response-body deadline as well. `with_http_limits` replaces these defaults and should be called before adding controllers. Each builder has its own shared state. Native Axum branches require an explicit `RequestLimitLayer`; `WebServer` does not install route limits. Full capacity returns a capacity rejection. |
 | SSE connections | 128 per `SseConnectionPolicy` by default | `new`/`default` policies create independent capacity domains; clones share their domain. Exhaustion is reported separately from shutdown rejection. |
 | WebSocket connections | 128 per `WsUpgradePolicy` by default | `new`/`default` policies create independent capacity domains; clones share their domain. Failed admission produces a rejection before the session is managed. |
 | Managed server sessions | No independent numeric cap | `ServerContext` tracks admitted SSE and WebSocket sessions for shutdown accounting. It is not a global connection limit and does not include ordinary requests, native Axum upgrades, or application background jobs. |
@@ -38,7 +38,7 @@ To share an SSE or WebSocket capacity across routes, create one policy at applic
 
 ## Request budgets and long-lived streams
 
-`HttpLimits::default()` allows 1 MiB per request body, 256 concurrent in-flight short requests per branch, and 30 seconds for handler work plus response-body streaming. These limits are opt-in. The request body is counted as the selected route consumes it; the middleware does not drain an otherwise unread body just to enforce the budget. Capacity exhaustion, an oversized body, and a request deadline have stable rejection outcomes. If a deadline expires after response headers are sent, the response body terminates with an error.
+`HttpLimits::default()` allows 1 MiB per request body, 256 concurrent in-flight short requests, and 30 seconds for handler work plus response-body streaming. `ControllerRoutes::new()` applies this policy to Controller `short` routes by default; `with_http_limits` replaces it for routes added afterward. Controller `sse` and `ws` routes skip the short-request layer. Native Axum branches require an explicit `RequestLimitLayer`, because `WebServer` serves the Router as supplied and does not add route limits. The request body is counted as the selected route consumes it; the middleware does not drain an otherwise unread body just to enforce the budget. Capacity exhaustion, an oversized body, and a request deadline have stable rejection outcomes. If a deadline expires after response headers are sent, the response body terminates with an error.
 
 When enabled, `JsonLimits::default()` independently bounds input and output payloads to 1 MiB, nesting depth to 64, value nodes to 100,000, array items and object entries to 10,000 each, key bytes to 16 KiB, string bytes to 256 KiB, and number bytes to 128. JSON limits are separate from the generic HTTP body budget; configure compatible values when both apply.
 
@@ -52,14 +52,14 @@ SSE and WebSocket routes are long-lived and must not be put behind short-request
 
 On shutdown, the server stops accepting sockets, closes managed-session admission, signals active sessions, and waits for HTTP connection tasks and managed SSE/WS sessions against one absolute deadline. `ShutdownReport::graceful` is true only if both groups finish in time. The report records unfinished managed sessions; it cannot claim arbitrary application background work has stopped. `forced_connections` is `None` because Axum does not expose a provable count.
 
-`ConfiguredWeb` parses an explicit configuration object. It returns `ServerOptions` separately from `HttpLimits`; the latter remains inert until installed on selected short routes. With `config`, transport defaults are `transport.max_connections = 1024` and `transport.idle_timeout_ms = 30000`; HTTP policy keys include `http.max_body_bytes`, `http.max_concurrent_requests`, and `http.request_timeout_ms`. TLS is optional and configured separately through `TlsConfig`; PEM load failures are reduced to `TlsInvalid` without exposing key material or paths.
+`ConfiguredWeb` parses an explicit configuration object. It returns `ServerOptions` separately from `HttpLimits`. Controller short routes already use `HttpLimits::default()`; pass the configured limits to `with_http_limits` to replace that policy. For native Axum routes, install `RequestLimitLayer` on selected short branches. `WebServer` does not modify the Router. With `config`, transport defaults are `transport.max_connections = 1024` and `transport.idle_timeout_ms = 30000`; HTTP policy keys include `http.max_body_bytes`, `http.max_concurrent_requests`, and `http.request_timeout_ms`. TLS is optional and configured separately through `TlsConfig`; PEM load failures are reduced to `TlsInvalid` without exposing key material or paths.
 
 ## Failure stages and application responsibilities
 
 | Stage | Library behavior | Application responsibility |
 | --- | --- | --- |
 | Startup and bind | Validates options, binds the socket, queries its local address, and validates TLS configuration before serving. Public errors distinguish invalid configuration, bind/address failures, TLS errors, and serve/accept failures. | Supply a valid address and positive timeouts/capacity; load valid certificates and private keys; decide how startup errors are surfaced. |
-| Route assembly | Detects duplicate controller method/path declarations. Request-policy middleware returns stable body-size, capacity, and timeout rejections where installed. | Assemble intended routes, install short-request limits on appropriate branches, and translate public rejections into application behavior where needed. |
+| Route assembly | Detects duplicate controller method/path declarations. Request-policy middleware returns stable body-size, capacity, and timeout rejections on Controller short routes and on native branches where installed. | Assemble intended routes, replace Controller defaults when needed, install limits on appropriate native branches, and translate public rejections into application behavior where needed. |
 | SSE admission | Reserves policy capacity and a managed server session before creating the stream. Capacity exhaustion and shutdown rejection are distinct. | Choose shared policy state; implement event IDs, replay, and event buffering; handle client reconnects. |
 | WebSocket admission and I/O | Checks policy and Origin, reserves policy/server-session capacity, and manages reader/writer lifecycle. It bounds frames, messages, queues, and inbound delivery. | Authenticate before `on_upgrade`, configure allowed Origins, keep calling `WsSession::recv()`, and handle application-level processing and delivery semantics. Origin is not authentication. |
 | Shutdown | Uses one deadline for HTTP connections and managed sessions; reports remaining managed sessions. | Stop or supervise application background jobs and decide what to do when the report is not graceful. Native Axum upgrades and arbitrary jobs are outside managed-session accounting. |

@@ -15,7 +15,7 @@ qubit-web = { version = "0.2", features = ["json", "ws"] }
 
 ## 快速开始
 
-可运行示例展示完整接入流程：用 `ServerOptions` 设置传输连接上限，单独创建 `HttpLimits`，将其装配到短请求路由，绑定并运行 Router，最后通过 `/admin/shutdown` 停服。
+可运行示例展示完整接入流程：用 `ServerOptions` 设置传输连接上限，Controller 短路由使用默认 HTTP 限额（也可用 `HttpLimits` 替换），在选定的原生 Axum 短路由上显式安装限额，绑定并运行 Router，最后通过 `/admin/shutdown` 停服。
 
 先在终端 A 启动示例。等它打印出监听地址后，再打开终端 B 发请求：
 
@@ -32,9 +32,9 @@ curl -i -X POST http://127.0.0.1:3000/users \
 curl -i -X POST http://127.0.0.1:3000/admin/shutdown
 ```
 
-健康检查成功时返回 `200 OK` 和 `ok`；创建用户返回 `201 Created`。示例只监听 loopback，数据保存在进程内存中。显式调用 `ControllerRoutes::with_http_limits` 的代码见 [`examples/controller_crud.rs`](examples/controller_crud.rs)。原生 Axum 路由需要在要保护的短路由分支上安装 `RequestLimitLayer::new(http_limits)`。`WebServer` 按调用方提供的 Router 运行，不会暗中安装 HTTP 限额。
+健康检查成功时返回 `200 OK` 和 `ok`；创建用户返回 `201 Created`。示例只监听 loopback，数据保存在进程内存中。用 `ControllerRoutes::with_http_limits` 替换 Controller 短路由默认限额的代码见 [`examples/controller_crud.rs`](examples/controller_crud.rs)。原生 Axum 路由需要在要保护的短路由分支上安装 `RequestLimitLayer::new(http_limits)`。`WebServer` 按调用方提供的 Router 运行，不会暗中安装 HTTP 限额。
 
-启用 `config` feature 后，`ConfiguredWeb::from_config` 会分别返回 `ServerOptions` 和 `HttpLimits`。后者仍需由调用方传给路由装配处，显式安装后才会生效。
+启用 `config` feature 后，`ConfiguredWeb::from_config` 会分别返回 `ServerOptions` 和 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；将配置所得限额传给 `with_http_limits` 可替换默认策略。原生 Axum 路由则需在选定分支显式安装 `RequestLimitLayer`；`WebServer` 不会替 Router 应用限额。
 
 ## 流式示例
 
@@ -58,7 +58,7 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 ## 限额与运行边界
 
 - 每次通过 `new` 或 `default` 创建 `SseConnectionPolicy`、`WsUpgradePolicy` 都会开启独立容量域；克隆 policy 才会共享容量。需要路由共享时，在 `AppState` 中各创建一次，再由 handler 通过 `State<AppState>` 取出并克隆。示例见[中文用户指南](doc/user_guide.zh_CN.md)或[英文用户指南](doc/user_guide.md)。每个 `WebServer` 的传输连接上限默认为 1024，可通过 `ServerOptions::with_max_transport_connections` 配置。该上限覆盖 TLS 握手和 HTTP 连接 future。达到上限时服务会暂停接收连接；客户端可能在操作系统 backlog 中等待，也可能连接失败，因此不保证返回 HTTP 503。policy 容量与传输上限分别计算；SSE 仍占用 HTTP 连接。
-- `HttpLimits` 为普通短请求提供请求体大小、并发数和处理时间上限；只有应用通过 `ControllerRoutes::with_http_limits` 或 `RequestLimitLayer` 显式安装后才生效。Controller 的 `short` 路由受对应策略约束，`sse` 和 `ws` 路由会跳过短请求 layer。原生 Axum 路由需在选定分支单独安装 layer。
+- `ControllerRoutes::new()` 会为 Controller 的 `short` 路由安装 `HttpLimits::default()`：每个请求体 1 MiB、每个 builder 共享 256 个并发请求，处理及响应体期限为 30 秒。`with_http_limits` 用于替换默认值，并应在添加 Controller 前调用。Controller 的 `sse` 和 `ws` 路由会跳过短请求 layer。原生 Axum 路由需在选定分支显式安装 `RequestLimitLayer`；`WebServer` 不会安装路由限额。
 - HTTP/1 请求头默认最多等待 10 秒；WebSocket 的 HTTP/1 upgrade 也必须在此期限内发送完请求头。传输空闲期限默认 30 秒，可通过 `ServerOptions::with_transport_idle_timeout` 或配置键 `transport.idle_timeout_ms` 设置。连接在没有正在处理的请求或响应体时会被回收，包括空闲 HTTP/2 连接；活跃请求和 SSE 响应体会暂停空闲计时。
 - 使用 `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)`，可在返回升级响应前预留受管会话。Origin 默认可选：未携带 Origin 的请求会继续进入应用认证；携带 Origin 时，必须与 `allowed_origins` 中的值完全匹配，否则拒绝。没有 Origin 不代表已通过认证。对端或会话关闭后，`try_send` 会返回 `Closed`；成功入队本身不保证消息已通过网络送达。若应用不读取入站消息，且交付在 `idle_timeout` 内没有进展，会话会以 WebSocket 关闭码 `1013`（暂时无法处理）关闭。
 - `ServerContext::active_sessions()` 统计受管 SSE 和通过 `on_upgrade` 接纳的 WebSocket，包括握手尚未完成的升级。停服会用同一个截止时间等待 HTTP 连接和这些会话；`ShutdownReport::unfinished_managed_sessions` 记录截止时仍未结束的受管会话。原生 Axum 升级和应用后台任务不在统计范围内。

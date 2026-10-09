@@ -54,7 +54,10 @@ impl<S> ControllerRoutes<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    /// Creates an empty Controller router.
+    /// Creates an empty Controller router. Short routes added to it use
+    /// `HttpLimits::default()` (1 MiB body, 256 concurrent requests, and a
+    /// 30-second timeout) until `with_http_limits` supplies a replacement
+    /// policy.
     ///
     /// # Examples
     ///
@@ -72,8 +75,8 @@ where
         }
     }
 
-    /// Sets the finite limits applied to all short routes added to this
-    /// builder.
+    /// Replaces the default finite limits for all short routes added to this
+    /// builder afterward.
     ///
     /// SSE and WebSocket routes keep the same diagnostics but skip the
     /// short-request body, concurrency, and deadline limits. Configure this
@@ -81,11 +84,12 @@ where
     ///
     /// # Parameters
     ///
-    /// * `http_limits` - Policy shared by short routes added afterward.
+    /// * `http_limits` - Replacement policy shared by short routes added
+    ///   afterward.
     ///
     /// # Returns
     ///
-    /// The same builder with the supplied policy installed.
+    /// The same builder with the replacement policy installed.
     pub fn with_http_limits(mut self, http_limits: HttpLimits) -> Self {
         self.limit_state = LimitState::new(http_limits);
         self

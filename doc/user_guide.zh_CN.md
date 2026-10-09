@@ -48,11 +48,11 @@ let (server_options, http_limits) = configured.into_parts();
 let server = WebServer::bind_http(server_options).await?;
 ```
 
-配置必须包含 `address`；`shutdown_timeout_ms` 缺省为 30000，`transport.max_connections` 和 `transport.idle_timeout_ms` 分别缺省为 1024 和 30000。`http.*` 配置只生成 `HttpLimits`，不会自动装到 Router。解析错误可通过 `ConfigOptionsError::field()` 定位字段，错误不会回显输入值。
+配置必须包含 `address`；`shutdown_timeout_ms` 缺省为 30000，`transport.max_connections` 和 `transport.idle_timeout_ms` 分别缺省为 1024 和 30000。`http.*` 配置只生成 `HttpLimits`，不会自动装到 Router：Controller 短路由已有 `HttpLimits::default()`，将配置值传给 `with_http_limits` 可替换该策略。原生 Axum 短路由需在选定分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。解析错误可通过 `ConfigOptionsError::field()` 定位字段，错误不会回显输入值。
 
 ## 装配普通接口与长连接
 
-普通短请求要显式安装限额。它约束被读取的请求体数据、处理中的 handler 并发数和该路由分支的请求期限。没有安装的路由不会自动继承这些设置：
+Controller 短路由默认使用每个请求体 1 MiB、每个 builder 共享 256 个并发请求、handler 工作及响应体传输 30 秒的预算。添加 Controller 前调用 `with_http_limits` 可替换该策略。原生 Axum 路由不会继承 Controller 限额，需在选定的普通短路由分支显式安装 `RequestLimitLayer`。`WebServer` 按原样服务调用方提供的 Router，不会添加路由 layer。限额约束被读取的请求体数据、处理中的 handler 并发数和所选分支的请求期限：
 
 ```rust
 use std::time::Duration;
@@ -69,7 +69,7 @@ let app = Router::new()
     .route("/ws", get(websocket));
 ```
 
-片段中的 `submit`、`progress` 和 `websocket` 是应用自己的 handler；完整组合可参考 [`examples/prompt_stream.rs`](../examples/prompt_stream.rs)。Controller 路由也可以通过 `ControllerRoutes::with_http_limits` 安装同一策略。SSE/WS 路由不要套用 `RequestLimitLayer`：它的期限还会覆盖响应流，只适合短请求。
+片段中的 `submit`、`progress` 和 `websocket` 是应用自己的 handler；完整组合可参考 [`examples/prompt_stream.rs`](../examples/prompt_stream.rs)。Controller 短路由已有默认限额；调用 `ControllerRoutes::with_http_limits` 可替换默认策略。Controller 的 `sse` 和 `ws` 路由会跳过短请求 layer。SSE/WS 路由不要套用 `RequestLimitLayer`：它的期限还会覆盖响应流，只适合短请求。
 
 ### 在应用状态中共享 SSE 和 WebSocket policy
 
@@ -120,7 +120,7 @@ async fn websocket(
 
 `event_stream` 表示应用自己的事件流；[`prompt_stream 示例`](../examples/prompt_stream.rs)展示了如何创建生产任务并响应取消。此片段假设应用已有 `server`，并会在组装 Axum state 时调用 `app_state`。克隆 policy 会共享同一个连接额度，因此多个路由取出的克隆共同计数。再次调用 `SseConnectionPolicy::default()` 或 `WsUpgradePolicy::new()` 则会建立独立额度，新实例接纳的连接不会占用原 policy 的额度。两类额度也各自独立：SSE 有自己的会话上限，同时仍占用 HTTP transport 额度；WebSocket 完成 HTTP upgrade 后改由其 policy 的会话上限管理。
 
-使用配置适配器时，把 `configured.http_limits()` 传给 Controller builder，或在选定的短路由上创建 `RequestLimitLayer`。`WebServer` 接收完整的 Axum `Router`，不会暗中修改它。
+使用配置适配器时，把 `configured.http_limits()` 在添加 Controller 前传给 `ControllerRoutes::with_http_limits`，即可替换 Controller 短路由默认策略；原生 Axum 短路由则在选定分支创建 `RequestLimitLayer`。Controller 的 `sse` 和 `ws` 路由跳过短请求 layer。`WebServer` 接收完整的 Axum `Router`，不会为路由添加限额。
 
 启用 HTTPS 时，在绑定前加载可信证书材料，再传给 `WebServer::bind_https`：
 
@@ -194,14 +194,14 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 
 transport 许可用满后，accept loop 会在 accept 新 socket 前等待。客户端可能留在操作系统 listen backlog 中，也可能连接失败；尚未 accept 的连接没有 HTTP handler，因此不能保证返回 503。backlog 行为取决于部署平台，不应当作应用响应。
 
-`request_header_timeout` 默认 10 秒，用于限制 HTTP/1 请求头；HTTPS TLS 握手也沿用该期限。`transport_idle_timeout` 默认 30 秒，在 handler 和响应体都不活跃时回收空闲 HTTP/1/2 连接。活跃请求停滞不会由空闲期限中断；此类情况应使用路由限额或部署层策略处理。它与 `HttpLimits::with_request_timeout` 不同，后者只在短路由显式安装 `RequestLimitLayer` 后生效。
+`request_header_timeout` 默认 10 秒，用于限制 HTTP/1 请求头；HTTPS TLS 握手也沿用该期限。`transport_idle_timeout` 默认 30 秒，在 handler 和响应体都不活跃时回收空闲 HTTP/1/2 连接。活跃请求停滞不会由空闲期限中断；此类情况应使用路由限额或部署层策略处理。`HttpLimits::with_request_timeout` 与传输空闲期限不同：Controller `short` 路由默认使用该请求期限，原生 Axum 路由则只有显式安装 `RequestLimitLayer` 后才使用。
 
 对 WebSocket，`WsUpgradePolicy::idle_timeout` 也限制入站消息交付给应用时无进展的最长时间。若应用没有调用 `WsSession::recv()`，导致容量为 64 条消息的入站通道满载，期限到达后会话会以关闭码 `1013`（原因 `inbound backpressure`）关闭。应定期排空消息，并在接收后再转交较长的业务处理。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达；对端或会话关闭后，它会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。
 
 | 现象 | 检查方式 |
 | --- | --- |
 | 过载时客户端等待或连接失败 | 检查该实例的 transport 额度和系统 backlog。accept 之前不会有保证的 503。 |
-| 请求体超过上限但仍成功 | 确认路由装了 `RequestLimitLayer`，或 Controller 分支使用 `with_http_limits`；并确认 handler/extractor 实际读取请求体。 |
+| 请求体超过上限但仍成功 | 对 Controller `short` 路由，确认 handler/extractor 实际读取请求体，并检查是否用 `with_http_limits` 替换成了更大的预算。对原生 Axum 路由，在该分支安装 `RequestLimitLayer`，并确认请求体被读取。 |
 | SSE 在普通请求期限到达时关闭 | 从该流式分支移除 `RequestLimitLayer`，改用 `SseConnectionPolicy` 的连接策略。 |
 | WS 建立后 `active_sessions()` 仍为 0 | 调用 `WsUpgradePolicy::on_upgrade` 并传入服务的 `ServerContext`；原生 Axum upgrade 不属于受管会话统计。 |
 | 入站负载下 WebSocket 以 `1013` 关闭 | 应用可能没有及时调用 `WsSession::recv()`。入站通道容量为 64 条消息；若通道持续满载且 `idle_timeout` 内交付没有进展，会话就会关闭。应持续读取消息，或先接收再交给应用管理的任务处理；根据预期处理间隔设置合适的 `idle_timeout`。 |

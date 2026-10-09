@@ -15,7 +15,7 @@ The default feature set is empty. `json` enables bounded JSON helpers, `ws` enab
 
 ## Quick start
 
-The runnable examples show the complete path: create `ServerOptions` with a transport connection cap, construct `HttpLimits` separately, install those limits on short routes, bind, serve the router, and stop through `/admin/shutdown`.
+The runnable examples show the complete path: create `ServerOptions` with a transport connection cap, use the default HTTP limits on Controller short routes (or replace them with `HttpLimits`), add explicit limits to selected native Axum short routes, bind, serve the router, and stop through `/admin/shutdown`.
 
 In terminal A, start the example and wait until it prints its listening address:
 
@@ -32,9 +32,9 @@ curl -i -X POST http://127.0.0.1:3000/users \
 curl -i -X POST http://127.0.0.1:3000/admin/shutdown
 ```
 
-The successful health response is `200 OK` with `ok`; creating a user returns `201 Created`. The example binds only to loopback and keeps data in memory. See [`examples/controller_crud.rs`](examples/controller_crud.rs) for the explicit `ControllerRoutes::with_http_limits` setup. For native Axum routes, install `RequestLimitLayer::new(http_limits)` on the short route branches that need it. `WebServer` serves the router as supplied and does not install HTTP limits implicitly.
+The successful health response is `200 OK` with `ok`; creating a user returns `201 Created`. The example binds only to loopback and keeps data in memory. See [`examples/controller_crud.rs`](examples/controller_crud.rs) for replacing the Controller short-route defaults with `ControllerRoutes::with_http_limits`. For native Axum routes, install `RequestLimitLayer::new(http_limits)` on the short route branches that need it. `WebServer` serves the router as supplied and does not install HTTP limits implicitly.
 
-When using the `config` feature, `ConfiguredWeb::from_config` returns `ServerOptions` and `HttpLimits` as separate values. Pass the latter to the route assembly point; it remains inert until explicitly installed.
+When using the `config` feature, `ConfiguredWeb::from_config` returns `ServerOptions` and `HttpLimits` as separate values. Controller short routes already have `HttpLimits::default()`; pass the configured limits to `with_http_limits` to replace that policy. For native Axum routes, install `RequestLimitLayer` on selected branches. `WebServer` does not apply either policy to the Router.
 
 ## Streaming example
 
@@ -58,7 +58,7 @@ The sample bearer token is `demo-only`; it illustrates a handler check and is no
 ## Limits and operational boundaries
 
 - Each `SseConnectionPolicy` and `WsUpgradePolicy` created with `new` or `default` opens an independent capacity domain; cloning a policy shares its domain. Create each policy once in `AppState` and clone it from handlers using `State<AppState>` when routes should share capacity. See the [English user guide](doc/user_guide.md) or [Chinese user guide](doc/user_guide.zh_CN.md) for an example. The per-`WebServer` transport connection limit defaults to 1024 and can be configured with `ServerOptions::with_max_transport_connections`. It covers TLS handshakes and HTTP connection futures. When full, accepting pauses and clients may wait in the operating system backlog or fail to connect; this does not promise an HTTP 503. These policy budgets are separate from the transport limit; SSE remains an HTTP connection.
-- `HttpLimits` applies finite body size, concurrency, and processing-time limits to ordinary short requests only where the application installs `ControllerRoutes::with_http_limits` or `RequestLimitLayer`. Controller `short` routes are covered by the configured Controller policy; `sse` and `ws` routes skip the short-request layer. Native Axum routes need an explicit layer on each selected branch.
+- `ControllerRoutes::new()` applies `HttpLimits::default()` to Controller `short` routes: 1 MiB per request body, 256 concurrent requests shared by that builder, and a 30-second processing and response-body deadline. `with_http_limits` replaces those defaults and must be called before adding Controllers. Controller `sse` and `ws` routes skip the short-request layer. Native Axum routes need an explicit `RequestLimitLayer` on each selected branch; `WebServer` does not install route limits.
 - The default HTTP/1 request-header timeout is 10 seconds and also bounds an HTTP/1 WebSocket upgrade request before its headers arrive. The transport idle timeout defaults to 30 seconds (`ServerOptions::with_transport_idle_timeout` or `transport.idle_timeout_ms`); it closes connections with no active request or response body, including idle HTTP/2 connections, while active requests and SSE bodies keep the connection active.
 - Use `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)` to reserve a managed session before returning the upgrade response. Origin is optional by default: requests without Origin proceed to application authentication, while requests with Origin are rejected unless it exactly matches `allowed_origins`. An absent Origin does not authenticate a client. After the peer or session closes, `try_send` returns `Closed`; successful enqueueing alone does not guarantee network delivery. If the application does not read inbound messages and delivery makes no progress within `idle_timeout`, the session closes with WebSocket code `1013` (try again later).
 - `ServerContext::active_sessions()` counts managed SSE sessions and WebSocket upgrades admitted through `on_upgrade`, including pending handshakes. Shutdown waits for HTTP connections and these sessions against one deadline; `ShutdownReport::unfinished_managed_sessions` records sessions remaining at the deadline. Native Axum upgrades and arbitrary application tasks are outside this count.

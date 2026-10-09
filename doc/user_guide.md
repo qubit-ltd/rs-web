@@ -48,11 +48,11 @@ let (server_options, http_limits) = configured.into_parts();
 let server = WebServer::bind_http(server_options).await?;
 ```
 
-`address` is required; `shutdown_timeout_ms` defaults to 30000, `transport.max_connections` to 1024, and `transport.idle_timeout_ms` to 30000. The `http.*` fields create `HttpLimits`, but do not install them. Errors identify the invalid field through `ConfigOptionsError::field()` without echoing its value.
+`address` is required; `shutdown_timeout_ms` defaults to 30000, `transport.max_connections` to 1024, and `transport.idle_timeout_ms` to 30000. The `http.*` fields create `HttpLimits` but do not install them: Controller short routes already use `HttpLimits::default()`, and passing the configured value to `with_http_limits` replaces that policy. Install `RequestLimitLayer` on selected native Axum short routes. `WebServer` does not modify the Router. Errors identify the invalid field through `ConfigOptionsError::field()` without echoing its value.
 
 ## Assemble short routes and long-lived routes
 
-Install request limits only on ordinary short routes. This protects consumed request-body data, concurrent handler work, and the selected branch's deadline. It does not make unprotected routes inherit a server-wide policy.
+Controller short routes have a default budget of 1 MiB per request body, 256 concurrent requests shared by the builder, and 30 seconds for handler work plus response-body streaming. Call `with_http_limits` before adding Controllers to replace that policy. Native Axum routes do not inherit Controller limits; install `RequestLimitLayer` on each selected ordinary short route. `WebServer` serves the supplied Router without adding route layers. These limits protect consumed request-body data, concurrent handler work, and the selected branch's deadline.
 
 ```rust
 use std::time::Duration;
@@ -69,7 +69,7 @@ let app = Router::new()
     .route("/ws", get(websocket));
 ```
 
-The example fragments assume application handlers `submit`, `progress`, and `websocket`; the full runnable composition is in [`examples/prompt_stream.rs`](../examples/prompt_stream.rs). Controller routes can instead install the same policy using `ControllerRoutes::with_http_limits`. Keep SSE and WebSocket routes outside `RequestLimitLayer`: the layer's deadline also covers response streaming and is intended for short requests.
+The example fragments assume application handlers `submit`, `progress`, and `websocket`; the full runnable composition is in [`examples/prompt_stream.rs`](../examples/prompt_stream.rs). Controller routes already receive default limits; call `ControllerRoutes::with_http_limits` before adding them to replace those limits. Controller `sse` and `ws` routes skip the short-request layer. Keep SSE and WebSocket routes outside `RequestLimitLayer`: the layer's deadline also covers response streaming and is intended for short requests.
 
 ### Share SSE and WebSocket policies through application state
 
@@ -121,7 +121,7 @@ async fn websocket(
 
 The `event_stream` value represents the application's event stream; the runnable [`prompt_stream` example](../examples/prompt_stream.rs) shows producer construction and cancellation handling. The fragment assumes the existing `server` and an Axum state assembly function. Cloning either policy shares its connection-capacity domain, so all routes using clones draw from one configured allowance. Calling `SseConnectionPolicy::default()` or `WsUpgradePolicy::new()` again creates an independent domain; requests handled by that new instance do not consume the original policy's allowance. These are separate caps: SSE has its own session cap and remains within the HTTP transport cap, while an upgraded WebSocket uses its policy cap after the HTTP upgrade completes.
 
-For a configuration-driven service, pass `configured.http_limits()` to the controller builder or `RequestLimitLayer::new` on the selected route branch. `WebServer` receives a completed Axum `Router` and never silently rewrites it.
+For a configuration-driven service, pass `configured.http_limits()` to `ControllerRoutes::with_http_limits` before adding controllers to replace its default policy, or to `RequestLimitLayer::new` on selected native Axum branches. Controller `sse` and `ws` routes skip the short-request layer. `WebServer` receives a completed Axum `Router` and does not add route limits.
 
 For HTTPS, load trusted certificate material before binding and pass it to `WebServer::bind_https`:
 
@@ -195,14 +195,14 @@ Budget transport connections separately from long-lived sessions. For example, w
 
 When all transport permits are occupied, the accept loop waits before accepting another socket. A client may remain in the OS listen backlog or fail to connect. There is no HTTP handler to return a guaranteed 503 for a socket that has not been accepted. Tune the cap and the operating system backlog as deployment-specific settings; do not treat backlog behavior as an application response.
 
-`request_header_timeout` defaults to 10 seconds. It bounds HTTP/1 request headers and is also used for the HTTPS TLS handshake. `transport_idle_timeout` defaults to 30 seconds and closes idle HTTP/1 and HTTP/2 transports when no handler or response body is active. It does not time out a stalled active request; use route limits or deployment-level policies for that case. This is separate from `HttpLimits::with_request_timeout`, which applies only after `RequestLimitLayer` is installed on a short route.
+`request_header_timeout` defaults to 10 seconds. It bounds HTTP/1 request headers and is also used for the HTTPS TLS handshake. `transport_idle_timeout` defaults to 30 seconds and closes idle HTTP/1 and HTTP/2 transports when no handler or response body is active. It does not time out a stalled active request; use route limits or deployment-level policies for that case. This is separate from `HttpLimits::with_request_timeout`, which applies on Controller `short` routes by default and on native Axum routes only after `RequestLimitLayer` is installed.
 
 For WebSockets, `WsUpgradePolicy::idle_timeout` also limits the time without progress while delivering an inbound message to the application. If the 64-message inbound channel is full because the application is not calling `WsSession::recv()`, expiry closes the session with code `1013` (`inbound backpressure`). Drain messages regularly and hand off longer processing after receiving each message. `WsSession::try_send` returning success means only that the message entered the outbound queue; it does not guarantee network delivery. After the peer or session closes, it returns `WsSendError::Closed` (or `Closed` when matching the variant).
 
 | Symptom | Check |
 | --- | --- |
 | Client waits or connection fails during overload | Check per-instance transport capacity and OS backlog. Do not expect a 503 before accept. |
-| A request exceeds the body cap but succeeds | Confirm that the route has `RequestLimitLayer` or its controller branch uses `with_http_limits`; confirm the body is consumed by the handler/extractor. |
+| A request exceeds the body cap but succeeds | For a Controller `short` route, confirm its handler/extractor consumes the body and check whether `with_http_limits` replaced the default with a larger budget. For a native Axum route, install `RequestLimitLayer` on that branch and confirm the body is consumed. |
 | SSE closes at the ordinary request deadline | Remove `RequestLimitLayer` from that streaming branch and use `SseConnectionPolicy` limits. |
 | `active_sessions()` stays at zero for a WS | Call `WsUpgradePolicy::on_upgrade` with the server's `ServerContext`; native Axum upgrades are outside managed-session reporting. |
 | A WebSocket closes with code `1013` under inbound load | The application may not be calling `WsSession::recv()` fast enough. The inbound channel holds 64 messages; if it remains full and delivery makes no progress for `idle_timeout`, the session closes. Read messages continuously or move processing to application-managed work after receiving them; choose an `idle_timeout` that allows the expected processing gaps. |
