@@ -106,11 +106,9 @@ pub(in crate::ws) async fn reader_loop(
             }
             Ok(Some(Err(error))) => {
                 queue.close();
-                let display = error.to_string().to_ascii_lowercase();
-                lifecycle.close_code.store(
-                    if display.contains("too long") { 1009 } else { 1002 },
-                    Ordering::Release,
-                );
+                lifecycle
+                    .close_code
+                    .store(close_code_for_read_error(&error), Ordering::Release);
                 let _ = incoming.try_send(Err(error));
                 lifecycle.shutdown.cancel();
                 if deadline.is_none() {
@@ -141,6 +139,29 @@ pub(in crate::ws) async fn reader_loop(
         }
     }
     drop(close_ack);
+}
+
+/// Maps a WebSocket read error to the protocol close code.
+///
+/// # Parameters
+///
+/// * `error` - Read failure wrapped by Axum.
+///
+/// # Returns
+///
+/// `1009` for an oversized message, or `1002` otherwise.
+fn close_code_for_read_error(error: &Error) -> u16 {
+    let source = std::error::Error::source(error).and_then(|source| source.downcast_ref::<tungstenite::Error>());
+    if matches!(
+        source,
+        Some(tungstenite::Error::Capacity(
+            tungstenite::error::CapacityError::MessageTooLong { .. }
+        ))
+    ) {
+        1009
+    } else {
+        1002
+    }
 }
 
 /// Applies the state transition for one attempted inbound delivery.
@@ -204,5 +225,29 @@ async fn deliver_incoming(
             Ok(Err(_)) => DeliveryResult::ReceiverClosed,
             Err(_) => DeliveryResult::TimedOut,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::Error;
+    use tungstenite::Error as WebSocketError;
+    use tungstenite::error::CapacityError;
+
+    use super::close_code_for_read_error;
+
+    #[test]
+    fn test_close_code_for_read_error_uses_capacity_type() {
+        let oversized = Error::new(WebSocketError::Capacity(CapacityError::MessageTooLong {
+            size: 5,
+            max_size: 4,
+        }));
+        assert_eq!(close_code_for_read_error(&oversized), 1009);
+
+        let misleading_text = Error::new(std::io::Error::other("message too long"));
+        assert_eq!(close_code_for_read_error(&misleading_text), 1002);
+
+        let other_websocket_error = Error::new(WebSocketError::ConnectionClosed);
+        assert_eq!(close_code_for_read_error(&other_websocket_error), 1002);
     }
 }
