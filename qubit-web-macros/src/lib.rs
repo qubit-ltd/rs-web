@@ -10,24 +10,8 @@
 //! The macros declare routes on an inherent Controller implementation; the
 //! main `qubit-web` crate re-exports them and provides the route builder:
 //!
-//! ```rust
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! use std::sync::Arc;
-//! use qubit_web::{ControllerRoutes, rest_controller, get_mapping};
-//!
-//! struct Health;
-//!
-//! #[rest_controller("/health")]
-//! impl Health {
-//!     #[get_mapping("")]
-//!     async fn check(&self) -> &'static str { "ok" }
-//! }
-//!
-//! let router = ControllerRoutes::<()>::new().add(Arc::new(Health))?.finish()?;
-//! let _ = router;
-//! # Ok(())
-//! # }
-//! ```
+//! The compile-checked Controller example is in the
+//! [`qubit-web` integration tests](https://github.com/qubit-ltd/rs-web/blob/main/tests/macro_documentation_tests.rs).
 
 mod controller;
 mod route;

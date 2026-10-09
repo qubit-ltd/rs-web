@@ -7,6 +7,8 @@
 // =============================================================================
 #![cfg(feature = "json")]
 
+use std::io;
+
 use axum::Extension;
 use axum::Router;
 use axum::body::Body;
@@ -20,7 +22,6 @@ use qubit_web::json::BoundedJson;
 use qubit_web::json::JsonLimits;
 use qubit_web::json::json_response;
 use serde::de::IgnoredAny;
-use std::io;
 use tower::ServiceExt;
 
 async fn echo_number(BoundedJson(value): BoundedJson<u64>) -> String {
@@ -149,9 +150,11 @@ async fn test_rejects_body_over_input_budget() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert!(String::from_utf8(response_body.to_vec())
-        .unwrap()
-        .contains("json_budget_exceeded"));
+    assert!(
+        String::from_utf8(response_body.to_vec())
+            .unwrap()
+            .contains("json_budget_exceeded")
+    );
 }
 
 #[tokio::test]
@@ -200,9 +203,11 @@ async fn test_rejects_structure_budget_exceeded() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert!(String::from_utf8(response_body.to_vec())
-        .unwrap()
-        .contains("json_budget_exceeded"));
+    assert!(
+        String::from_utf8(response_body.to_vec())
+            .unwrap()
+            .contains("json_budget_exceeded")
+    );
 }
 
 #[tokio::test]
