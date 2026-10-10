@@ -20,14 +20,14 @@ else
 fi
 cache_root="$cache_home/rs-infra"
 mkdir -p "$cache_root/sources" "$cache_root/tools" "$cache_root/locks" "$cache_root/build/manager"
-manager_repo=https://github.com/qubit-ltd/rs-infra-tools.git
+manager_repo=git@github.com:qubit-ltd/rs-infra-tools.git
 
 if [[ -n "${RS_INFRA_SHARED_ROOT:-}" && -x "${RS_INFRA_TOOLS_BIN:-}" ]]; then
     shared_root=$RS_INFRA_SHARED_ROOT
     manager_bin=$RS_INFRA_TOOLS_BIN
 else
     infra_retry() {
-        local description="$1" attempt=1 max_attempts="${RS_INFRA_NETWORK_MAX_ATTEMPTS:-4}" delay="${RS_INFRA_NETWORK_RETRY_DELAY_SECONDS:-2}" status=0
+        local description="$1" attempt=1 max_attempts="${RS_INFRA_NETWORK_MAX_ATTEMPTS:-6}" delay="${RS_INFRA_NETWORK_RETRY_DELAY_SECONDS:-2}" status=0
         shift
         [[ "$max_attempts" =~ ^[0-9]+$ ]] && (( max_attempts > 0 )) || { echo "error: invalid retry count" >&2; return 2; }
         [[ "$delay" =~ ^[0-9]+$ ]] || { echo "error: invalid retry delay" >&2; return 2; }
@@ -88,4 +88,68 @@ export RS_INFRA_PROJECT_ROOT="$project_root"
 export RS_INFRA_SHARED_ROOT="$shared_root"
 export RS_INFRA_TOOLS_BIN="$manager_bin"
 export RS_INFRA_CACHE_DIR="$cache_home"
-exec "$shared_root/$entrypoint" "$@"
+
+prepare_dependencies() {
+    local helper="$shared_root/.infra/lib/prepare-local-path-dependencies.sh"
+    if [[ -x "$helper" ]]; then
+        "$helper"
+    fi
+}
+
+run_latest() {
+    local tool="$1"
+    shift
+    exec "$manager_bin" latest --project "$project_root" --tool "$tool" -- "$@"
+}
+
+case "$entrypoint" in
+    .infra/bin/align-ci.sh)
+        prepare_dependencies
+        run_latest rs-infra-style --project "$project_root" fix "$@"
+        ;;
+    .infra/bin/ci-check.sh)
+        prepare_dependencies
+        run_latest rs-infra-ci --project "$project_root" "$@" check
+        ;;
+    .infra/bin/coverage.sh)
+        prepare_dependencies
+        run_latest rs-infra-coverage --project "$project_root" collect "$@"
+        ;;
+    .infra/bin/dependency-update.sh)
+        prepare_dependencies
+        mode=update
+        for arg in "$@"; do
+            case "$arg" in
+                --check) mode=check ;;
+                --update) mode=update ;;
+                -h|--help) echo "Usage: ./.infra/bin/dependency-update.sh [--check|--update]"; exit 0 ;;
+                *) echo "error: unknown dependency-update option '$arg'" >&2; exit 2 ;;
+            esac
+        done
+        if [[ "$mode" == update ]]; then
+            "$manager_bin" latest --project "$project_root" --tool rs-infra-dependency -- --project "$project_root" sync
+        fi
+        run_latest rs-infra-dependency --project "$project_root" check
+        ;;
+    .infra/bin/infra-tool.sh)
+        exec "$shared_root/.infra/lib/infra-tool.sh" "$@"
+        ;;
+    .infra/bin/prepare-local-path-dependencies.sh)
+        exec "$shared_root/.infra/lib/prepare-local-path-dependencies.sh" "$@"
+        ;;
+    .infra/bin/project-ci-check.sh)
+        project_hook="$project_root/.infra/project-ci-check.local.sh"
+        if [[ -x "$project_hook" ]]; then
+            exec "$project_hook" "$@"
+        fi
+        exit 0
+        ;;
+    .infra/bin/style-check.sh)
+        prepare_dependencies
+        run_latest rs-infra-style --project "$project_root" check "$@"
+        ;;
+    *)
+        echo "error: unsupported infrastructure entrypoint '$entrypoint'" >&2
+        exit 2
+        ;;
+esac

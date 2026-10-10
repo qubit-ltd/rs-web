@@ -1,8 +1,9 @@
 {
   "config_sources": {
-    "rs-infra-ci": "sha256:b52fdcc1a8382533f3f5f56d0f458fca1e30baa853f6acb394d913ec32972166",
+    "rs-infra-ci": "sha256:2cc68b5ab050769382d7e9af468cb60b2261fb8e387d0ced9974c8d068964271",
     "rs-infra-dependency": "sha256:a2f5c5d804e0eb01582c5d6c743173774c44a16e8e0b8e608fc99b09da0f8563",
-    "rs-infra-style": "sha256:f5ebba934dfcd04bb4b7a3847f27b8a73dcab28afbfe7cb2a9c2e884ebc4564c"
+    "rs-infra-style": "sha256:f5ebba934dfcd04bb4b7a3847f27b8a73dcab28afbfe7cb2a9c2e884ebc4564c",
+    "rs-infra-tools": "sha256:b52fdcc1a8382533f3f5f56d0f458fca1e30baa853f6acb394d913ec32972166"
   },
   "files": {
     ".infra/bin/align-ci.sh": {
@@ -43,11 +44,7 @@
     },
     ".infra/bootstrap.sh": {
       "executable": true,
-      "sha256": "bd94dd3b7fcb3c446475f2ef6cd860108bab9b887d39bbeeb27380147d6b839c"
-    },
-    ".infra/ci/defaults.toml": {
-      "executable": false,
-      "sha256": "ebf1a95d0a5ed70071987dbaa2413d1f2402f274e0d586a3924d8adbe9f1fb90"
+      "sha256": "ff9f1ee2d78734eaff90c6225d32ea65608edf0012c01f27bbeb21c7f9c73a90"
     },
     ".infra/ci/local-path-dependencies.tsv": {
       "executable": false,
@@ -73,13 +70,17 @@
       "executable": false,
       "sha256": "5b4a718d88723c2032a7057910f0f0fa49e7419437cbefef26bba8ca9b648b59"
     },
+    ".infra/tools/defaults.toml": {
+      "executable": false,
+      "sha256": "ebf1a95d0a5ed70071987dbaa2413d1f2402f274e0d586a3924d8adbe9f1fb90"
+    },
     "update-infra.sh": {
       "executable": true,
-      "sha256": "cb1256953d34f990dba04460ffb6869c910952bfecbddca95749ba1935e8579c"
+      "sha256": "84825b93fdb028fe414a5561c1e9d3ba7a59dedd19da9fca00294af877457e18"
     }
   },
-  "package_sha256": "5c9b7f4bd31b0ee520bbc760967a89d10962c4b20dfcd15eec2501c381c67c67",
+  "package_sha256": "eb354905e0944f4dcee8e5b9f3515839dab60ccd03ce25f945386863248b93fc",
   "schema": 1,
-  "source_repository": "https://github.com/qubit-ltd/rs-infra-tools",
-  "source_revision": "a5c9922b0381558f327ed40ced3dcbc1cd49b487"
+  "source_repository": "git@github.com:qubit-ltd/rs-infra-tools.git",
+  "source_revision": "f69447c14c7c8e77450c867b4948735f74c559e1"
 }

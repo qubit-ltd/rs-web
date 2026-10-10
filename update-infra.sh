@@ -22,12 +22,15 @@ if [[ -z "$python_cmd" ]]; then
     fi
 fi
 
+if [[ $# -eq 0 ]]; then
+    set -- --yes
+fi
 mode=${1:-}
 if [[ "$mode" == --check ]]; then
     exec "$python_cmd" "$project_root/.infra/bootstrap-check.py"
 fi
-if [[ "$mode" != "" && "$mode" != --yes && "$mode" != --dry-run && "$mode" != --status ]]; then
-    echo "usage: ./update-infra.sh [--yes|--dry-run|--status|--check]" >&2
+if [[ "$mode" != --yes && "$mode" != --dry-run && "$mode" != --status ]]; then
+    echo "usage: ./update-infra.sh [--dry-run|--status|--check] (updates without prompting by default)" >&2
     exit 2
 fi
 
@@ -36,7 +39,7 @@ work=$(mktemp -d "$tmp_root/rs-infra-bootstrap.XXXXXX")
 printf '%s\n' 'rs-infra-bootstrap-temp-v1' > "$work/.rs-infra-bootstrap-temp"
 cleanup() { rm -rf -- "$work"; }
 trap cleanup EXIT
-repository=https://github.com/qubit-ltd/rs-infra-tools.git
+repository=git@github.com:qubit-ltd/rs-infra-tools.git
 if ! git clone --quiet --depth 1 --single-branch --branch main "$repository" "$work/source"; then
     echo "error: unable to fetch the latest rs-infra-tools bootstrap package" >&2
     exit 1
