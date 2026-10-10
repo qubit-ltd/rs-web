@@ -761,6 +761,85 @@ async fn test_context_session_is_released_after_shutdown_deadline_without_peer_a
 }
 
 #[tokio_test]
+async fn test_stalled_writer_shutdown_releases_resources() {
+    #[derive(Clone)]
+    struct StalledWriterState {
+        policy: WsUpgradePolicy,
+        context: ServerContext,
+        ready_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    async fn upgrade(
+        State(StalledWriterState {
+            policy,
+            context,
+            ready_tx,
+        }): State<StalledWriterState>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, |session| async move {
+            let payload = vec![0; 64 * 1024];
+            for _ in 0..1024 {
+                match session.try_send(Message::binary(payload.clone())) {
+                    Ok(()) => {}
+                    Err(WsSendError::Backpressure) => {
+                        ready_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+                        pending::<()>().await;
+                    }
+                    Err(error) => panic!("unexpected WebSocket send error: {error:?}"),
+                }
+            }
+            ready_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+            pending::<()>().await;
+        })
+    }
+
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(250)),
+    )
+    .await
+    .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new()
+        .max_connections(1)
+        .queue_limits(64, 4 * 1024 * 1024);
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
+    let app = Router::new().route("/ws", get(upgrade)).with_state(StalledWriterState {
+        policy: policy.clone(),
+        context: context.clone(),
+        ready_tx,
+    });
+    let shutdown = CancellationToken::new();
+    let mut serving = spawn(server.serve(app, shutdown.clone().cancelled_owned()));
+
+    let (_client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    timeout(Duration::from_secs(2), ready_rx)
+        .await
+        .expect("handler should fill the send queue without client reads")
+        .expect("handler should report its send loop checkpoint");
+
+    shutdown.cancel();
+    let _report = timeout(Duration::from_secs(2), &mut serving)
+        .await
+        .expect("server should stop after its bounded shutdown deadline")
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(2), async {
+        while context.active_sessions() != 0 || policy.active_connections() != 0 {
+            yield_now().await;
+        }
+    })
+    .await
+    .expect("shutdown should release the managed session and connection permit");
+    assert_eq!(context.active_sessions(), 0);
+    assert_eq!(policy.active_connections(), 0);
+}
+
+#[tokio_test]
 async fn test_shutdown_close_deadline_releases_connection_without_peer_ack() {
     let policy = WsUpgradePolicy::new().max_connections(1);
     let shutdown = CancellationToken::new();
