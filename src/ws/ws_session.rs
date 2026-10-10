@@ -120,6 +120,8 @@ impl WsSession {
     /// The close operation waits at most the configured session shutdown
     /// timeout, then aborts reader and writer tasks. It immediately closes the
     /// outbound queue, discarding pending messages and rejecting future sends.
+    /// During server shutdown, cancellation can also make the writer exit
+    /// without the application calling this method.
     pub async fn close(&mut self) {
         self.queue.close();
         self.shutdown.cancel();
