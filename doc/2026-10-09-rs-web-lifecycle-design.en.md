@@ -20,6 +20,8 @@ The shutdown duration is configured once through `ServerOptions` and carried by 
 
 All clones of a WebSocket send queue share its closed state. After the peer or session closes, `try_send` returns `Closed`; a successful enqueue does not guarantee network delivery. The inbound channel holds 64 messages. `WsUpgradePolicy::idle_timeout` is the maximum time without progress while reading or delivering inbound messages to the application. If the application does not call `WsSession::recv()` and delivery remains blocked for that interval, the session closes with code `1013` and reason `inbound backpressure`. Applications should keep receiving messages and hand off longer processing after receipt.
 
+An ordinary write stops waiting for its flush when server shutdown is cancelled. After the peer has sent Close, the writer's final flush is bounded by the server's shared close deadline. Under backpressure, a Close frame may not be delivered. When the writer exits, its connection-policy permit and managed-session registration are released.
+
 ## Origin and application authentication
 
 `WsUpgradePolicy::new()` permits a request with no Origin to proceed to application authentication. If a request includes Origin, the default policy rejects it; configure `allowed_origins` to accept exact values. Applications remain responsible for authenticating before calling `on_upgrade`. Origin validation is not authentication.

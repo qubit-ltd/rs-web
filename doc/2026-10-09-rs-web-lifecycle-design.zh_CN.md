@@ -20,6 +20,8 @@ SSE 与 WebSocket 容量限制属于彼此独立的策略域，不是整个服�
 
 WebSocket 发送队列的所有克隆共享关闭状态。对端或会话关闭后，`try_send` 会返回 `Closed`；成功入队不保证消息已通过网络送达。入站通道容量为 64 条消息。`WsUpgradePolicy::idle_timeout` 表示读取入站消息或向应用交付消息时无进展的最长时间。若应用不调用 `WsSession::recv()` 且交付在该期限内持续受阻，会话会以关闭码 `1013`、原因 `inbound backpressure` 关闭。应用应持续接收消息，并在收到后再转交较长的业务处理。
 
+服务取消时，普通写入会停止等待刷新完成。对端发送 Close 后，writer 的最终刷新受服务器共享的关闭截止时间约束。发生背压时，Close 帧可能无法送达。writer 退出时会释放其连接策略许可，并解除受管会话登记。
+
 ## Origin 与应用认证
 
 `WsUpgradePolicy::new()` 默认允许不携带 Origin 的请求继续进入应用认证。请求若携带 Origin，则默认拒绝；只有配置 `allowed_origins` 并精确匹配后才会接纳。应用仍须在调用 `on_upgrade` 前完成认证。Origin 校验不等同于身份认证。
