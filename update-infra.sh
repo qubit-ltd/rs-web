@@ -39,7 +39,7 @@ work=$(mktemp -d "$tmp_root/rs-infra-bootstrap.XXXXXX")
 printf '%s\n' 'rs-infra-bootstrap-temp-v1' > "$work/.rs-infra-bootstrap-temp"
 cleanup() { rm -rf -- "$work"; }
 trap cleanup EXIT
-repository=git@github.com:qubit-ltd/rs-infra-tools.git
+repository=https://github.com/qubit-ltd/rs-infra-tools.git
 if ! git clone --quiet --depth 1 --single-branch --branch main "$repository" "$work/source"; then
     echo "error: unable to fetch the latest rs-infra-tools bootstrap package" >&2
     exit 1
