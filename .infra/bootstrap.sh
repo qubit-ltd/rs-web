@@ -20,7 +20,7 @@ else
 fi
 cache_root="$cache_home/rs-infra"
 mkdir -p "$cache_root/sources" "$cache_root/tools" "$cache_root/locks" "$cache_root/build/manager"
-manager_repo=git@github.com:qubit-ltd/rs-infra-tools.git
+manager_repo=https://github.com/qubit-ltd/rs-infra-tools.git
 
 if [[ -n "${RS_INFRA_SHARED_ROOT:-}" && -x "${RS_INFRA_TOOLS_BIN:-}" ]]; then
     shared_root=$RS_INFRA_SHARED_ROOT
@@ -99,7 +99,7 @@ prepare_dependencies() {
 run_latest() {
     local tool="$1"
     shift
-    exec "$manager_bin" latest --project "$project_root" --tool "$tool" -- "$@"
+    "$manager_bin" latest --project "$project_root" --tool "$tool" -- "$@"
 }
 
 case "$entrypoint" in
@@ -114,6 +114,7 @@ case "$entrypoint" in
     .infra/bin/coverage.sh)
         prepare_dependencies
         run_latest rs-infra-coverage --project "$project_root" collect "$@"
+        "$shared_root/.infra/lib/coverage-report.sh"
         ;;
     .infra/bin/dependency-update.sh)
         prepare_dependencies
