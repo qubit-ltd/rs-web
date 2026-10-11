@@ -26,7 +26,7 @@ let server = WebServer::bind_http(options).await?;
 let context = server.context();
 ```
 
-Zero is rejected with `WebServerError::InvalidConfig`. The cap applies per `WebServer`; it covers accepted sockets, TLS handshakes, and HTTP connection futures. It is held until the HTTP transport future ends. Upgraded WebSocket sessions are governed by `WsUpgradePolicy` after Hyper completes the upgrade.
+The transport and short-request concurrency values must be within `1..=tokio::sync::Semaphore::MAX_PERMITS`; zero and larger values are rejected with `WebServerError::InvalidConfig`. The cap applies per `WebServer`; it covers accepted sockets, TLS handshakes, and HTTP connection futures. It is held until the HTTP transport future ends. Upgraded WebSocket sessions are governed by `WsUpgradePolicy` after Hyper completes the upgrade.
 
 Transport connections with no active request or response body close after 30 seconds by default. Choose a different positive duration when the deployment needs another idle policy:
 
@@ -48,7 +48,7 @@ let (server_options, http_limits) = configured.into_parts();
 let server = WebServer::bind_http(server_options).await?;
 ```
 
-`address` is required; `shutdown_timeout_ms` defaults to 30000, `transport.max_connections` to 1024, and `transport.idle_timeout_ms` to 30000. The `http.*` fields create `HttpLimits` but do not install them: Controller short routes already use `HttpLimits::default()`, and passing the configured value to `with_http_limits` replaces that policy. Install `RequestLimitLayer` on selected native Axum short routes. `WebServer` does not modify the Router. Errors identify the invalid field through `ConfigOptionsError::field()` without echoing its value.
+`address` is required; `shutdown_timeout_ms` defaults to 30000, `transport.max_connections` to 1024, and `transport.idle_timeout_ms` to 30000. `transport.max_connections` and `http.max_concurrent_requests` must be within `1..=tokio::sync::Semaphore::MAX_PERMITS`. The `http.*` fields create `HttpLimits` but do not install them: Controller short routes already use `HttpLimits::default()`, and passing the configured value to `with_http_limits` replaces that policy. Install `RequestLimitLayer` on selected native Axum short routes. `WebServer` does not modify the Router. Errors identify the invalid field through `ConfigOptionsError::field()` without echoing its value; oversized capacities report the corresponding configuration key.
 
 ## Assemble short routes and long-lived routes
 
@@ -71,7 +71,7 @@ let app = Router::new()
 
 The example fragments assume application handlers `submit`, `progress`, and `websocket`; the full runnable composition is in [`examples/prompt_stream.rs`](../examples/prompt_stream.rs). Controller routes already receive default limits; call `ControllerRoutes::with_http_limits` before adding them to replace those limits. Controller `sse` and `ws` routes skip the short-request layer. Keep SSE and WebSocket routes outside `RequestLimitLayer`: the layer's deadline also covers response streaming and is intended for short requests.
 
-`ControllerRoutes::add` checks the complete set of Controller route declarations before registering them. It returns `ControllerRouteError` for duplicate method/path pairs, invalid paths, or matching-template conflicts such as parameter aliases and overlapping wildcards. Different methods can share one template, and `finish()` returns the `Router` directly. This check covers declarations collected by the builder; later merges with native Axum routers retain Axum's own behavior.
+`ControllerRoutes::add` checks the complete set of Controller route declarations before registering them. It returns `ControllerRouteError` for duplicate method/path pairs, invalid paths, or matching-template conflicts such as parameter aliases and overlapping wildcards. Different methods can share one template, and `finish()` returns the `Router` directly. This check covers declarations collected by the builder; later merges with native Axum routers retain Axum's own behavior. `rest_controller` also supports distinct Controller types with the same terminal type name in one module.
 
 ### Share SSE and WebSocket policies through application state
 
@@ -208,7 +208,7 @@ For WebSockets, `WsUpgradePolicy::idle_timeout` also limits the time without pro
 | SSE closes at the ordinary request deadline | Remove `RequestLimitLayer` from that streaming branch and use `SseConnectionPolicy` limits. |
 | `active_sessions()` stays at zero for a WS | Call `WsUpgradePolicy::on_upgrade` with the server's `ServerContext`; native Axum upgrades are outside managed-session reporting. |
 | A WebSocket closes with code `1013` under inbound load | The application may not be calling `WsSession::recv()` fast enough. The inbound channel holds 64 messages; if it remains full and delivery makes no progress for `idle_timeout`, the session closes. Read messages continuously or move processing to application-managed work after receiving them; choose an `idle_timeout` that allows the expected processing gaps. |
-| Configuration is rejected | Inspect `ConfigOptionsError::field()`; check address, positive timeout/limit values, and integer types. Error text intentionally does not include rejected values. |
+| Configuration is rejected | Inspect `ConfigOptionsError::field()`; check address, positive timeout/limit values, concurrency capacities within `1..=tokio::sync::Semaphore::MAX_PERMITS`, and integer types. The capacity errors identify `http.max_concurrent_requests` or `transport.max_connections`; error text intentionally does not include rejected values. |
 | HTTPS or WSS cannot connect | Check certificate chain/key pairing and client trust. A TLS failure occurs before HTTP routing. |
 | Shutdown exceeds expectations | Check the configured shutdown timeout and whether application handlers or stream producers respond to cancellation. |
 

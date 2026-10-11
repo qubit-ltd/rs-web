@@ -6,7 +6,7 @@
 
 `WebServer` 持有已绑定的 TCP listener、每个服务实例的传输策略和共享的 `ServerContext`。它接收并限制传输连接，可选执行 TLS 握手，再将连接适配为支持 upgrade 的 Hyper 连接。Hyper 将请求交给应用的 Axum `Router<()>`。
 
-应用可以直接构造 router，也可以使用 `ControllerRoutes` 和 controller 宏。`ControllerRoutes::add` 会在注册前检查完整路由模板，并对重复 method/path、无效路径和匹配模板冲突返回 `ControllerRouteError`；`finish()` 直接返回 Axum `Router`。之后与原生 Axum Router 合并仍遵循 Axum 自身的冲突行为。短请求预算由应用安装在选定的 controller 路由或 router 分支上；除非应用明确安装到相应位置，否则不会全局生效。诊断中间件记录允许列表中的请求元数据：method、匹配的路由模板、响应状态码、耗时、连接 ID，以及可选的声明请求体长度。
+应用可以直接构造 router，也可以使用 `ControllerRoutes` 和 controller 宏。末段名称相同但实际类型不同的 Controller，也可以在同一模块分别使用 `rest_controller` 并装配到一起。`ControllerRoutes::add` 会在注册前检查完整路由模板，并对重复 method/path、无效路径和匹配模板冲突返回 `ControllerRouteError`；`finish()` 直接返回 Axum `Router`。之后与原生 Axum Router 合并仍遵循 Axum 自身的冲突行为。短请求预算由应用安装在选定的 controller 路由或 router 分支上；除非应用明确安装到相应位置，否则不会全局生效。诊断中间件记录允许列表中的请求元数据：method、匹配的路由模板、响应状态码、耗时、连接 ID，以及可选的声明请求体长度。
 
 主要模块职责如下：
 
@@ -28,8 +28,8 @@
 
 | 容量域 | 默认值 | 范围与超限行为 |
 | --- | --- | --- |
-| 已接收的传输连接 | 每个 `WebServer` 1,024 个 | 包含 TLS 握手和 HTTP connection future。达到上限时 accept 循环暂停接收；客户端可能等待操作系统 backlog，也可能连接失败；不会生成 HTTP 503。 |
-| Controller 短请求 | 每个 `ControllerRoutes` builder 同时 256 个 | `ControllerRoutes::new()` 默认采用 `HttpLimits::default()`：每个请求体 1 MiB，handler/响应体期限 30 秒。`with_http_limits` 替换这些默认值，应在添加 Controller 前调用。每个 builder 的路由共享自己的状态。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 不安装路由限额。容量耗尽时返回容量拒绝。 |
+| 已接收的传输连接 | 每个 `WebServer` 1,024 个 | 配置值必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。包含 TLS 握手和 HTTP connection future。达到上限时 accept 循环暂停接收；客户端可能等待操作系统 backlog，也可能连接失败；不会生成 HTTP 503。 |
+| Controller 短请求 | 每个 `ControllerRoutes` builder 同时 256 个 | 配置值必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。`ControllerRoutes::new()` 默认采用 `HttpLimits::default()`：每个请求体 1 MiB，handler/响应体期限 30 秒。`with_http_limits` 替换这些默认值，应在添加 Controller 前调用。每个 builder 的路由共享自己的状态。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 不安装路由限额。容量耗尽时返回容量拒绝。 |
 | SSE 连接 | 每个 `SseConnectionPolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。容量耗尽与停服拒绝分别报告。 |
 | WebSocket 连接 | 每个 `WsUpgradePolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。接纳失败会在会话纳入管理前拒绝。 |
 | 服务受管会话 | 没有单独的数值上限 | `ServerContext` 追踪已接纳的 SSE 和 WebSocket 会话，以便停服统计。它不是全局连接上限，也不统计普通请求、原生 Axum upgrade 或应用后台任务。 |
@@ -52,7 +52,7 @@ SSE 和 WebSocket 都是长连接路由，不应套用短请求并发/期限中�
 
 停服开始时，服务停止接收 socket、关闭受管会话登记入口、通知已有会话，并使用同一个绝对期限等待 HTTP connection task 和受管 SSE/WS 会话。期限由 `ServerOptions` 设置，并由 `ServerContext` 提供给 WebSocket 会话；`WsUpgradePolicy` 不再单独设置停服期限。只有两组任务都按期结束，`ShutdownReport::graceful` 才为 `true`。报告记录未结束的受管会话，但不保证任意应用后台工作也已停止。Axum 无法提供可证明的强制关闭连接数，因此 `forced_connections` 为 `None`。
 
-`ConfiguredWeb` 解析应用显式传入的配置对象，并分别返回 `ServerOptions` 与 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；把配置值传给 `with_http_limits` 可替换该策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。启用 `config` 时，传输配置默认值为 `transport.max_connections = 1024` 和 `transport.idle_timeout_ms = 30000`；HTTP 策略键包括 `http.max_body_bytes`、`http.max_concurrent_requests` 和 `http.request_timeout_ms`。TLS 是可选项，通过独立的 `TlsConfig` 配置；PEM 加载失败会归并为 `TlsInvalid`，不会暴露密钥材料或路径。
+`ConfiguredWeb` 解析应用显式传入的配置对象，并分别返回 `ServerOptions` 与 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；把配置值传给 `with_http_limits` 可替换该策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。启用 `config` 时，传输配置默认值为 `transport.max_connections = 1024` 和 `transport.idle_timeout_ms = 30000`；HTTP 策略键包括 `http.max_body_bytes`、`http.max_concurrent_requests` 和 `http.request_timeout_ms`。两个并发配置键的有效范围都是 `1..=tokio::sync::Semaphore::MAX_PERMITS`；无效值通过 `ConfigOptionsError::field()` 指向原配置键。TLS 是可选项，通过独立的 `TlsConfig` 配置；PEM 加载失败会归并为 `TlsInvalid`，不会暴露密钥材料或路径。
 
 ## 失败阶段与应用责任
 
