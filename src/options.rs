@@ -163,7 +163,8 @@ impl ServerOptions {
     ///
     /// # Parameters
     ///
-    /// * `limit` - Positive maximum number of accepted transport connections.
+    /// * `limit` - Maximum accepted transport connections in
+    ///   `1..=tokio::sync::Semaphore::MAX_PERMITS`.
     ///
     /// # Returns
     ///
@@ -171,8 +172,12 @@ impl ServerOptions {
     ///
     /// # Errors
     ///
-    /// Returns [`WebServerError::InvalidConfig`] when `limit` is zero.
+    /// Returns [`WebServerError::InvalidConfig`] when `limit` is zero or
+    /// exceeds `tokio::sync::Semaphore::MAX_PERMITS`.
     pub fn with_max_transport_connections(mut self, limit: usize) -> Result<Self, WebServerError> {
+        if !(1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&limit) {
+            return Err(WebServerError::InvalidConfig);
+        }
         self.max_transport_connections = NonZeroUsize::new(limit).ok_or(WebServerError::InvalidConfig)?;
         Ok(self)
     }
@@ -185,12 +190,16 @@ impl ServerOptions {
     ///
     /// # Errors
     ///
-    /// Returns [`WebServerError::InvalidConfig`] if any timeout is zero.
+    /// Returns [`WebServerError::InvalidConfig`] if any timeout is zero or
+    /// the transport capacity exceeds `tokio::sync::Semaphore::MAX_PERMITS`.
     pub fn validate(&self) -> Result<(), WebServerError> {
         if self.shutdown_timeout.is_zero()
             || self.request_header_timeout.is_zero()
             || self.transport_idle_timeout.is_zero()
         {
+            return Err(WebServerError::InvalidConfig);
+        }
+        if self.max_transport_connections.get() > tokio::sync::Semaphore::MAX_PERMITS {
             return Err(WebServerError::InvalidConfig);
         }
         Ok(())

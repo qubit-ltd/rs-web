@@ -181,6 +181,18 @@ fn zero_byte_limit_is_rejected() {
 }
 
 #[test]
+fn rejects_concurrency_above_tokio_semaphore_maximum() {
+    let max = tokio::sync::Semaphore::MAX_PERMITS;
+    assert!(HttpLimits::default().with_max_concurrent_requests(0).is_err());
+    assert!(HttpLimits::default().with_max_concurrent_requests(1).is_ok());
+    assert!(HttpLimits::default().with_max_concurrent_requests(max).is_ok());
+    assert!(matches!(
+        HttpLimits::default().with_max_concurrent_requests(max + 1),
+        Err(qubit_web::WebServerError::InvalidConfig)
+    ));
+}
+
+#[test]
 fn infrastructure_rejections_use_stable_problem_json_codes() {
     for (rejection, status, code) in [
         (

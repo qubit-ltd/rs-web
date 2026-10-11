@@ -105,7 +105,8 @@ impl HttpLimits {
     ///
     /// # Parameters
     ///
-    /// - `requests`: positive count of in-flight requests.
+    /// - `requests`: in-flight request capacity in
+    ///   `1..=tokio::sync::Semaphore::MAX_PERMITS`.
     ///
     /// # Returns
     ///
@@ -113,8 +114,12 @@ impl HttpLimits {
     ///
     /// # Errors
     ///
-    /// Returns `InvalidConfig` when the capacity is zero.
+    /// Returns `InvalidConfig` when the capacity is zero or exceeds
+    /// `tokio::sync::Semaphore::MAX_PERMITS`.
     pub fn with_max_concurrent_requests(mut self, requests: usize) -> Result<Self, crate::WebServerError> {
+        if !(1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&requests) {
+            return Err(crate::WebServerError::InvalidConfig);
+        }
         self.max_concurrent_requests = NonZeroUsize::new(requests).ok_or(crate::WebServerError::InvalidConfig)?;
         Ok(self)
     }

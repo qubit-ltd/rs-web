@@ -228,3 +228,18 @@ fn rejects_zero_or_malformed_transport_idle_timeout_by_field() {
         assert!(!error.to_string().contains("private-sentinel"));
     }
 }
+
+#[test]
+fn rejects_configured_semaphore_capacity_above_maximum() {
+    let invalid = u64::try_from(tokio::sync::Semaphore::MAX_PERMITS).expect("Tokio semaphore maximum fits u64") + 1;
+    for field in ["http.max_concurrent_requests", "transport.max_connections"] {
+        let mut config = config_with("127.0.0.1:0", 2500);
+        config.set(field, invalid).unwrap();
+        let error = match ConfiguredWeb::from_config(&config) {
+            Ok(_) => panic!("{field} must reject an oversized capacity"),
+            Err(error) => error,
+        };
+        assert_eq!(error.field(), field);
+        assert!(!error.to_string().contains(&invalid.to_string()));
+    }
+}

@@ -83,6 +83,22 @@ async fn test_binds_ephemeral_http_and_serves_router_with_native_404() {
     assert!(TcpStream::connect(addr).await.is_err());
 }
 
+#[test]
+fn rejects_transport_capacity_above_tokio_semaphore_maximum() {
+    let max = tokio::sync::Semaphore::MAX_PERMITS;
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap());
+    assert!(matches!(
+        options.clone().with_max_transport_connections(0),
+        Err(WebServerError::InvalidConfig)
+    ));
+    assert!(options.clone().with_max_transport_connections(1).is_ok());
+    assert!(options.clone().with_max_transport_connections(max).is_ok());
+    assert!(matches!(
+        options.with_max_transport_connections(max + 1),
+        Err(WebServerError::InvalidConfig)
+    ));
+}
+
 #[tokio_test]
 async fn test_rejects_invalid_options_and_reports_socket_conflicts() {
     let invalid = ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::ZERO);
