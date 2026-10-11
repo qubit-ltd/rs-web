@@ -201,32 +201,34 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
     Ok(quote! {
         #item_impl
 
-        #[doc(hidden)]
-        struct #instance_name<__Controller>(::std::sync::Arc<__Controller>);
-        impl<__Controller> ::std::clone::Clone for #instance_name<__Controller> {
-            fn clone(&self) -> Self { Self(self.0.clone()) }
-        }
-
-        #(#declarations)*
-
-        impl #impl_generics ::qubit_web::mvc::ControllerDefinition<#state_type> for #self_ty
-        where
-            #state_type: Clone + Send + Sync + 'static,
-        {
-            fn route_metadata() -> &'static [::qubit_web::mvc::RouteMetadata] {
-                static __QUBIT_ROUTES: [::qubit_web::mvc::RouteMetadata; #route_count] = [#(#metadata),*];
-                &__QUBIT_ROUTES
+        const _: () = {
+            #[doc(hidden)]
+            struct #instance_name<__Controller>(::std::sync::Arc<__Controller>);
+            impl<__Controller> ::std::clone::Clone for #instance_name<__Controller> {
+                fn clone(&self) -> Self { Self(self.0.clone()) }
             }
 
-            fn register(
-                self: ::std::sync::Arc<Self>,
-                mut router: ::axum::Router<#state_type>,
-                limit_state: ::qubit_web::limit::LimitState,
-            ) -> ::axum::Router<#state_type> {
-                #(#registrations)*
-                router
+            #(#declarations)*
+
+            impl #impl_generics ::qubit_web::mvc::ControllerDefinition<#state_type> for #self_ty
+            where
+                #state_type: Clone + Send + Sync + 'static,
+            {
+                fn route_metadata() -> &'static [::qubit_web::mvc::RouteMetadata] {
+                    static __QUBIT_ROUTES: [::qubit_web::mvc::RouteMetadata; #route_count] = [#(#metadata),*];
+                    &__QUBIT_ROUTES
+                }
+
+                fn register(
+                    self: ::std::sync::Arc<Self>,
+                    mut router: ::axum::Router<#state_type>,
+                    limit_state: ::qubit_web::limit::LimitState,
+                ) -> ::axum::Router<#state_type> {
+                    #(#registrations)*
+                    router
+                }
             }
-        }
+        };
     })
 }
 
