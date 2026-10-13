@@ -6,7 +6,7 @@
 
 `WebServer` 持有已绑定的 TCP listener、每个服务实例的传输策略和共享的 `ServerContext`。它接收并限制传输连接，可选执行 TLS 握手，再将连接适配为支持 upgrade 的 Hyper 连接。Hyper 将请求交给应用的 Axum `Router<()>`。
 
-应用可以直接构造 router，也可以使用 `ControllerRoutes` 和 controller 宏。末段名称相同但实际类型不同的 Controller，也可以在同一模块分别使用 `rest_controller` 并装配到一起。`ControllerRoutes::add` 会在注册前检查完整路由模板，并对重复 method/path、无效路径和匹配模板冲突返回 `ControllerRouteError`；`finish()` 直接返回 Axum `Router`。之后与原生 Axum Router 合并仍遵循 Axum 自身的冲突行为。短请求预算由应用安装在选定的 controller 路由或 router 分支上；除非应用明确安装到相应位置，否则不会全局生效。诊断中间件记录允许列表中的请求元数据：method、匹配的路由模板、响应状态码、耗时、连接 ID，以及可选的声明请求体长度。
+应用可以直接构造 router，也可以使用 `ControllerRoutes` 和 controller 宏。末段名称相同但实际类型不同的 Controller，也可以在同一模块分别使用 `rest_controller` 并装配到一起。`ControllerRoutes::add` 会增量复用路由 matcher 来检查完整路由模板，并在注册前对重复 method/path、无效路径和匹配模板冲突返回 `ControllerRouteError`。这只改变装配成本；错误分类、注册前完整预检和路由行为保持不变。`finish()` 直接返回 Axum `Router`。之后与原生 Axum Router 合并仍遵循 Axum 自身的冲突行为。短请求预算由应用安装在选定的 controller 路由或 router 分支上；除非应用明确安装到相应位置，否则不会全局生效。诊断中间件记录允许列表中的请求元数据：method、匹配的路由模板、响应状态码、耗时、连接 ID，以及可选的声明请求体长度。
 
 主要模块职责如下：
 
@@ -31,7 +31,7 @@
 | 已接收的传输连接 | 每个 `WebServer` 1,024 个 | 配置值必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。包含 TLS 握手和 HTTP connection future。达到上限时 accept 循环暂停接收；客户端可能等待操作系统 backlog，也可能连接失败；不会生成 HTTP 503。 |
 | Controller 短请求 | 每个 `ControllerRoutes` builder 同时 256 个 | 配置值必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。`ControllerRoutes::new()` 默认采用 `HttpLimits::default()`：每个请求体 1 MiB，handler/响应体期限 30 秒。`with_http_limits` 替换这些默认值，应在添加 Controller 前调用。每个 builder 的路由共享自己的状态。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 不安装路由限额。容量耗尽时返回容量拒绝。 |
 | SSE 连接 | 每个 `SseConnectionPolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。容量耗尽与停服拒绝分别报告。 |
-| WebSocket 连接 | 每个 `WsUpgradePolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。接纳失败会在会话纳入管理前拒绝。 |
+| WebSocket 连接 | 每个 `WsUpgradePolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。策略按最终字段值校验；`max_connections` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`，零值对应 `WsPolicyError::ZeroLimit`，超上限对应 `WsPolicyError::ConnectionLimitTooLarge`。接纳失败会在会话纳入管理前拒绝。 |
 | 服务受管会话 | 没有单独的数值上限 | `ServerContext` 追踪已接纳的 SSE 和 WebSocket 会话，以便停服统计。它不是全局连接上限，也不统计普通请求、原生 Axum upgrade 或应用后台任务。 |
 
 若要让多条路由共用 SSE 或 WebSocket 容量，应在应用启动时创建一个策略并放入应用状态，再向 handler 传递该策略的克隆。分别创建多个策略会叠加总体可接纳容量。短请求分支也应按同样原则显式规划和共享预期的分支状态。

@@ -62,7 +62,7 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 - `ControllerRoutes::add` 会在注册前检查重复方法、无效路径和冲突的路由模板（包括参数别名及重叠通配符），并返回 `ControllerRouteError`。不同方法可以共用同一模板；`finish()` 直接返回 Axum `Router`。
 - `rest_controller` 支持在同一模块中装配末段名称相同、但实际类型不同的 Controller。
 - HTTP/1 请求头默认最多等待 10 秒；WebSocket 的 HTTP/1 upgrade 也必须在此期限内发送完请求头。传输空闲期限默认 30 秒，可通过 `ServerOptions::with_transport_idle_timeout` 或配置键 `transport.idle_timeout_ms` 设置。连接在没有正在处理的请求或响应体时会被回收，包括空闲 HTTP/2 连接；活跃请求和 SSE 响应体会暂停空闲计时。
-- 使用 `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)`，可在返回升级响应前预留受管会话。Origin 默认可选：未携带 Origin 的请求会继续进入应用认证；携带 Origin 时，必须与 `allowed_origins` 中的值完全匹配，否则拒绝。没有 Origin 不代表已通过认证。对端或会话关闭后，`try_send` 会返回 `Closed`；成功入队本身不保证消息已通过网络送达。若应用不读取入站消息，且交付在 `idle_timeout` 内没有进展，会话会以 WebSocket 关闭码 `1013`（暂时无法处理）关闭。
+- 使用 `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)`，可在返回升级响应前预留受管会话。策略按最终配置字段值校验：`max_connections` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`；零值返回 `WsPolicyError::ZeroLimit`，超过上限返回 `WsPolicyError::ConnectionLimitTooLarge`。Origin 默认可选：未携带 Origin 的请求会继续进入应用认证；携带 Origin 时，必须与 `allowed_origins` 中的值完全匹配，否则拒绝。没有 Origin 不代表已通过认证。对端或会话关闭后，`try_send` 会返回 `Closed`；成功入队本身不保证消息已通过网络送达。若应用不读取入站消息，且交付在 `idle_timeout` 内没有进展，会话会以 WebSocket 关闭码 `1013`（暂时无法处理）关闭。
 - `ServerContext::active_sessions()` 统计受管 SSE 和通过 `on_upgrade` 接纳的 WebSocket，包括握手尚未完成的升级。停服会使用由 `ServerOptions` 设置、经 `ServerContext` 提供的同一个截止时间等待 HTTP 连接和这些会话；WebSocket policy 不再单独设置停服期限。`ShutdownReport::unfinished_managed_sessions` 记录截止时仍未结束的受管会话。原生 Axum 升级和应用后台任务不在统计范围内。
 - `WebServerError` 通过 `std::error::Error::source()` 保留 socket I/O 错误供调用方诊断；默认 `Display` 和 `Debug` 不输出底层操作系统错误文本。
 - 对公网提供服务必须配置可信 TLS。`tls-rustls` 支持 HTTPS 绑定，需提供有效证书和私钥；也可以显式配置可信反向代理。默认不信任转发头。

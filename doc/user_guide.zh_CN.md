@@ -200,12 +200,23 @@ transport 许可用满后，accept loop 会在 accept 新 socket 前等待。客
 
 对 WebSocket，`WsUpgradePolicy::idle_timeout` 也限制入站消息交付给应用时无进展的最长时间。若应用没有调用 `WsSession::recv()`，导致容量为 64 条消息的入站通道满载，期限到达后会话会以关闭码 `1013`（原因 `inbound backpressure`）关闭。应定期排空消息，并在接收后再转交较长的业务处理。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达；对端或会话关闭后，它会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。
 
+`WsUpgradePolicy::validate()` 按最终配置字段值校验；同一 setter 后续设置的值会覆盖此前的值。`max_connections` 的合法范围是 `1..=tokio::sync::Semaphore::MAX_PERMITS`：零值返回 `WsPolicyError::ZeroLimit`，超过上限返回 `WsPolicyError::ConnectionLimitTooLarge`。无效策略会使 `on_upgrade` 返回 HTTP 500，不能完成升级。例如，先设为零、再修正为 1 后，校验通过：
+
+```rust,ignore
+assert!(WsUpgradePolicy::new()
+    .max_connections(0)
+    .max_connections(1)
+    .validate()
+    .is_ok());
+```
+
 | 现象 | 检查方式 |
 | --- | --- |
 | 过载时客户端等待或连接失败 | 检查该实例的 transport 额度和系统 backlog。accept 之前不会有保证的 503。 |
 | 请求体超过上限但仍成功 | 对 Controller `short` 路由，确认 handler/extractor 实际读取请求体，并检查是否用 `with_http_limits` 替换成了更大的预算。对原生 Axum 路由，在该分支安装 `RequestLimitLayer`，并确认请求体被读取。 |
 | SSE 在普通请求期限到达时关闭 | 从该流式分支移除 `RequestLimitLayer`，改用 `SseConnectionPolicy` 的连接策略。 |
 | WS 建立后 `active_sessions()` 仍为 0 | 调用 `WsUpgradePolicy::on_upgrade` 并传入服务的 `ServerContext`；原生 Axum upgrade 不属于受管会话统计。 |
+| `WsUpgradePolicy::validate()` 报告连接上限无效 | 检查最终的 `max_connections`：零值对应 `WsPolicyError::ZeroLimit`；超过 `tokio::sync::Semaphore::MAX_PERMITS` 对应 `WsPolicyError::ConnectionLimitTooLarge`。修正设置后重新校验；无效策略不能升级。 |
 | 入站负载下 WebSocket 以 `1013` 关闭 | 应用可能没有及时调用 `WsSession::recv()`。入站通道容量为 64 条消息；若通道持续满载且 `idle_timeout` 内交付没有进展，会话就会关闭。应持续读取消息，或先接收再交给应用管理的任务处理；根据预期处理间隔设置合适的 `idle_timeout`。 |
 | 配置解析失败 | 查看 `ConfigOptionsError::field()`，检查地址、正数限额/期限、处于 `1..=tokio::sync::Semaphore::MAX_PERMITS` 的并发容量和整数类型。容量错误会指向 `http.max_concurrent_requests` 或 `transport.max_connections`，错误文本不会包含配置值。 |
 | HTTPS/WSS 无法连接 | 检查证书链、私钥匹配和客户端信任；TLS 阶段失败时请求还没进入 HTTP 路由。 |

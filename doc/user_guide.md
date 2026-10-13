@@ -201,12 +201,23 @@ When all transport permits are occupied, the accept loop waits before accepting 
 
 For WebSockets, `WsUpgradePolicy::idle_timeout` also limits the time without progress while delivering an inbound message to the application. If the 64-message inbound channel is full because the application is not calling `WsSession::recv()`, expiry closes the session with code `1013` (`inbound backpressure`). Drain messages regularly and hand off longer processing after receiving each message. `WsSession::try_send` returning success means only that the message entered the outbound queue; it does not guarantee network delivery. After the peer or session closes, it returns `WsSendError::Closed` (or `Closed` when matching the variant).
 
+`WsUpgradePolicy::validate()` checks the final configured field values, so a later setter value replaces an earlier invalid value for validation. The valid `max_connections` range is `1..=tokio::sync::Semaphore::MAX_PERMITS`; zero returns `WsPolicyError::ZeroLimit`, and a larger value returns `WsPolicyError::ConnectionLimitTooLarge`. An invalid policy is rejected by `on_upgrade` with HTTP 500 and cannot upgrade. For example, correcting a zero value before validation succeeds:
+
+```rust,ignore
+assert!(WsUpgradePolicy::new()
+    .max_connections(0)
+    .max_connections(1)
+    .validate()
+    .is_ok());
+```
+
 | Symptom | Check |
 | --- | --- |
 | Client waits or connection fails during overload | Check per-instance transport capacity and OS backlog. Do not expect a 503 before accept. |
 | A request exceeds the body cap but succeeds | For a Controller `short` route, confirm its handler/extractor consumes the body and check whether `with_http_limits` replaced the default with a larger budget. For a native Axum route, install `RequestLimitLayer` on that branch and confirm the body is consumed. |
 | SSE closes at the ordinary request deadline | Remove `RequestLimitLayer` from that streaming branch and use `SseConnectionPolicy` limits. |
 | `active_sessions()` stays at zero for a WS | Call `WsUpgradePolicy::on_upgrade` with the server's `ServerContext`; native Axum upgrades are outside managed-session reporting. |
+| `WsUpgradePolicy::validate()` reports an invalid connection limit | Check the final `max_connections` value: zero is `WsPolicyError::ZeroLimit`; values above `tokio::sync::Semaphore::MAX_PERMITS` are `WsPolicyError::ConnectionLimitTooLarge`. Correct the setting and validate again; an invalid policy cannot upgrade. |
 | A WebSocket closes with code `1013` under inbound load | The application may not be calling `WsSession::recv()` fast enough. The inbound channel holds 64 messages; if it remains full and delivery makes no progress for `idle_timeout`, the session closes. Read messages continuously or move processing to application-managed work after receiving them; choose an `idle_timeout` that allows the expected processing gaps. |
 | Configuration is rejected | Inspect `ConfigOptionsError::field()`; check address, positive timeout/limit values, concurrency capacities within `1..=tokio::sync::Semaphore::MAX_PERMITS`, and integer types. The capacity errors identify `http.max_concurrent_requests` or `transport.max_connections`; error text intentionally does not include rejected values. |
 | HTTPS or WSS cannot connect | Check certificate chain/key pairing and client trust. A TLS failure occurs before HTTP routing. |
