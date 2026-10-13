@@ -1,0 +1,69 @@
+name: Downstream WebSocket Interop
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  web-interop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out rs-web
+        uses: actions/checkout@v4
+        with:
+          path: rs-web
+
+      - name: Check out rs-websocket
+        uses: actions/checkout@v4
+        with:
+          repository: qubit-ltd/rs-websocket
+          path: rs-websocket
+
+      - name: Record source revisions
+        run: |
+          echo "rs-web SHA: $(git -C rs-web rev-parse HEAD)"
+          echo "rs-websocket SHA: $(git -C rs-websocket rev-parse HEAD)"
+
+      - name: Install Rust 1.94.0
+        uses: dtolnay/rust-toolchain@1.94.0
+
+      - name: Verify and test current rs-web source
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATCH_CONFIG="patch.\"https://github.com/qubit-ltd/rs-web\".qubit-web.path=\"${GITHUB_WORKSPACE}/rs-web\""
+          cargo +1.94.0 --config "$PATCH_CONFIG" metadata \
+            --manifest-path "${GITHUB_WORKSPACE}/rs-websocket/Cargo.toml" \
+            --format-version 1 \
+            > "${RUNNER_TEMP}/rs-websocket-metadata.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          metadata_path = Path(os.environ["RUNNER_TEMP"]) / "rs-websocket-metadata.json"
+          expected_manifest = (Path(os.environ["GITHUB_WORKSPACE"]) / "rs-web" / "Cargo.toml").resolve()
+          metadata = json.loads(metadata_path.read_text())
+          packages = {package["id"]: package for package in metadata["packages"]}
+          resolved_ids = {
+              dependency["pkg"]
+              for node in metadata["resolve"]["nodes"]
+              for dependency in node["deps"]
+              if packages[dependency["pkg"]]["name"] == "qubit-web"
+          }
+          matches = [packages[package_id] for package_id in resolved_ids]
+          assert len(matches) == 1, f"expected one resolved qubit-web package, found {len(matches)}"
+          actual_manifest = Path(matches[0]["manifest_path"]).resolve()
+          assert actual_manifest == expected_manifest, (
+              f"Cargo resolved qubit-web from {actual_manifest}, expected {expected_manifest}"
+          )
+          print(f"Cargo resolved qubit-web from current checkout: {actual_manifest}")
+          PY
+          cargo +1.94.0 --config "$PATCH_CONFIG" test \
+            --manifest-path "${GITHUB_WORKSPACE}/rs-websocket/Cargo.toml" \
+            --test web_interop_tests
