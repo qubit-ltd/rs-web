@@ -31,6 +31,4 @@ pub(in crate::ws) struct PolicyInner {
     /// Exact allowed Origin values; `None` rejects requests that provide
     /// Origin.
     pub(in crate::ws) allowed_origins: Option<Vec<String>>,
-    /// Whether any configured finite limit was set to an invalid value.
-    pub(in crate::ws) invalid_limits: bool,
 }

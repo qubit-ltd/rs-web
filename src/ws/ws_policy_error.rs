@@ -22,4 +22,6 @@ pub enum WsPolicyError {
     /// A configured connection, frame, message, queue, or timeout limit was
     /// zero.
     ZeroLimit,
+    /// The configured connection limit exceeds Tokio Semaphore's maximum.
+    ConnectionLimitTooLarge,
 }

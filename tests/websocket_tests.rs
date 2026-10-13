@@ -38,6 +38,7 @@ type PeerCloseTestState = (
     Arc<Mutex<Option<oneshot::Sender<WsSendError>>>>,
 );
 use qubit_web::diagnostic::DiagnosticLayer;
+use qubit_web::ws::WsPolicyError;
 use qubit_web::ws::WsSendError;
 use qubit_web::ws::WsUpgradePolicy;
 use tokio::io::AsyncReadExt;
@@ -338,6 +339,54 @@ fn test_zero_policy_limits_are_invalid() {
     assert!(WsUpgradePolicy::new().queue_limits(0, 1).validate().is_err());
     assert!(WsUpgradePolicy::new().queue_limits(1, 0).validate().is_err());
     assert!(WsUpgradePolicy::new().idle_timeout(Duration::ZERO).validate().is_err());
+}
+
+#[test]
+fn test_corrected_policy_limits_are_valid() {
+    assert_eq!(
+        WsUpgradePolicy::new().max_connections(0).max_connections(1).validate(),
+        Ok(())
+    );
+    assert_eq!(
+        WsUpgradePolicy::new().max_frame_bytes(0).max_frame_bytes(1).validate(),
+        Ok(())
+    );
+    assert_eq!(
+        WsUpgradePolicy::new()
+            .max_message_bytes(0)
+            .max_message_bytes(1)
+            .validate(),
+        Ok(())
+    );
+    assert_eq!(
+        WsUpgradePolicy::new().queue_limits(0, 1).queue_limits(1, 1).validate(),
+        Ok(())
+    );
+    assert_eq!(
+        WsUpgradePolicy::new().queue_limits(1, 0).queue_limits(1, 1).validate(),
+        Ok(())
+    );
+    assert_eq!(
+        WsUpgradePolicy::new()
+            .idle_timeout(Duration::ZERO)
+            .idle_timeout(Duration::from_secs(1))
+            .validate(),
+        Ok(())
+    );
+
+    assert_eq!(
+        WsUpgradePolicy::new()
+            .max_message_bytes(0)
+            .queue_limits(0, 1)
+            .max_message_bytes(1)
+            .validate(),
+        Err(WsPolicyError::ZeroLimit)
+    );
+
+    let too_many = tokio::sync::Semaphore::MAX_PERMITS + 1;
+    let policy = WsUpgradePolicy::new().max_connections(too_many);
+    assert_eq!(policy.validate(), Err(WsPolicyError::ConnectionLimitTooLarge));
+    assert_eq!(policy.active_connections(), 0);
 }
 
 #[tokio_test]

@@ -104,7 +104,6 @@ impl WsUpgradePolicy {
                 queue_bytes: DEFAULT_QUEUE_BYTES,
                 idle_timeout: DEFAULT_IDLE_TIMEOUT,
                 allowed_origins: None,
-                invalid_limits: false,
             }),
         }
     }
@@ -126,11 +125,16 @@ impl WsUpgradePolicy {
     ///
     /// # Returns
     ///
-    /// The configured capacity minus permits currently available for upgrades.
+    /// The configured capacity minus permits currently available for upgrades,
+    /// or zero when the configured connection limit is invalid.
     #[must_use]
     #[inline]
     pub fn active_connections(&self) -> usize {
-        self.inner.max_connections - self.inner.connections.available_permits()
+        if self.inner.max_connections == 0 || self.inner.max_connections > Semaphore::MAX_PERMITS {
+            0
+        } else {
+            self.inner.max_connections - self.inner.connections.available_permits()
+        }
     }
 
     /// Sets the maximum number of simultaneous upgraded connections.
@@ -144,7 +148,9 @@ impl WsUpgradePolicy {
     ///
     /// # Parameters
     ///
-    /// * `limit` - Positive connection capacity within Semaphore's maximum.
+    /// * `limit` - Requested connection capacity. Valid values are positive and
+    ///   no greater than Semaphore's maximum; a later call replaces this value,
+    ///   including an invalid one.
     ///
     /// # Returns
     ///
@@ -153,9 +159,8 @@ impl WsUpgradePolicy {
         self.map_inner(|inner| {
             let valid = (1..=Semaphore::MAX_PERMITS).contains(&limit);
             let capacity = if valid { limit } else { 0 };
-            inner.invalid_limits |= !valid;
             inner.connections = Arc::new(Semaphore::new(capacity));
-            inner.max_connections = capacity;
+            inner.max_connections = limit;
         })
     }
 
@@ -192,10 +197,10 @@ impl WsUpgradePolicy {
     ///
     /// # Returns
     ///
-    /// The updated policy; zero is reported by `validate`.
+    /// The updated policy; zero is reported by `validate`. A later call
+    /// replaces this value, including an invalid one.
     pub fn max_frame_bytes(self, limit: usize) -> Self {
         self.map_inner(|inner| {
-            inner.invalid_limits |= limit == 0;
             inner.max_frame_bytes = limit;
         })
     }
@@ -208,10 +213,10 @@ impl WsUpgradePolicy {
     ///
     /// # Returns
     ///
-    /// The updated policy; zero is reported by `validate`.
+    /// The updated policy; zero is reported by `validate`. A later call
+    /// replaces this value, including an invalid one.
     pub fn max_message_bytes(self, limit: usize) -> Self {
         self.map_inner(|inner| {
-            inner.invalid_limits |= limit == 0;
             inner.max_message_bytes = limit;
         })
     }
@@ -226,10 +231,10 @@ impl WsUpgradePolicy {
     ///
     /// # Returns
     ///
-    /// The updated policy; a zero value is reported by `validate`.
+    /// The updated policy; zero values are reported by `validate`. A later
+    /// call replaces both values, including invalid ones.
     pub fn queue_limits(self, messages: usize, bytes: usize) -> Self {
         self.map_inner(|inner| {
-            inner.invalid_limits |= messages == 0 || bytes == 0;
             inner.queue_messages = messages;
             inner.queue_bytes = bytes;
         })
@@ -244,31 +249,47 @@ impl WsUpgradePolicy {
     ///
     /// # Returns
     ///
-    /// The updated policy; zero is reported by `validate`.
+    /// The updated policy; zero is reported by `validate`. A later call
+    /// replaces this value, including an invalid one.
     pub fn idle_timeout(self, timeout: Duration) -> Self {
         self.map_inner(|inner| {
-            inner.invalid_limits |= timeout.is_zero();
             inner.idle_timeout = timeout;
         })
     }
 
-    /// Checks that all configured bounds are positive.
+    /// Checks the final configured bounds.
+    ///
+    /// Each setter replaces the previous value for its field, so a later
+    /// valid setting corrects an earlier invalid one. A connection limit above
+    /// Semaphore's maximum is reported separately from zero limits.
     ///
     /// # Returns
     ///
-    /// `Ok(())` for a valid policy or [`WsPolicyError::ZeroLimit`] if a limit
-    /// is zero.
+    /// `Ok(())` for a valid policy, or the first configuration error in this
+    /// order: zero connection limit, oversized connection limit, then any
+    /// other zero limit.
     ///
     /// # Errors
     ///
-    /// Returns [`WsPolicyError::ZeroLimit`] for zero or otherwise invalid
-    /// bounds.
+    /// Returns [`WsPolicyError::ZeroLimit`] for a zero bound, or
+    /// [`WsPolicyError::ConnectionLimitTooLarge`] when the connection limit
+    /// exceeds Semaphore's maximum.
     pub fn validate(&self) -> Result<(), WsPolicyError> {
-        if self.inner.invalid_limits {
-            Err(WsPolicyError::ZeroLimit)
-        } else {
-            Ok(())
+        if self.inner.max_connections == 0 {
+            return Err(WsPolicyError::ZeroLimit);
         }
+        if self.inner.max_connections > Semaphore::MAX_PERMITS {
+            return Err(WsPolicyError::ConnectionLimitTooLarge);
+        }
+        if self.inner.max_frame_bytes == 0
+            || self.inner.max_message_bytes == 0
+            || self.inner.queue_messages == 0
+            || self.inner.queue_bytes == 0
+            || self.inner.idle_timeout.is_zero()
+        {
+            return Err(WsPolicyError::ZeroLimit);
+        }
+        Ok(())
     }
 
     /// Validates Origin and reserves policy and server-session capacity before
