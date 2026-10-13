@@ -10,7 +10,6 @@
 use std::io;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::task::Waker;
 
 use axum::body::Body;
 use axum::body::Bytes;
@@ -18,27 +17,8 @@ use hyper::body::Body as HttpBody;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 
-/// Lifecycle of a response body guarded by its request deadline.
-enum Phase {
-    /// The application body may still produce frames.
-    Active,
-    /// The deadline elapsed and the timeout error has not yet been emitted.
-    TimedOut,
-    /// The body completed, failed, or was dropped.
-    Finished,
-}
-
-/// State shared by the response wrapper and its deadline task.
-struct BodyState {
-    /// Current response body lifecycle phase.
-    phase: Phase,
-    /// Application response body, removed as soon as it must stop producing.
-    inner: Option<Body>,
-    /// Short-request capacity lease, released with the application body.
-    permit: Option<OwnedSemaphorePermit>,
-    /// Most recent task waiting for another body frame.
-    waker: Option<Waker>,
-}
+use super::body_state::BodyState;
+use super::phase::Phase;
 
 /// Response body wrapper that holds capacity until streaming finishes or times
 /// out.
