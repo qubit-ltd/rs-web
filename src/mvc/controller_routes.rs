@@ -36,6 +36,8 @@ use crate::limit::LimitState;
 pub struct ControllerRoutes<S = ()> {
     /// Axum router accumulated during assembly.
     router: Router<S>,
+    /// Matcher containing every route template already checked by preflight.
+    matcher: matchit::Router<()>,
     /// Methods already declared for each complete route template.
     declared: HashMap<&'static str, HashSet<&'static str>>,
     /// Shared limits passed to each registered controller.
@@ -71,6 +73,7 @@ where
     pub fn new() -> Self {
         Self {
             router: Router::new(),
+            matcher: matchit::Router::new(),
             declared: HashMap::new(),
             limit_state: LimitState::new(HttpLimits::default()),
         }
@@ -110,6 +113,10 @@ where
     ///
     /// The updated builder after every route declaration passes preflight.
     ///
+    /// This method consumes the builder, including when preflight returns an
+    /// error. Controller routes are registered only after all of that
+    /// controller's metadata has passed preflight.
+    ///
     /// # Errors
     ///
     /// Returns [`ControllerRouteError::DuplicateMethod`] for an exact duplicate
@@ -122,18 +129,9 @@ where
     where
         C: ControllerDefinition<S>,
     {
-        let mut declared = self.declared.clone();
-        let mut matcher = matchit::Router::<()>::new();
-        for path in self.declared.keys() {
-            matcher
-                .insert(*path, ())
-                .map_err(|error| ControllerRouteError::InvalidPath {
-                    path,
-                    reason: error.to_string(),
-                })?;
-        }
         for route in C::route_metadata() {
-            if declared
+            if self
+                .declared
                 .get(route.path())
                 .is_some_and(|methods| methods.contains(route.method()))
             {
@@ -142,24 +140,21 @@ where
                     path: route.path(),
                 });
             }
-            if !declared.contains_key(route.path())
-                && let Err(error) = matcher.insert(route.path(), ())
-            {
-                return match error {
-                    matchit::InsertError::Conflict { with } => Err(ControllerRouteError::PatternConflict {
+            if !self.declared.contains_key(route.path()) {
+                self.matcher.insert(route.path(), ()).map_err(|error| match error {
+                    matchit::InsertError::Conflict { with } => ControllerRouteError::PatternConflict {
                         path: route.path(),
                         existing_path: with,
-                    }),
-                    error => Err(ControllerRouteError::InvalidPath {
+                    },
+                    error => ControllerRouteError::InvalidPath {
                         path: route.path(),
                         reason: error.to_string(),
-                    }),
-                };
+                    },
+                })?;
             }
-            declared.entry(route.path()).or_default().insert(route.method());
+            self.declared.entry(route.path()).or_default().insert(route.method());
         }
         self.router = C::register(controller, self.router, self.limit_state.clone());
-        self.declared = declared;
         Ok(self)
     }
 

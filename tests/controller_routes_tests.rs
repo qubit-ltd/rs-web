@@ -466,11 +466,10 @@ fn manually_declared_invalid_path_returns_invalid_path_error() {
 
     impl qubit_web::mvc::ControllerDefinition<()> for InvalidPath {
         fn route_metadata() -> &'static [qubit_web::mvc::RouteMetadata] {
-            static ROUTES: [qubit_web::mvc::RouteMetadata; 1] = [qubit_web::mvc::RouteMetadata::new(
-                "GET",
-                "/users/{id",
-                qubit_web::RouteKind::Short,
-            )];
+            static ROUTES: [qubit_web::mvc::RouteMetadata; 2] = [
+                qubit_web::mvc::RouteMetadata::new("GET", "/users/valid", qubit_web::RouteKind::Short),
+                qubit_web::mvc::RouteMetadata::new("GET", "/users/{id", qubit_web::RouteKind::Short),
+            ];
             &ROUTES
         }
 
@@ -488,6 +487,56 @@ fn manually_declared_invalid_path_returns_invalid_path_error() {
     assert_eq!(path, "/users/{id");
     assert!(!reason.is_empty());
     assert!(!INVALID_PATH_REGISTER_CALLED.load(Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn controller_routes_keep_first_and_last_routes_after_multiple_adds() {
+    struct Middle;
+    #[rest_controller("/middle")]
+    impl Middle {
+        #[get_mapping("")]
+        async fn show(&self) -> &'static str {
+            "middle"
+        }
+    }
+
+    struct Last;
+    #[rest_controller("/last")]
+    impl Last {
+        #[get_mapping("")]
+        async fn show(&self) -> &'static str {
+            "last"
+        }
+    }
+
+    let routes: Router<AppState> = ControllerRoutes::new()
+        .add(Arc::new(Users {
+            prefix: "first".to_owned(),
+        }))
+        .unwrap()
+        .add(Arc::new(Middle))
+        .unwrap()
+        .add(Arc::new(Last))
+        .unwrap()
+        .finish();
+    let app = Router::new()
+        .merge(routes)
+        .layer(Extension("extra"))
+        .with_state(AppState("state"));
+
+    for (path, expected_body) in [
+        ("/users/7?suffix=ok", b"first:state:7:ok:extra".as_slice()),
+        ("/last", b"last"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], expected_body, "{path}");
+    }
 }
 
 #[test]
