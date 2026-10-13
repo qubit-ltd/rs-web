@@ -36,11 +36,6 @@ use tokio::time::timeout_at;
 /// # Returns
 ///
 /// The earlier of the current and newly computed deadlines.
-///
-/// # Panics
-///
-/// Panics only if the internal deadline invariant is broken after storing a
-/// value.
 #[must_use]
 pub(in crate::ws) fn get_close_deadline(
     deadline: &Mutex<Option<Instant>>,
@@ -48,9 +43,10 @@ pub(in crate::ws) fn get_close_deadline(
     timeout: Duration,
 ) -> Instant {
     let mut deadline = deadline.lock().unwrap_or_else(PoisonError::into_inner);
+    let now = Instant::now();
     let candidate = server_deadline
         .and_then(|shared| *shared.lock().unwrap_or_else(PoisonError::into_inner))
-        .unwrap_or_else(|| Instant::now() + timeout);
+        .unwrap_or_else(|| now.checked_add(timeout).unwrap_or(now));
     let current = *deadline;
     *deadline = Some(current.map_or(candidate, |current| current.min(candidate)));
     deadline.expect("close deadline is set")
@@ -116,4 +112,35 @@ fn server_shutdown_close(code: u16) -> Message {
         }
         .into(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use tokio::time::Instant;
+
+    use super::get_close_deadline;
+
+    #[test]
+    fn fallback_overflow_returns_an_immediate_deadline() {
+        let deadline = Mutex::new(None);
+        let result = get_close_deadline(&deadline, None, Duration::MAX);
+
+        assert!(result <= Instant::now());
+    }
+
+    #[test]
+    fn shared_server_deadline_takes_precedence_over_fallback() {
+        let server_deadline = Arc::new(Mutex::new(Some(Instant::now())));
+        let expected = *server_deadline.lock().unwrap();
+        let deadline = Mutex::new(None);
+
+        assert_eq!(
+            get_close_deadline(&deadline, Some(&server_deadline), Duration::MAX),
+            expected.unwrap()
+        );
+    }
 }

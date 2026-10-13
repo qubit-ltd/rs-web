@@ -181,6 +181,14 @@ fn zero_byte_limit_is_rejected() {
 }
 
 #[test]
+fn rejects_unrepresentable_request_timeout() {
+    assert!(matches!(
+        HttpLimits::default().with_request_timeout(std::time::Duration::MAX),
+        Err(qubit_web::WebServerError::InvalidConfig)
+    ));
+}
+
+#[test]
 fn rejects_concurrency_above_tokio_semaphore_maximum() {
     let max = tokio::sync::Semaphore::MAX_PERMITS;
     assert!(HttpLimits::default().with_max_concurrent_requests(0).is_err());
@@ -216,6 +224,22 @@ fn infrastructure_rejections_use_stable_problem_json_codes() {
         assert_eq!(response.headers()["content-type"], "application/problem+json");
         assert_eq!(rejection.code(), code);
     }
+}
+
+#[tokio::test]
+async fn invalid_configuration_rejection_is_stable() {
+    let rejection = WebRejection::InvalidConfiguration;
+    assert_eq!(rejection.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(rejection.code(), "invalid_configuration");
+
+    let response = axum::response::IntoResponse::into_response(rejection);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.headers()["content-type"], "application/problem+json");
+    let payload = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+    assert_eq!(
+        std::str::from_utf8(&payload).unwrap(),
+        "{\"type\":\"about:blank\",\"title\":\"Internal Server Error\",\"status\":500,\"code\":\"invalid_configuration\"}"
+    );
 }
 
 #[derive(Clone)]

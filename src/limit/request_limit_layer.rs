@@ -61,6 +61,9 @@ impl RequestLimitLayer {
     /// capacity permit are released even when the transport stops polling;
     /// the next body poll reports one timeout error. The layer cannot change
     /// the sent status or control when the transport observes that error.
+    /// If the configured duration can no longer be represented as an absolute
+    /// deadline at request time, the layer returns HTTP 500 with code
+    /// `invalid_configuration` and releases the acquired capacity permit.
     /// Long-lived SSE and WebSocket routes must not use this layer.
     ///
     /// # Type Parameters
@@ -121,7 +124,9 @@ fn enforce_limits(State(state): State<LimitState>, request: Request<Body>, next:
         let exceeded = Arc::new(AtomicBool::new(false));
         let request = limit_request_body(request, state.max_body_bytes, exceeded.clone());
         let deadline = state.request_timeout;
-        let deadline_at = tokio::time::Instant::now() + deadline;
+        let Some(deadline_at) = tokio::time::Instant::now().checked_add(deadline) else {
+            return WebRejection::InvalidConfiguration.into_response();
+        };
         let processing = run_limited_request(next, request, permit, exceeded, deadline_at);
         match tokio::time::timeout_at(deadline_at, processing).await {
             Ok(Ok(response)) => response,

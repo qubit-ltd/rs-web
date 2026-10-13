@@ -141,9 +141,10 @@ impl HttpLimits {
     ///
     /// # Errors
     ///
-    /// Returns `InvalidConfig` for a zero duration.
+    /// Returns `InvalidConfig` for a zero duration or when the duration cannot
+    /// be represented as an absolute deadline from the current monotonic time.
     pub fn with_request_timeout(mut self, timeout: Duration) -> Result<Self, crate::WebServerError> {
-        if timeout.is_zero() {
+        if timeout.is_zero() || tokio::time::Instant::now().checked_add(timeout).is_none() {
             return Err(crate::WebServerError::InvalidConfig);
         }
         self.request_timeout = timeout;

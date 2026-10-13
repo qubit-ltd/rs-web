@@ -186,14 +186,17 @@ impl ServerOptions {
     ///
     /// # Returns
     ///
-    /// `Ok(())` when all timeouts and connection limits are positive.
+    /// `Ok(())` when all timeouts are positive, the shutdown deadline can be
+    /// represented, and connection limits are valid.
     ///
     /// # Errors
     ///
-    /// Returns [`WebServerError::InvalidConfig`] if any timeout is zero or
-    /// the transport capacity exceeds `tokio::sync::Semaphore::MAX_PERMITS`.
+    /// Returns [`WebServerError::InvalidConfig`] if a timeout is zero, the
+    /// shutdown deadline cannot be represented, or the transport capacity
+    /// exceeds `tokio::sync::Semaphore::MAX_PERMITS`.
     pub fn validate(&self) -> Result<(), WebServerError> {
         if self.shutdown_timeout.is_zero()
+            || tokio::time::Instant::now().checked_add(self.shutdown_timeout).is_none()
             || self.request_header_timeout.is_zero()
             || self.transport_idle_timeout.is_zero()
         {
@@ -258,5 +261,16 @@ mod tests {
                 .is_err()
         );
         assert!(ServerOptions::new(address).with_max_transport_connections(0).is_err());
+    }
+
+    #[test]
+    fn rejects_unrepresentable_shutdown_timeout() {
+        let address = "127.0.0.1:8080".parse().unwrap();
+        assert!(matches!(
+            ServerOptions::new(address)
+                .with_shutdown_timeout(Duration::MAX)
+                .validate(),
+            Err(crate::WebServerError::InvalidConfig)
+        ));
     }
 }

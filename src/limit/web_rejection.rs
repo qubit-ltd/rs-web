@@ -31,6 +31,8 @@ pub enum WebRejection {
     CapacityExceeded,
     /// An ordinary short request exceeded its processing deadline.
     RequestTimedOut,
+    /// The configured deadline cannot be represented at request time.
+    InvalidConfiguration,
 }
 
 impl WebRejection {
@@ -46,6 +48,7 @@ impl WebRejection {
             Self::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::CapacityExceeded => StatusCode::SERVICE_UNAVAILABLE,
             Self::RequestTimedOut => StatusCode::GATEWAY_TIMEOUT,
+            Self::InvalidConfiguration => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -61,6 +64,7 @@ impl WebRejection {
             Self::BodyTooLarge => "body_too_large",
             Self::CapacityExceeded => "capacity_exceeded",
             Self::RequestTimedOut => "request_timeout",
+            Self::InvalidConfiguration => "invalid_configuration",
         }
     }
 }
@@ -76,6 +80,7 @@ impl IntoResponse for WebRejection {
             Self::BodyTooLarge => "Payload Too Large",
             Self::CapacityExceeded => "Service Unavailable",
             Self::RequestTimedOut => "Gateway Timeout",
+            Self::InvalidConfiguration => "Internal Server Error",
         };
         let payload = format!(
             "{{\"type\":\"about:blank\",\"title\":\"{title}\",\"status\":{},\"code\":\"{}\"}}",

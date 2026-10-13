@@ -221,7 +221,10 @@ impl WebServer {
     ///
     /// Returns [`WebServerError::ServeFailed`] when accepting a connection
     /// fails. The underlying I/O error is retained as its source and is only
-    /// shown when a caller explicitly inspects that source.
+    /// shown when a caller explicitly inspects that source. Returns
+    /// [`WebServerError::InvalidConfig`] if the shutdown deadline cannot be
+    /// represented; the listener is closed and spawned connection tasks are
+    /// aborted and reaped before returning.
     pub async fn serve<F>(self, app: Router<()>, shutdown: F) -> Result<ShutdownReport, WebServerError>
     where
         F: Future<Output = ()> + Send,
@@ -304,7 +307,14 @@ impl WebServer {
 
         drop(listener);
         let started = tokio::time::Instant::now();
-        let shutdown_deadline = context.begin_shutdown();
+        let shutdown_deadline = match context.begin_shutdown() {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                connections.abort_all();
+                while connections.join_next().await.is_some() {}
+                return Err(error);
+            }
+        };
         let report = match tokio::time::timeout_at(shutdown_deadline, async {
             tokio::join!(graceful.shutdown(), context.wait_for_sessions())
         })

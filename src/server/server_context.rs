@@ -152,22 +152,69 @@ impl ServerContext {
     ///
     /// The first shutdown deadline, or the existing deadline if shutdown began
     /// earlier.
-    #[must_use]
-    pub(super) fn begin_shutdown(&self) -> tokio::time::Instant {
-        let deadline = tokio::time::Instant::now() + self.shutdown_timeout;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::WebServerError::InvalidConfig`] when the first
+    /// deadline cannot be represented. Session admission is still closed and
+    /// cancellation is still triggered in that case.
+    pub(super) fn begin_shutdown(&self) -> Result<tokio::time::Instant, crate::WebServerError> {
         let mut state = self
             .shutdown_deadline
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let deadline = *state.get_or_insert(deadline);
+        if let Some(deadline) = *state {
+            drop(state);
+            self.sessions.begin_shutdown();
+            self.cancellation.cancel();
+            return Ok(deadline);
+        }
+        let now = tokio::time::Instant::now();
+        let deadline = now.checked_add(self.shutdown_timeout);
+        *state = Some(deadline.unwrap_or(now));
         drop(state);
         self.sessions.begin_shutdown();
         self.cancellation.cancel();
-        deadline
+        deadline.ok_or(crate::WebServerError::InvalidConfig)
     }
 
     /// Waits until all currently registered managed sessions have finished.
     pub(super) async fn wait_for_sessions(&self) {
         self.sessions.wait_for_zero().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::ServerContext;
+    use crate::SessionRegistrationError;
+    use crate::WebServerError;
+
+    #[test]
+    fn begin_shutdown_overflow() {
+        let context = ServerContext::new(Duration::MAX);
+
+        assert!(matches!(context.begin_shutdown(), Err(WebServerError::InvalidConfig)));
+        assert!(context.cancellation_token().is_cancelled());
+        assert_eq!(
+            context.try_register_session().unwrap_err(),
+            SessionRegistrationError::ShuttingDown
+        );
+        let deadline = context.shutdown_deadline().expect("overflow stores immediate deadline");
+        assert!(deadline <= tokio::time::Instant::now());
+    }
+
+    #[test]
+    fn repeated_begin_shutdown_reuses_the_first_deadline() {
+        let context = ServerContext::new(Duration::from_secs(30));
+
+        let first = context.begin_shutdown().expect("first shutdown deadline");
+        let second = context
+            .begin_shutdown()
+            .expect("repeated shutdown returns stored deadline");
+
+        assert_eq!(second, first);
     }
 }
