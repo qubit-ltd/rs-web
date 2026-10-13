@@ -4,35 +4,74 @@
 
 ## 安装
 
-将 crate 加入项目，并只启用需要的能力：
+下面的原生 Axum 最小服务会直接使用这些依赖：
 
 ```toml
 [dependencies]
-qubit-web = { version = "0.2", features = ["json", "ws"] }
+axum = "0.8"
+qubit-web = "0.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 ```
 
-默认不启用任何可选 feature。`json` 提供有界 JSON 辅助能力，`ws` 提供 WebSocket 策略支持，`tls-rustls` 用于 HTTPS 绑定，`config` 提供 `qubit-config` 配置适配器。
+`qubit-web` 默认不启用可选 feature。按需启用即可：`json` 提供有界 JSON 辅助能力，`ws` 提供 WebSocket 策略支持，`tls-rustls` 用于 HTTPS 绑定，`config` 提供 `qubit-config` 配置适配器。下方已有示例会注明所需 feature。
 
 ## 快速开始
 
-可运行示例展示完整接入流程：用 `ServerOptions` 设置传输连接上限，Controller 短路由使用默认 HTTP 限额（也可用 `HttpLimits` 替换），在选定的原生 Axum 短路由上显式安装限额，绑定并运行 Router，最后通过 `/admin/shutdown` 停服。
+先用一个只监听本机的服务提供健康检查和应用自有的停服入口。将“安装”一节的依赖写入 `Cargo.toml`，再把下面代码保存为 `src/main.rs`：
 
-先在终端 A 启动示例。等它打印出监听地址后，再打开终端 B 发请求：
+```rust
+use std::error::Error;
+use std::sync::Arc;
 
-```sh
-cargo run --example controller_crud --all-features
+use axum::{http::StatusCode, routing::{get, post}, Router};
+use qubit_web::{HttpLimits, RequestLimitLayer, ServerOptions, WebServer};
+use tokio::sync::Notify;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let stop = Arc::new(Notify::new());
+    let stop_for_route = Arc::clone(&stop);
+    let app = Router::new()
+        .route(
+            "/health",
+            get(|| async { "ok" })
+                .layer(RequestLimitLayer::new(HttpLimits::default())),
+        )
+        .route(
+            "/admin/shutdown",
+            post(move || {
+                let stop = Arc::clone(&stop_for_route);
+                async move {
+                    stop.notify_one();
+                    StatusCode::ACCEPTED
+                }
+            }),
+        );
+
+    let options = ServerOptions::new("127.0.0.1:3000".parse()?)
+        .with_max_transport_connections(128)?;
+    let server = WebServer::bind_http(options).await?;
+    let _report = server.serve(app, async move { stop.notified().await }).await?;
+    Ok(())
+}
 ```
 
-终端 B 中依次检查健康接口、创建用户，最后关闭服务：
+在终端 A 运行服务并等待启动完成：
+
+```sh
+cargo run
+```
+
+在终端 B 查看健康检查响应，再调用应用提供的停服路由：
 
 ```sh
 curl -i http://127.0.0.1:3000/health
-curl -i -X POST http://127.0.0.1:3000/users \
-  -H 'content-type: application/json' -d '{"name":"Ada"}'
 curl -i -X POST http://127.0.0.1:3000/admin/shutdown
 ```
 
-健康检查成功时返回 `200 OK` 和 `ok`；创建用户返回 `201 Created`。示例只监听 loopback，数据保存在进程内存中。用 `ControllerRoutes::with_http_limits` 替换 Controller 短路由默认限额的代码见 [`examples/controller_crud.rs`](examples/controller_crud.rs)。原生 Axum 路由需要在要保护的短路由分支上安装 `RequestLimitLayer::new(http_limits)`。`WebServer` 按调用方提供的 Router 运行，不会暗中安装 HTTP 限额。
+健康检查返回 `200 OK`，正文为 `ok`；停服路由返回 `202 Accepted`，并通知传给 `serve` 的关闭 future。示例仅绑定 loopback。请求限额只安装在短请求 `/health` 上；`WebServer` 直接运行传入的 Router，不会自动安装 HTTP 限额。停服路由没有认证，仅供本机演示，不能对外开放。
+
+另一个独立的内存 CRUD 示例可用 `cargo run --example controller_crud --all-features` 启动。`/users` 属于该示例，并不存在于上面的最小服务中；创建用户会返回 `201 Created`。在 [`examples/controller_crud.rs`](examples/controller_crud.rs) 可查看如何用 `ControllerRoutes::with_http_limits` 替换 Controller 短路由的默认限额。原生 Axum 路由需要在每个选定的短路由分支上安装 `RequestLimitLayer::new(http_limits)`；Controller 的 `sse` 和 `ws` 路由不会使用短请求限额。
 
 启用 `config` feature 后，`ConfiguredWeb::from_config` 会分别返回 `ServerOptions` 和 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；将配置所得限额传给 `with_http_limits` 可替换默认策略。原生 Axum 路由则需在选定分支显式安装 `RequestLimitLayer`；`WebServer` 不会替 Router 应用限额。
 

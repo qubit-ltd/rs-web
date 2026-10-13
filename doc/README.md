@@ -11,6 +11,7 @@
 
 ## Historical decisions
 
+- [rs-web onboarding and downstream current-source interoperability design (2026-10-13)](design-20261013T160345113Z-029cf798.md) and [implementation plan](implementation-plan-20261013T160345113Z-029cf798.md): proposed bilingual README quick start and current-source `rs-websocket` CI gate; status: design and plan only.
 - [rs-web request-deadline overflow design (2026-10-13)](design-20261013T095931709Z-31b89cb3.md) and [implementation plan](implementation-plan-20261013T095931709Z-31b89cb3.md): checked deadline overflow, shutdown cleanup, and response-body private type layout.
 - [rs-web short-response deadline design (2026-10-13)](design-20261013T073858154Z-7cc1c7fc.md) and [implementation plan](implementation-plan-20261013T073858154Z-7cc1c7fc.md): historical implementation record; use the current guides above for behavior.
 - [rs-web first PRD (2026-10-08)](2026-10-08-rs-web-prd.md): original requirements and acceptance baseline, with implementation status at the top.

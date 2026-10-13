@@ -4,35 +4,74 @@
 
 ## Install
 
-Add the crate and enable only the capabilities you use:
+For the minimal native Axum service below, declare the dependencies it uses directly:
 
 ```toml
 [dependencies]
-qubit-web = { version = "0.2", features = ["json", "ws"] }
+axum = "0.8"
+qubit-web = "0.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 ```
 
-The default feature set is empty. `json` enables bounded JSON helpers, `ws` enables WebSocket policy support, `tls-rustls` enables HTTPS binding, and `config` enables the `qubit-config` adapter.
+The default `qubit-web` feature set is empty. Enable only the capabilities you use: `json` provides bounded JSON helpers, `ws` provides WebSocket policy support, `tls-rustls` enables HTTPS binding, and `config` enables the `qubit-config` adapter. The existing examples use additional features as noted below.
 
 ## Quick start
 
-The runnable examples show the complete path: create `ServerOptions` with a transport connection cap, use the default HTTP limits on Controller short routes (or replace them with `HttpLimits`), add explicit limits to selected native Axum short routes, bind, serve the router, and stop through `/admin/shutdown`.
+This small loopback service exposes a health check and an application-owned shutdown endpoint. Put the dependencies from the Install section in `Cargo.toml`, then save this as `src/main.rs`:
 
-In terminal A, start the example and wait until it prints its listening address:
+```rust
+use std::error::Error;
+use std::sync::Arc;
 
-```sh
-cargo run --example controller_crud --all-features
+use axum::{http::StatusCode, routing::{get, post}, Router};
+use qubit_web::{HttpLimits, RequestLimitLayer, ServerOptions, WebServer};
+use tokio::sync::Notify;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let stop = Arc::new(Notify::new());
+    let stop_for_route = Arc::clone(&stop);
+    let app = Router::new()
+        .route(
+            "/health",
+            get(|| async { "ok" })
+                .layer(RequestLimitLayer::new(HttpLimits::default())),
+        )
+        .route(
+            "/admin/shutdown",
+            post(move || {
+                let stop = Arc::clone(&stop_for_route);
+                async move {
+                    stop.notify_one();
+                    StatusCode::ACCEPTED
+                }
+            }),
+        );
+
+    let options = ServerOptions::new("127.0.0.1:3000".parse()?)
+        .with_max_transport_connections(128)?;
+    let server = WebServer::bind_http(options).await?;
+    let _report = server.serve(app, async move { stop.notified().await }).await?;
+    Ok(())
+}
 ```
 
-Then, in terminal B, request the health and user routes, and stop the service:
+In terminal A, run the service and wait for it to start:
+
+```sh
+cargo run
+```
+
+In terminal B, check the health response, then ask the application shutdown route to stop the server:
 
 ```sh
 curl -i http://127.0.0.1:3000/health
-curl -i -X POST http://127.0.0.1:3000/users \
-  -H 'content-type: application/json' -d '{"name":"Ada"}'
 curl -i -X POST http://127.0.0.1:3000/admin/shutdown
 ```
 
-The successful health response is `200 OK` with `ok`; creating a user returns `201 Created`. The example binds only to loopback and keeps data in memory. See [`examples/controller_crud.rs`](examples/controller_crud.rs) for replacing the Controller short-route defaults with `ControllerRoutes::with_http_limits`. For native Axum routes, install `RequestLimitLayer::new(http_limits)` on the short route branches that need it. `WebServer` serves the router as supplied and does not install HTTP limits implicitly.
+The first request returns `200 OK` with body `ok`; the second returns `202 Accepted` and signals the shutdown future passed to `serve`. The example binds only to loopback. The request limit is attached only to the short `/health` route; `WebServer` serves the Router as supplied and does not install HTTP limits implicitly. The shutdown route is an unauthenticated demonstration endpoint and should not be exposed beyond loopback.
+
+For the separate in-memory CRUD example, run `cargo run --example controller_crud --all-features`. Its `/users` route belongs to that example, not the minimal service above. Creating a user there returns `201 Created`; see [`examples/controller_crud.rs`](examples/controller_crud.rs) for replacing Controller short-route defaults with `ControllerRoutes::with_http_limits`. For native Axum routes, install `RequestLimitLayer::new(http_limits)` on each selected short route branch. Controller `sse` and `ws` routes do not use the short-request limit.
 
 When using the `config` feature, `ConfiguredWeb::from_config` returns `ServerOptions` and `HttpLimits` as separate values. Controller short routes already have `HttpLimits::default()`; pass the configured limits to `with_http_limits` to replace that policy. For native Axum routes, install `RequestLimitLayer` on selected branches. `WebServer` does not apply either policy to the Router.
 
