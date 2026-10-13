@@ -58,7 +58,7 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 ## 限额与运行边界
 
 - 每次通过 `new` 或 `default` 创建 `SseConnectionPolicy`、`WsUpgradePolicy` 都会开启独立容量域；克隆 policy 才会共享容量。需要路由共享时，在 `AppState` 中各创建一次，再由 handler 通过 `State<AppState>` 取出并克隆。示例见[中文用户指南](doc/user_guide.zh_CN.md)或[英文用户指南](doc/user_guide.md)。每个 `WebServer` 的传输连接上限默认为 1024，可通过 `ServerOptions::with_max_transport_connections` 配置。传输连接数与短请求并发数必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`；超界值返回 `WebServerError::InvalidConfig`。该上限覆盖 TLS 握手和 HTTP 连接 future。达到上限时服务会暂停接收连接；客户端可能在操作系统 backlog 中等待，也可能连接失败，因此不保证返回 HTTP 503。policy 容量与传输上限分别计算；SSE 仍占用 HTTP 连接。
-- `ControllerRoutes::new()` 会为 Controller 的 `short` 路由安装 `HttpLimits::default()`：每个请求体 1 MiB、每个 builder 共享 256 个并发请求，处理及响应体期限为 30 秒。`with_http_limits` 用于替换默认值，并应在添加 Controller 前调用。Controller 的 `sse` 和 `ws` 路由会跳过短请求 layer。原生 Axum 路由需在选定分支显式安装 `RequestLimitLayer`；`WebServer` 不会安装路由限额。
+- `ControllerRoutes::new()` 会为 Controller 的 `short` 路由安装 `HttpLimits::default()`：每个请求体 1 MiB、每个 builder 共享 256 个并发请求，处理及响应体期限为 30 秒。期限到达时会主动释放应用响应体和短请求许可，不必等到再次轮询响应体。响应头发出后，超时只能在传输再次轮询时通过 body error 体现，不会关闭连接。`with_http_limits` 用于替换默认值，并应在添加 Controller 前调用。Controller 的 `sse` 和 `ws` 路由会跳过短请求 layer。原生 Axum 路由需在选定分支显式安装 `RequestLimitLayer`；`WebServer` 不会安装路由限额。
 - `ControllerRoutes::add` 会在注册前检查重复方法、无效路径和冲突的路由模板（包括参数别名及重叠通配符），并返回 `ControllerRouteError`。不同方法可以共用同一模板；`finish()` 直接返回 Axum `Router`。
 - `rest_controller` 支持在同一模块中装配末段名称相同、但实际类型不同的 Controller。
 - HTTP/1 请求头默认最多等待 10 秒；WebSocket 的 HTTP/1 upgrade 也必须在此期限内发送完请求头。传输空闲期限默认 30 秒，可通过 `ServerOptions::with_transport_idle_timeout` 或配置键 `transport.idle_timeout_ms` 设置。连接在没有正在处理的请求或响应体时会被回收，包括空闲 HTTP/2 连接；活跃请求和 SSE 响应体会暂停空闲计时。

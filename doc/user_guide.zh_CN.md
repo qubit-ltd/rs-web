@@ -52,7 +52,7 @@ let server = WebServer::bind_http(server_options).await?;
 
 ## 装配普通接口与长连接
 
-Controller 短路由默认使用每个请求体 1 MiB、每个 builder 共享 256 个并发请求、handler 工作及响应体传输 30 秒的预算。添加 Controller 前调用 `with_http_limits` 可替换该策略。原生 Axum 路由不会继承 Controller 限额，需在选定的普通短路由分支显式安装 `RequestLimitLayer`。`WebServer` 按原样服务调用方提供的 Router，不会添加路由 layer。限额约束被读取的请求体数据、处理中的 handler 并发数和所选分支的请求期限：
+Controller 短路由默认使用每个请求体 1 MiB、每个 builder 共享 256 个并发请求、handler 工作及响应体传输 30 秒的预算。添加 Controller 前调用 `with_http_limits` 可替换该策略。原生 Axum 路由不会继承 Controller 限额，需在选定的普通短路由分支显式安装 `RequestLimitLayer`。`WebServer` 按原样服务调用方提供的 Router，不会添加路由 layer。限额约束被读取的请求体数据、处理中的 handler 并发数和所选分支的请求期限。handler 超过期限时 layer 返回 `504 Gateway Timeout`。若响应头已经发出，期限到达会立即丢弃应用响应体并归还短请求许可，但无法更改状态码；下一次轮询响应体时才会报告一次超时错误。慢客户端或传输背压可能推迟客户端观察到该错误的时间。此期限不会关闭 TCP 或 HTTP/2 连接，连接仍由独立的传输策略管理：
 
 ```rust
 use std::time::Duration;
@@ -215,6 +215,7 @@ assert!(WsUpgradePolicy::new()
 | 过载时客户端等待或连接失败 | 检查该实例的 transport 额度和系统 backlog。accept 之前不会有保证的 503。 |
 | 请求体超过上限但仍成功 | 对 Controller `short` 路由，确认 handler/extractor 实际读取请求体，并检查是否用 `with_http_limits` 替换成了更大的预算。对原生 Axum 路由，在该分支安装 `RequestLimitLayer`，并确认请求体被读取。 |
 | SSE 在普通请求期限到达时关闭 | 从该流式分支移除 `RequestLimitLayer`，改用 `SseConnectionPolicy` 的连接策略。 |
+| 慢客户端没有立即观察到短响应超时 | 响应头发出后，期限会释放应用响应体和短请求许可；只有传输再次轮询时才能报告 body error。它不会更改响应状态或关闭连接；传输连接由独立策略管理。 |
 | WS 建立后 `active_sessions()` 仍为 0 | 调用 `WsUpgradePolicy::on_upgrade` 并传入服务的 `ServerContext`；原生 Axum upgrade 不属于受管会话统计。 |
 | `WsUpgradePolicy::validate()` 报告连接上限无效 | 检查最终的 `max_connections`：零值对应 `WsPolicyError::ZeroLimit`；超过 `tokio::sync::Semaphore::MAX_PERMITS` 对应 `WsPolicyError::ConnectionLimitTooLarge`。修正设置后重新校验；无效策略不能升级。 |
 | 入站负载下 WebSocket 以 `1013` 关闭 | 应用可能没有及时调用 `WsSession::recv()`。入站通道容量为 64 条消息；若通道持续满载且 `idle_timeout` 内交付没有进展，会话就会关闭。应持续读取消息，或先接收再交给应用管理的任务处理；根据预期处理间隔设置合适的 `idle_timeout`。 |

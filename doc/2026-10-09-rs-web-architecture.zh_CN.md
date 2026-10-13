@@ -29,7 +29,7 @@
 | 容量域 | 默认值 | 范围与超限行为 |
 | --- | --- | --- |
 | 已接收的传输连接 | 每个 `WebServer` 1,024 个 | 配置值必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。包含 TLS 握手和 HTTP connection future。达到上限时 accept 循环暂停接收；客户端可能等待操作系统 backlog，也可能连接失败；不会生成 HTTP 503。 |
-| Controller 短请求 | 每个 `ControllerRoutes` builder 同时 256 个 | 配置值必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。`ControllerRoutes::new()` 默认采用 `HttpLimits::default()`：每个请求体 1 MiB，handler/响应体期限 30 秒。`with_http_limits` 替换这些默认值，应在添加 Controller 前调用。每个 builder 的路由共享自己的状态。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 不安装路由限额。容量耗尽时返回容量拒绝。 |
+| Controller 短请求 | 每个 `ControllerRoutes` builder 同时 256 个 | 配置值必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。`ControllerRoutes::new()` 默认采用 `HttpLimits::default()`：每个请求体 1 MiB，handler/响应体期限 30 秒。期限到达时会主动释放应用响应体和短请求许可，无需等待再次轮询。响应头发出后，超时只能在传输再次轮询时通过 body error 体现，不会关闭连接。`with_http_limits` 替换这些默认值，应在添加 Controller 前调用。每个 builder 的路由共享自己的状态。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 不安装路由限额。容量耗尽时返回容量拒绝。 |
 | SSE 连接 | 每个 `SseConnectionPolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。容量耗尽与停服拒绝分别报告。 |
 | WebSocket 连接 | 每个 `WsUpgradePolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。策略按最终字段值校验；`max_connections` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`，零值对应 `WsPolicyError::ZeroLimit`，超上限对应 `WsPolicyError::ConnectionLimitTooLarge`。接纳失败会在会话纳入管理前拒绝。 |
 | 服务受管会话 | 没有单独的数值上限 | `ServerContext` 追踪已接纳的 SSE 和 WebSocket 会话，以便停服统计。它不是全局连接上限，也不统计普通请求、原生 Axum upgrade 或应用后台任务。 |
@@ -38,7 +38,7 @@
 
 ## 请求预算与长连接流
 
-`HttpLimits::default()` 为每个请求体设置 1 MiB 上限，为并发短请求设置 256 个额度，并为 handler 工作及响应体传输设置 30 秒期限。`ControllerRoutes::new()` 默认将此策略用于 Controller 的 `short` 路由；`with_http_limits` 替换默认值，后续添加的路由使用新策略。Controller 的 `sse` 和 `ws` 路由跳过短请求 layer。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 按原样服务 Router，不添加路由限额。中间件在选定路由读取请求体时累计字节；不会为了执行限制而读取本来未消费的请求体。容量耗尽、请求体超限和处理超时都有稳定的拒绝结果。如果响应头已发送后期限到达，响应体会以错误结束。
+`HttpLimits::default()` 为每个请求体设置 1 MiB 上限，为并发短请求设置 256 个额度，并为 handler 工作及响应体传输设置 30 秒期限。`ControllerRoutes::new()` 默认将此策略用于 Controller 的 `short` 路由；`with_http_limits` 替换默认值，后续添加的路由使用新策略。Controller 的 `sse` 和 `ws` 路由跳过短请求 layer。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 按原样服务 Router，不添加路由限额。中间件在选定路由读取请求体时累计字节；不会为了执行限制而读取本来未消费的请求体。容量耗尽、请求体超限和处理超时都有稳定的拒绝结果。handler 超时会返回 `504 Gateway Timeout`。如果响应头已发送后期限到达，会立即丢弃应用响应体并归还短请求许可，但无法更改响应状态；body error 只会在传输再次轮询响应体时报告。传输背压可能推迟客户端观察到错误的时间；该期限不会关闭连接，TCP/HTTP/2 连接仍受独立传输策略管理。
 
 启用 `json` 时，`JsonLimits::default()` 分别将输入和输出 payload 限制为 1 MiB，嵌套深度限制为 64，值节点数限制为 100,000，数组元素数和对象成员数各限制为 10,000，键长度限制为 16 KiB，字符串长度限制为 256 KiB，数字文本长度限制为 128 字节。JSON 限制与通用 HTTP 请求体限制相互独立；两者同时生效时，应配置兼容的值。
 

@@ -52,7 +52,7 @@ let server = WebServer::bind_http(server_options).await?;
 
 ## Assemble short routes and long-lived routes
 
-Controller short routes have a default budget of 1 MiB per request body, 256 concurrent requests shared by the builder, and 30 seconds for handler work plus response-body streaming. Call `with_http_limits` before adding Controllers to replace that policy. Native Axum routes do not inherit Controller limits; install `RequestLimitLayer` on each selected ordinary short route. `WebServer` serves the supplied Router without adding route layers. These limits protect consumed request-body data, concurrent handler work, and the selected branch's deadline.
+Controller short routes have a default budget of 1 MiB per request body, 256 concurrent requests shared by the builder, and 30 seconds for handler work plus response-body streaming. Call `with_http_limits` before adding Controllers to replace that policy. Native Axum routes do not inherit Controller limits; install `RequestLimitLayer` on each selected ordinary short route. `WebServer` serves the supplied Router without adding route layers. These limits protect consumed request-body data, concurrent handler work, and the selected branch's deadline. If the handler misses the deadline, the layer returns `504 Gateway Timeout`. If the deadline expires after response headers have been sent, the layer immediately drops the application response body and releases the short-request permit; the status cannot be changed, and the body reports one timeout error on its next poll. A slow client or transport backpressure may delay when that error is observed. This deadline does not close the TCP or HTTP/2 connection, which remains governed by the independent transport policy.
 
 ```rust
 use std::time::Duration;
@@ -215,6 +215,7 @@ assert!(WsUpgradePolicy::new()
 | --- | --- |
 | Client waits or connection fails during overload | Check per-instance transport capacity and OS backlog. Do not expect a 503 before accept. |
 | A request exceeds the body cap but succeeds | For a Controller `short` route, confirm its handler/extractor consumes the body and check whether `with_http_limits` replaced the default with a larger budget. For a native Axum route, install `RequestLimitLayer` on that branch and confirm the body is consumed. |
+| A slow client does not immediately observe a short-response timeout | After response headers are sent, expiry releases the application body and short-request permit but can only report a body error when the transport polls again. It does not change the response status or close the connection; transport connections use their separate policy. |
 | SSE closes at the ordinary request deadline | Remove `RequestLimitLayer` from that streaming branch and use `SseConnectionPolicy` limits. |
 | `active_sessions()` stays at zero for a WS | Call `WsUpgradePolicy::on_upgrade` with the server's `ServerContext`; native Axum upgrades are outside managed-session reporting. |
 | `WsUpgradePolicy::validate()` reports an invalid connection limit | Check the final `max_connections` value: zero is `WsPolicyError::ZeroLimit`; values above `tokio::sync::Semaphore::MAX_PERMITS` are `WsPolicyError::ConnectionLimitTooLarge`. Correct the setting and validate again; an invalid policy cannot upgrade. |
