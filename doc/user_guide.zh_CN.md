@@ -52,7 +52,7 @@ let server = WebServer::bind_http(server_options).await?;
 
 ## 装配普通接口与长连接
 
-Controller 短路由默认使用每个请求体 1 MiB、每个 builder 共享 256 个并发请求、handler 工作及响应体传输 30 秒的预算。添加 Controller 前调用 `with_http_limits` 可替换该策略。原生 Axum 路由不会继承 Controller 限额，需在选定的普通短路由分支显式安装 `RequestLimitLayer`。`WebServer` 按原样服务调用方提供的 Router，不会添加路由 layer。限额约束被读取的请求体数据、处理中的 handler 并发数和所选分支的请求期限。handler 超过期限时 layer 返回 `504 Gateway Timeout`。若响应头已经发出，期限到达会立即丢弃应用响应体并归还短请求许可，但无法更改状态码；下一次轮询响应体时才会报告一次超时错误。慢客户端或传输背压可能推迟客户端观察到该错误的时间。此期限不会关闭 TCP 或 HTTP/2 连接，连接仍由独立的传输策略管理：
+Controller 短路由默认使用每个请求体 1 MiB、每个 builder 共享 256 个并发请求、handler 工作及响应体传输 30 秒的预算。添加 Controller 前调用 `with_http_limits` 可替换该策略。原生 Axum 路由不会继承 Controller 限额，需在选定的普通短路由分支显式安装 `RequestLimitLayer`。`WebServer` 按原样服务调用方提供的 Router，不会添加路由 layer。限额约束被读取的请求体数据、处理中的 handler 并发数和所选分支的请求期限。handler 超过期限时 layer 返回 `504 Gateway Timeout`。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，layer 返回 HTTP 500 和代码 `invalid_configuration`。若响应头已经发出，期限到达会立即丢弃应用响应体并归还短请求许可，但无法更改状态码；下一次轮询响应体时才会报告一次超时错误。慢客户端或传输背压可能推迟客户端观察到该错误的时间。此期限不会关闭 TCP 或 HTTP/2 连接，连接仍由独立的传输策略管理：
 
 ```rust
 use std::time::Duration;
@@ -154,7 +154,7 @@ let report = server.serve(app, shutdown_signal).await?;
 assert!(report.graceful);
 ```
 
-关闭开始后，服务会原子地禁止新的受管 SSE/WS 会话登记、停止接收新连接，并通知现有会话。HTTP 连接和已登记会话共用同一个关闭截止时间，该期限由 `ServerOptions` 设置并经 `ServerContext` 提供给 WebSocket 会话；`WsUpgradePolicy` 不单独设置停服期限。只有两者都在期限内结束，`graceful` 才为 `true`。超时则由 `unfinished_managed_sessions` 记录截止时仍未结束的受管会话数。该报告不表示任意应用后台任务都已停止；`forced_connections` 为 `None`，因为 Axum 无法提供可证明的强制关闭数量。
+关闭开始后，服务会原子地禁止新的受管 SSE/WS 会话登记、停止接收新连接，并通知现有会话。HTTP 连接和已登记会话共用同一个关闭截止时间，该期限由 `ServerOptions` 设置并经 `ServerContext` 提供给 WebSocket 会话；`WsUpgradePolicy` 不单独设置停服期限。无法表示的停服期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，服务先取消会话并回收连接任务，再返回错误。只有两者都在期限内结束，`graceful` 才为 `true`。超时则由 `unfinished_managed_sessions` 记录截止时仍未结束的受管会话数。该报告不表示任意应用后台任务都已停止；`forced_connections` 为 `None`，因为 Axum 无法提供可证明的强制关闭数量。
 
 运行演示服务：
 

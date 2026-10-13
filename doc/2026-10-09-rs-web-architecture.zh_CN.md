@@ -38,7 +38,7 @@
 
 ## 请求预算与长连接流
 
-`HttpLimits::default()` 为每个请求体设置 1 MiB 上限，为并发短请求设置 256 个额度，并为 handler 工作及响应体传输设置 30 秒期限。`ControllerRoutes::new()` 默认将此策略用于 Controller 的 `short` 路由；`with_http_limits` 替换默认值，后续添加的路由使用新策略。Controller 的 `sse` 和 `ws` 路由跳过短请求 layer。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 按原样服务 Router，不添加路由限额。中间件在选定路由读取请求体时累计字节；不会为了执行限制而读取本来未消费的请求体。容量耗尽、请求体超限和处理超时都有稳定的拒绝结果。handler 超时会返回 `504 Gateway Timeout`。如果响应头已发送后期限到达，会立即丢弃应用响应体并归还短请求许可，但无法更改响应状态；body error 只会在传输再次轮询响应体时报告。传输背压可能推迟客户端观察到错误的时间；该期限不会关闭连接，TCP/HTTP/2 连接仍受独立传输策略管理。
+`HttpLimits::default()` 为每个请求体设置 1 MiB 上限，为并发短请求设置 256 个额度，并为 handler 工作及响应体传输设置 30 秒期限。`ControllerRoutes::new()` 默认将此策略用于 Controller 的 `short` 路由；`with_http_limits` 替换默认值，后续添加的路由使用新策略。Controller 的 `sse` 和 `ws` 路由跳过短请求 layer。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 按原样服务 Router，不添加路由限额。中间件在选定路由读取请求体时累计字节；不会为了执行限制而读取本来未消费的请求体。容量耗尽、请求体超限和处理超时都有稳定的拒绝结果。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，layer 返回 HTTP 500 和代码 `invalid_configuration`。普通 handler 超时仍返回 `504 Gateway Timeout`。如果响应头已发送后期限到达，会立即丢弃应用响应体并归还短请求许可，但无法更改响应状态；body error 只会在传输再次轮询响应体时报告。传输背压可能推迟客户端观察到错误的时间；该期限不会关闭连接，TCP/HTTP/2 连接仍受独立传输策略管理。
 
 启用 `json` 时，`JsonLimits::default()` 分别将输入和输出 payload 限制为 1 MiB，嵌套深度限制为 64，值节点数限制为 100,000，数组元素数和对象成员数各限制为 10,000，键长度限制为 16 KiB，字符串长度限制为 256 KiB，数字文本长度限制为 128 字节。JSON 限制与通用 HTTP 请求体限制相互独立；两者同时生效时，应配置兼容的值。
 
@@ -50,7 +50,7 @@ SSE 和 WebSocket 都是长连接路由，不应套用短请求并发/期限中�
 
 `ServerOptions` 默认将 HTTP/1 请求头及 TLS 握手期限设为 10 秒，将传输空闲期限和优雅停服期限各设为 30 秒。仅在没有活跃请求 handler 或响应体时，空闲期限才会关闭 TCP/TLS 连接；它不会限制已经开始但停滞的活跃请求。长连接响应体活跃期间，传输空闲计时暂停。
 
-停服开始时，服务停止接收 socket、关闭受管会话登记入口、通知已有会话，并使用同一个绝对期限等待 HTTP connection task 和受管 SSE/WS 会话。期限由 `ServerOptions` 设置，并由 `ServerContext` 提供给 WebSocket 会话；`WsUpgradePolicy` 不再单独设置停服期限。只有两组任务都按期结束，`ShutdownReport::graceful` 才为 `true`。报告记录未结束的受管会话，但不保证任意应用后台工作也已停止。Axum 无法提供可证明的强制关闭连接数，因此 `forced_connections` 为 `None`。
+停服开始时，服务停止接收 socket、关闭受管会话登记入口、通知已有会话，并使用同一个绝对期限等待 HTTP connection task 和受管 SSE/WS 会话。期限由 `ServerOptions` 设置，并由 `ServerContext` 提供给 WebSocket 会话；`WsUpgradePolicy` 不再单独设置停服期限。无法表示的停服期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，服务会先取消会话并回收连接任务，再返回错误。只有两组任务都按期结束，`ShutdownReport::graceful` 才为 `true`。报告记录未结束的受管会话，但不保证任意应用后台工作也已停止。Axum 无法提供可证明的强制关闭连接数，因此 `forced_connections` 为 `None`。
 
 `ConfiguredWeb` 解析应用显式传入的配置对象，并分别返回 `ServerOptions` 与 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；把配置值传给 `with_http_limits` 可替换该策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。启用 `config` 时，传输配置默认值为 `transport.max_connections = 1024` 和 `transport.idle_timeout_ms = 30000`；HTTP 策略键包括 `http.max_body_bytes`、`http.max_concurrent_requests` 和 `http.request_timeout_ms`。两个并发配置键的有效范围都是 `1..=tokio::sync::Semaphore::MAX_PERMITS`；无效值通过 `ConfigOptionsError::field()` 指向原配置键。TLS 是可选项，通过独立的 `TlsConfig` 配置；PEM 加载失败会归并为 `TlsInvalid`，不会暴露密钥材料或路径。
 
