@@ -56,9 +56,12 @@ impl RequestLimitLayer {
     /// them and stops polling the body after the first over-limit frame. An
     /// extractor error caused by that frame becomes a stable 413 rejection.
     /// Unconsumed request bodies are not read solely to enforce the limit.
-    /// The deadline covers handler work and response-body streaming; if it
-    /// expires after response headers are sent, the body ends with a timeout
-    /// error. Long-lived SSE and WebSocket routes must not use this layer.
+    /// The deadline covers handler work and response-body streaming. If it
+    /// expires after response headers are sent, the application body and
+    /// capacity permit are released even when the transport stops polling;
+    /// the next body poll reports one timeout error. The layer cannot change
+    /// the sent status or control when the transport observes that error.
+    /// Long-lived SSE and WebSocket routes must not use this layer.
     ///
     /// # Type Parameters
     ///

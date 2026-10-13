@@ -30,7 +30,8 @@ pub struct HttpLimits {
     max_body_bytes: NonZeroUsize,
     /// Maximum simultaneous short requests protected by one branch.
     max_concurrent_requests: NonZeroUsize,
-    /// Deadline for handler work and response body streaming.
+    /// Deadline for handler work and response body streaming, including active
+    /// disposal of the application body and capacity permit at expiry.
     request_timeout: Duration,
 }
 
@@ -132,7 +133,11 @@ impl HttpLimits {
     ///
     /// # Returns
     ///
-    /// Updated HTTP limits.
+    /// Updated HTTP limits. The deadline includes handler work and response
+    /// streaming; after headers are sent, expiry releases the application body
+    /// and permit even if the transport stops polling. A later body poll
+    /// reports one timeout error, but the response status cannot be changed
+    /// and the transport controls when it observes that error.
     ///
     /// # Errors
     ///

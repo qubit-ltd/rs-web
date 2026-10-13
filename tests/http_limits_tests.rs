@@ -435,6 +435,132 @@ impl hyper::body::Body for NeverEndingResponse {
     }
 }
 
+struct DropObservedResponse(Arc<AtomicUsize>);
+
+impl hyper::body::Body for DropObservedResponse {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        Poll::Pending
+    }
+}
+
+impl Drop for DropObservedResponse {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn unpolled_response_body_deadline_releases_capacity_and_drops_source() {
+    // A real slow-reader test depends on Hyper and kernel socket buffering to
+    // stop polling within a stable time window. Keep this deterministic body-
+    // level regression as the reliable gate instead of asserting a platform-
+    // specific backpressure threshold or byte count.
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let body_dropped = dropped.clone();
+    let limits = HttpLimits::default()
+        .with_max_concurrent_requests(1)
+        .unwrap()
+        .with_request_timeout(std::time::Duration::from_millis(30))
+        .unwrap();
+    let app = Router::new()
+        .route(
+            "/stalled",
+            post(move || {
+                let dropped = body_dropped.clone();
+                async move { Response::new(Body::new(DropObservedResponse(dropped))) }
+            }),
+        )
+        .route("/ok", post(|| async { "ok" }))
+        .layer(RequestLimitLayer::new(limits));
+
+    let mut response = app
+        .clone()
+        .oneshot(Request::post("/stalled").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while dropped.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the deadline should drop an unpolled application body");
+
+    let next = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        app.oneshot(Request::post("/ok").body(Body::empty()).unwrap()),
+    )
+    .await
+    .expect("the deadline should release capacity without polling the body")
+    .unwrap();
+    assert_eq!(next.status(), StatusCode::OK);
+
+    let first_error = std::future::poll_fn(|context| Pin::new(response.body_mut()).poll_frame(context))
+        .await
+        .expect("the timeout error should be emitted once")
+        .unwrap_err();
+    assert!(first_error.to_string().contains("deadline"));
+    assert!(
+        std::future::poll_fn(|context| Pin::new(response.body_mut()).poll_frame(context))
+            .await
+            .is_none()
+    );
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn dropping_response_near_deadline_drops_source_once_and_releases_capacity() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let body_drops = drops.clone();
+    let limits = HttpLimits::default()
+        .with_max_concurrent_requests(1)
+        .unwrap()
+        .with_request_timeout(std::time::Duration::from_millis(50))
+        .unwrap();
+    let app = Router::new()
+        .route(
+            "/stalled",
+            post(move || {
+                let drops = body_drops.clone();
+                async move { Response::new(Body::new(DropObservedResponse(drops))) }
+            }),
+        )
+        .route("/ok", post(|| async { "ok" }))
+        .layer(RequestLimitLayer::new(limits));
+
+    let first = app
+        .clone()
+        .oneshot(Request::post("/stalled").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(45)).await;
+    drop(first);
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while drops.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the application body must be dropped by timeout or response drop");
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+    let next = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        app.oneshot(Request::post("/ok").body(Body::empty()).unwrap()),
+    )
+    .await
+    .expect("timeout or response drop must release capacity")
+    .unwrap();
+    assert_eq!(next.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn response_body_deadline_releases_short_request_capacity() {
     let limits = HttpLimits::default()
