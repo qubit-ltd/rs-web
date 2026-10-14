@@ -33,7 +33,9 @@ pub struct ServerOptions {
     pub(crate) addr: SocketAddr,
     /// Maximum duration allowed for graceful server shutdown.
     pub(crate) shutdown_timeout: Duration,
-    /// Maximum duration allowed to receive an HTTP request header block.
+    /// Maximum duration allowed to receive HTTP/1 request headers. HTTPS TLS
+    /// handshakes use the same duration; HTTP/2 request headers are not timed
+    /// by the HTTP/1 header timer. Defaults to 10 seconds.
     pub(crate) request_header_timeout: Duration,
     /// Maximum duration a transport connection may remain without an active
     /// request or response body.
@@ -78,7 +80,9 @@ impl ServerOptions {
         self.shutdown_timeout
     }
 
-    /// Returns the maximum time allowed to receive request headers.
+    /// Returns the maximum time allowed to receive HTTP/1 request headers.
+    /// HTTPS TLS handshakes use the same duration; HTTP/2 request headers are
+    /// not timed by the HTTP/1 header timer.
     #[must_use]
     #[inline]
     pub const fn request_header_timeout(&self) -> Duration {
@@ -116,10 +120,12 @@ impl ServerOptions {
         self
     }
 
-    /// Sets the maximum time allowed to receive an HTTP request header block.
+    /// Sets the maximum time allowed to receive HTTP/1 request headers.
     ///
-    /// The default is 10 seconds, which also bounds an HTTP/1 WebSocket
-    /// upgrade request before Axum accepts the upgrade.
+    /// The default is 10 seconds. HTTPS TLS handshakes use this same duration,
+    /// and HTTP/1 WebSocket upgrade requests are bounded before Axum accepts
+    /// the upgrade. HTTP/2 request headers are not timed by the HTTP/1 header
+    /// timer.
     ///
     /// # Parameters
     ///

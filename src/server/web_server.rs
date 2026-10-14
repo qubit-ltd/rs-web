@@ -387,7 +387,7 @@ fn serve_error(source: io::Error) -> WebServerError {
 /// * `stream` - Accepted transport stream, optionally after TLS negotiation.
 /// * `app` - Router cloned into each request service call.
 /// * `watcher` - Graceful shutdown watcher for this connection.
-/// * `request_header_timeout` - Deadline for receiving HTTP request headers.
+/// * `request_header_timeout` - Deadline for receiving HTTP/1 request headers.
 /// * `transport_idle_timeout` - Maximum time without an active request or
 ///   response body.
 async fn serve_connection<S>(
