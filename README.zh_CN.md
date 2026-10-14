@@ -96,15 +96,29 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 
 ## 限额与运行边界
 
-- 每次通过 `new` 或 `default` 创建 `SseConnectionPolicy`、`WsUpgradePolicy` 都会开启独立容量域；克隆 policy 才会共享容量。需要路由共享时，在 `AppState` 中各创建一次，再由 handler 通过 `State<AppState>` 取出并克隆。示例见[中文用户指南](doc/user_guide.zh_CN.md)或[英文用户指南](doc/user_guide.md)。每个 `WebServer` 的传输连接上限默认为 1024，可通过 `ServerOptions::with_max_transport_connections` 配置。传输连接数与短请求并发数必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`；超界值返回 `WebServerError::InvalidConfig`。该上限覆盖 TLS 握手和 HTTP 连接 future。达到上限时服务会暂停接收连接；客户端可能在操作系统 backlog 中等待，也可能连接失败，因此不保证返回 HTTP 503。policy 容量与传输上限分别计算；SSE 仍占用 HTTP 连接。
-- `ControllerRoutes::new()` 会为 Controller 的 `short` 路由安装 `HttpLimits::default()`：每个请求体 1 MiB、每个 builder 共享 256 个并发请求，处理及响应体期限为 30 秒。期限到达时会主动释放应用响应体和短请求许可，不必等到再次轮询响应体。响应头发出后，超时只能在传输再次轮询时通过 body error 体现，不会关闭连接。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限变得无法表示，layer 返回 HTTP 500 和代码 `invalid_configuration`。普通 handler 超时仍返回 HTTP 504。`with_http_limits` 用于替换默认值，并应在添加 Controller 前调用。Controller 的 `sse` 和 `ws` 路由会跳过短请求 layer。原生 Axum 路由需在选定分支显式安装 `RequestLimitLayer`；`WebServer` 不会安装路由限额。
-- `ControllerRoutes::add` 会在注册前检查重复方法、无效路径和冲突的路由模板（包括参数别名及重叠通配符），并返回 `ControllerRouteError`。不同方法可以共用同一模板；`finish()` 直接返回 Axum `Router`。
-- `rest_controller` 支持在同一模块中装配末段名称相同、但实际类型不同的 Controller。
-- HTTP/1 请求头默认最多等待 10 秒；WebSocket 的 HTTP/1 upgrade 也必须在此期限内发送完请求头。传输空闲期限默认 30 秒，可通过 `ServerOptions::with_transport_idle_timeout` 或配置键 `transport.idle_timeout_ms` 设置。连接在没有正在处理的请求或响应体时会被回收，包括空闲 HTTP/2 连接；活跃请求和 SSE 响应体会暂停空闲计时。
-- 使用 `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)`，可在返回升级响应前预留受管会话。策略按最终配置字段值校验：`max_connections` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`；零值返回 `WsPolicyError::ZeroLimit`，超过上限返回 `WsPolicyError::ConnectionLimitTooLarge`。Origin 默认可选：未携带 Origin 的请求会继续进入应用认证；携带 Origin 时，必须与 `allowed_origins` 中的值完全匹配，否则拒绝。没有 Origin 不代表已通过认证。对端或会话关闭后，`try_send` 会返回 `Closed`；成功入队本身不保证消息已通过网络送达。若应用不读取入站消息，且交付在 `idle_timeout` 内没有进展，会话会以 WebSocket 关闭码 `1013`（暂时无法处理）关闭。
-- `ServerContext::active_sessions()` 统计受管 SSE 和通过 `on_upgrade` 接纳的 WebSocket，包括握手尚未完成的升级。停服会使用由 `ServerOptions` 设置、经 `ServerContext` 提供的同一个截止时间等待 HTTP 连接和这些会话；WebSocket policy 不再单独设置停服期限。无法表示的停服期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，服务会先取消会话并回收连接任务，再返回错误。`ShutdownReport::unfinished_managed_sessions` 记录截止时仍未结束的受管会话。原生 Axum 升级和应用后台任务不在统计范围内。
-- `WebServerError` 通过 `std::error::Error::source()` 保留 socket I/O 错误供调用方诊断；默认 `Display` 和 `Debug` 不输出底层操作系统错误文本。
-- 对公网提供服务必须配置可信 TLS。`tls-rustls` 支持 HTTPS 绑定，需提供有效证书和私钥；也可以显式配置可信反向代理。默认不信任转发头。
-- SSE producer 可以获知客户端断开和服务关闭，但事件 ID、缓冲、持久化、重放和恢复由应用负责。连接关闭不会取消应用已经受理的业务工作。
+- Controller 的 `short` 路由默认使用 `HttpLimits::default()`；原生 Axum 路由必须在需要限额的短请求分支上显式安装 `RequestLimitLayer`。`WebServer` 不会替传入的 Router 自动添加路由限额。
+- 新建的 SSE 或 WebSocket policy 各自管理独立容量。需要多个路由共用预算时，应将同一 policy 放入应用共享状态并克隆使用。传输连接上限单独计算；SSE 也会占用 HTTP 连接。
+- 认证、授权、业务状态，以及流式数据的保存和重放由应用负责。WebSocket 升级前必须先完成认证；Origin 检查只限制浏览器来源。示例 token 和无认证停服入口仅供 loopback 演示。
+- 启用 HTTPS 需要 `tls-rustls` 与有效证书，也可由部署方配置可信反向代理。停服由应用发起，并遵守服务端配置的截止时间。
 
-安装、容量规划、TLS、流式连接和排障步骤见[中文用户指南](doc/user_guide.zh_CN.md)与[英文用户指南](doc/user_guide.md)。API 详情见 [API 文档](https://docs.rs/qubit-web)；另见[历史中文设计记录](doc/2026-10-08-rs-web-design.md)和[当前生命周期设计摘要（English）](doc/2026-10-09-rs-web-lifecycle-design.en.md)。
+限额细节、TLS 配置、生命周期行为和排障方法见[中文用户指南](doc/user_guide.zh_CN.md)或[英文用户指南](doc/user_guide.md)。更多背景可查阅 [API 文档](https://docs.rs/qubit-web)、[历史中文设计记录](doc/2026-10-08-rs-web-design.md)和[生命周期设计摘要](doc/2026-10-09-rs-web-lifecycle-design.en.md)。
+
+## 测试
+
+可运行以下命令检查整个 workspace：
+
+```sh
+cargo test --workspace --all-features --all-targets --locked
+```
+
+## 许可证
+
+本项目采用 Apache License 2.0 授权，完整条款见 [LICENSE](LICENSE)。
+
+## 贡献
+
+欢迎参与贡献。提交 Pull Request 前，请运行 `./.infra/bin/ci-check.sh` 并确认 CI 检查通过。提出改进前可先到 [Issues](https://github.com/qubit-ltd/rs-web/issues) 讨论，也可直接提交 [Pull Request](https://github.com/qubit-ltd/rs-web/pulls)。
+
+## 作者
+
+**Haixing Hu** — [Qubit Co. Ltd.](https://github.com/qubit-ltd)

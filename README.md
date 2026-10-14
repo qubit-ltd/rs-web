@@ -96,15 +96,29 @@ The sample bearer token is `demo-only`; it illustrates a handler check and is no
 
 ## Limits and operational boundaries
 
-- Each `SseConnectionPolicy` and `WsUpgradePolicy` created with `new` or `default` opens an independent capacity domain; cloning a policy shares its domain. Create each policy once in `AppState` and clone it from handlers using `State<AppState>` when routes should share capacity. See the [English user guide](doc/user_guide.md) or [Chinese user guide](doc/user_guide.zh_CN.md) for an example. The per-`WebServer` transport connection limit defaults to 1024 and can be configured with `ServerOptions::with_max_transport_connections`. Transport and short-request concurrency values must be within `1..=tokio::sync::Semaphore::MAX_PERMITS`; out-of-range values return `WebServerError::InvalidConfig`. It covers TLS handshakes and HTTP connection futures. When full, accepting pauses and clients may wait in the operating system backlog or fail to connect; this does not promise an HTTP 503. These policy budgets are separate from the transport limit; SSE remains an HTTP connection.
-- `ControllerRoutes::new()` applies `HttpLimits::default()` to Controller `short` routes: 1 MiB per request body, 256 concurrent requests shared by that builder, and a 30-second processing and response-body deadline. At expiry, the application response body and short-request permit are released without waiting for another body poll. A timeout after response headers can only surface as a body error when the transport polls again; it does not close the connection. Unrepresentable absolute request deadlines are rejected as `WebServerError::InvalidConfig`; an extreme runtime deadline failure returns HTTP 500 with code `invalid_configuration`. Ordinary handler timeouts remain HTTP 504. `with_http_limits` replaces those defaults and must be called before adding Controllers. Controller `sse` and `ws` routes skip the short-request layer. Native Axum routes need an explicit `RequestLimitLayer` on each selected branch; `WebServer` does not install route limits.
-- `ControllerRoutes::add` returns `ControllerRouteError` before registration for duplicate methods, invalid paths, or conflicting route templates such as parameter aliases and overlapping wildcards. Different methods may share the same template; `finish()` returns the Axum `Router` directly.
-- `rest_controller` supports distinct Controller types with the same terminal type name in one module.
-- The default HTTP/1 request-header timeout is 10 seconds and also bounds an HTTP/1 WebSocket upgrade request before its headers arrive. The transport idle timeout defaults to 30 seconds (`ServerOptions::with_transport_idle_timeout` or `transport.idle_timeout_ms`); it closes connections with no active request or response body, including idle HTTP/2 connections, while active requests and SSE bodies keep the connection active.
-- Use `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)` to reserve a managed session before returning the upgrade response. Policy validation uses the final configured field values: `max_connections` must be within `1..=tokio::sync::Semaphore::MAX_PERMITS`; zero returns `WsPolicyError::ZeroLimit`, and a value above that maximum returns `WsPolicyError::ConnectionLimitTooLarge`. Origin is optional by default: requests without Origin proceed to application authentication, while requests with Origin are rejected unless it exactly matches `allowed_origins`. An absent Origin does not authenticate a client. After the peer or session closes, `try_send` returns `Closed`; successful enqueueing alone does not guarantee network delivery. If the application does not read inbound messages and delivery makes no progress within `idle_timeout`, the session closes with WebSocket code `1013` (try again later).
-- `ServerContext::active_sessions()` counts managed SSE sessions and WebSocket upgrades admitted through `on_upgrade`, including pending handshakes. Shutdown waits for HTTP connections and these sessions against one deadline set by `ServerOptions` and exposed through `ServerContext`; WebSocket policies have no separate shutdown timeout. Unrepresentable shutdown deadlines are rejected as `WebServerError::InvalidConfig`; an extreme runtime deadline failure cancels sessions and reclaims connection tasks before returning an error. `ShutdownReport::unfinished_managed_sessions` records sessions remaining at the deadline. Native Axum upgrades and arbitrary application tasks are outside this count.
-- `WebServerError` keeps socket I/O details available through `std::error::Error::source()` while its default `Display` and `Debug` omit the underlying OS error text.
-- Direct public deployment requires trusted TLS. `tls-rustls` supports HTTPS binding; provide valid certificates and private keys, or configure a trusted reverse proxy explicitly. Forwarded headers are not trusted by default.
-- SSE producers can observe disconnect and shutdown cancellation, but event IDs, buffering, persistence, replay, and recovery remain application responsibilities. Closing a connection does not cancel business work already accepted by the application.
+- Controller `short` routes start with `HttpLimits::default()`; native Axum routes need an explicit `RequestLimitLayer` on each selected short-request branch. `WebServer` does not install route limits for a supplied Router.
+- Each new SSE or WebSocket policy owns a separate capacity domain. Clone a policy from shared application state when routes should share that budget. Transport connection limits are separate; SSE also occupies an HTTP connection.
+- Applications own authentication, authorization, business state, and stream persistence or replay. Authenticate before WebSocket upgrade; Origin checks only restrict browser origins. The sample token and unauthenticated shutdown endpoint are loopback demonstrations.
+- HTTPS requires `tls-rustls` and valid certificates, or a trusted reverse proxy configured by the deployer. Shutdown is initiated by the application and follows the server's configured deadline.
 
-For setup, capacity planning, TLS, streaming, and troubleshooting, see the [English user guide](doc/user_guide.md) and [Chinese user guide](doc/user_guide.zh_CN.md). See the [API documentation](https://docs.rs/qubit-web), the [historical Chinese design record](doc/2026-10-08-rs-web-design.md), and the [current lifecycle design summary](doc/2026-10-09-rs-web-lifecycle-design.en.md) for project context.
+See the [English user guide](doc/user_guide.md) or [Chinese user guide](doc/user_guide.zh_CN.md) for limits, TLS setup, lifecycle behavior, and troubleshooting. See the [API documentation](https://docs.rs/qubit-web), [historical Chinese design record](doc/2026-10-08-rs-web-design.md), and [lifecycle design summary](doc/2026-10-09-rs-web-lifecycle-design.en.md) for more.
+
+## Testing
+
+Run the workspace checks used for this crate:
+
+```sh
+cargo test --workspace --all-features --all-targets --locked
+```
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
+
+## Contributing
+
+Contributions are welcome. Before submitting a pull request, run `./.infra/bin/ci-check.sh` and confirm the CI checks pass. Please open an [issue](https://github.com/qubit-ltd/rs-web/issues) to discuss a change or submit a [pull request](https://github.com/qubit-ltd/rs-web/pulls).
+
+## Author
+
+**Haixing Hu** — [Qubit Co. Ltd.](https://github.com/qubit-ltd)
