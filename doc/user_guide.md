@@ -6,14 +6,18 @@ Start with the [English README](../README.md) for project scope and feature sele
 
 ## Prepare settings and start the listener
 
-Add `qubit-web` with the features your service uses. The example below needs JSON and WebSocket support:
+The portable `prompt_stream` scenario imports Axum, `futures-core`, Serde, Tokio, and `qubit-web` directly. Declare each crate your application imports; transitive dependencies of `qubit-web` are not available as direct dependencies in your crate:
 
 ```toml
 [dependencies]
+axum = "0.8"
+futures-core = "0.3"
 qubit-web = { version = "0.2", features = ["json", "ws"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 ```
 
-For HTTPS add `tls-rustls`. Add `config` only if you want `ConfiguredWeb` to parse a `qubit_config::Config` value supplied by your application; it does not load a file or global settings source for you.
+These are the direct dependencies used to move the [`prompt_stream` example](../examples/prompt_stream.rs) into a separate application. To run the repository example itself, use the repository's manifest and the command in [Run, observe, and stop the service](#run-observe-and-stop-the-service). For HTTPS add `tls-rustls`. Add `config` only if you want `ConfiguredWeb` to parse a `qubit_config::Config` value supplied by your application; it does not load a file or global settings source for you. If your application imports `qubit_config::Config` directly, declare `qubit-config` as a direct dependency too.
 
 Choose the listener capacity for each server instance. The default is 1024 transport connections. Set a positive value explicitly when the service's file descriptor, TLS, or memory budget calls for a smaller cap:
 
@@ -101,14 +105,43 @@ fn app_state(server: &WebServer) -> AppState {
 }
 
 async fn progress(State(state): State<AppState>) -> Response {
-    let policy = state.sse.clone();
-    let connection = match policy.begin(&state.context) {
+    let connection = match state.sse.begin(&state.context) {
         Ok(connection) => connection,
         Err(error) => return error.into_response(),
     };
-    // Pass the application's event stream here. Its cancellation token can
-    // stop the producer after disconnect or server shutdown.
-    connection.into_sse(event_stream).into_response()
+    let cancellation = connection.cancellation_token();
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move {
+        for update in ["queued", "working", "complete"] {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => break,
+                result = sender.send(
+                    axum::response::sse::Event::default()
+                        .event("progress")
+                        .data(update),
+                ) => if result.is_err() { break; }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    });
+    connection
+        .into_sse(EventReceiver(receiver))
+        .into_response()
+}
+
+// This adapter is declared in the same application module as `progress`.
+struct EventReceiver(tokio::sync::mpsc::Receiver<axum::response::sse::Event>);
+
+impl futures_core::Stream for EventReceiver {
+    type Item = Result<axum::response::sse::Event, std::convert::Infallible>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.0.poll_recv(cx).map(|event| event.map(Ok))
+    }
 }
 
 async fn websocket(
@@ -116,12 +149,37 @@ async fn websocket(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // Demonstration-only authentication. Replace this check with the
+    // application's authentication and authorization before calling on_upgrade.
+    if headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        != Some("Bearer demo-only")
+    {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
     let policy = state.ws.clone();
-    policy.on_upgrade(ws, &headers, state.context.clone(), |_session| async move {})
+    policy.on_upgrade(ws, &headers, state.context.clone(), |mut session| async move {
+        while let Some(Ok(message)) = session.recv().await {
+            match message {
+                axum::extract::ws::Message::Text(text) => {
+                    if session
+                        .try_send(axum::extract::ws::Message::text(format!("demo echo: {text}")))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                axum::extract::ws::Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    })
 }
 ```
 
-The `event_stream` value represents the application's event stream; the runnable [`prompt_stream` example](../examples/prompt_stream.rs) shows producer construction and cancellation handling. The fragment assumes the existing `server` and an Axum state assembly function. Cloning either policy shares its connection-capacity domain, so all routes using clones draw from one configured allowance. Calling `SseConnectionPolicy::default()` or `WsUpgradePolicy::new()` again creates an independent domain; requests handled by that new instance do not consume the original policy's allowance. These are separate caps: SSE has its own session cap and remains within the HTTP transport cap, while an upgraded WebSocket uses its policy cap after the HTTP upgrade completes.
+The code is an application-module excerpt: it assumes `AppState` and the state assembly function above, and requires `tokio`, `futures-core`, and Axum as direct dependencies. The executable source of truth, including its imports, event producer, route assembly, and `main`, is [`examples/prompt_stream.rs`](../examples/prompt_stream.rs) (`EventReceiver`, `progress`, `websocket`, and `Router::with_state`). `Router::with_state(state)` supplies the single startup-created state instance to these handlers. The example's `Bearer demo-only` check only demonstrates authentication ordering and is not production authentication; replace it with the application's identity and authorization checks. `WsUpgradePolicy::allowed_origins` independently restricts browser origins; an Origin allowlist does not authenticate a client. Cloning either policy shares its connection-capacity domain, so all routes using clones draw from one configured allowance. Calling `SseConnectionPolicy::default()` or `WsUpgradePolicy::new()` again creates an independent domain; requests handled by that new instance do not consume the original policy's allowance. These are separate caps: SSE has its own session cap and remains within the HTTP transport cap, while an upgraded WebSocket uses its policy cap after the HTTP upgrade completes. A successful `try_send` means only that a message entered the outbound queue, not that the network delivered it.
 
 For a configuration-driven service, pass `configured.http_limits()` to `ControllerRoutes::with_http_limits` before adding controllers to replace its default policy, or to `RequestLimitLayer::new` on selected native Axum branches. Controller `sse` and `ws` routes skip the short-request layer. `WebServer` receives a completed Axum `Router` and does not add route limits.
 
@@ -181,7 +239,13 @@ Expect HTTP 413 with the stable `body_too_large` code. The demo does not include
 curl -i http://127.0.0.1:3001/admin/active-sessions
 ```
 
-While an SSE or context-aware WebSocket remains open, the response body is the current count; after it closes, the count should return to zero. The demo SSE path is `/prompt/demo-1/events`. The WebSocket path is `/prompt/demo-1/ws`; its `Bearer demo-only` check is a placeholder only.
+While an SSE or context-aware WebSocket remains open, the response body is the current count; after it closes, the count should return to zero. The demo SSE path is `/prompt/demo-1/events`. Observe its named progress events with:
+
+```sh
+curl -N http://127.0.0.1:3001/prompt/demo-1/events
+```
+
+The response sends `queued`, `working`, and `complete` as `progress` events. The WebSocket path is `/prompt/demo-1/ws`; connect with `Authorization: Bearer demo-only` and the allowed Origin `http://localhost:3000`, then send a text message to receive `demo echo: <message>`. A missing or different bearer value is rejected with HTTP 401 before upgrade. Both credentials and the unrestricted shutdown endpoint are for this loopback demonstration only; replace authentication and protect shutdown in a real service.
 
 Stop the demo through its explicit endpoint:
 

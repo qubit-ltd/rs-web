@@ -2,18 +2,36 @@
 
 本文面向使用 `qubit-web` 0.2.0（Rust 1.94 或更新版本）的 Rust 服务开发者。我们用一个具体服务串起完整流程：接收有大小上限的 JSON 请求，通过 SSE 推送进度，可选地提供 WebSocket 回显，并由宿主控制关闭。示例里的 prompt 和 token 都是演示数据；它不会运行 Agent，演示 token 也不能用于生产认证。
 
-先看[中文版 README](../README.zh_CN.md)了解项目范围和 feature 选择；也可查看[英文 README](../README.md)。本文聚焦接入、运行和排障；[英文指南](user_guide.md)介绍同一场景。公开 API 细节可查[在线 API 文档](https://docs.rs/qubit-web)和 crate Rustdoc。
+先看[中文版 README](../README.zh_CN.md)了解项目范围和 feature 选择；也可查看[英文 README](../README.md)。阅读顺序是：准备可移植依赖、运行完整示例确认响应，再按需把路由和长连接 policy 接入自己的 Axum 应用，最后根据验证结果和故障现象排查。公开 API 细节可查[在线 API 文档](https://docs.rs/qubit-web)和 crate Rustdoc；[英文指南](user_guide.md)记录同一组事实。
 
 ## 配置并启动监听器
 
-按服务所需功能添加 `qubit-web`。下面的示例需要 JSON 和 WebSocket：
+如果要把 `prompt_stream` 示例移植到独立项目，直接依赖必须覆盖示例实际导入的 crate。以下版本和 feature 与仓库示例一致：
 
 ```toml
 [dependencies]
+axum = "0.8"
+futures-core = "0.3"
 qubit-web = { version = "0.2", features = ["json", "ws"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 ```
 
-启用 HTTPS 时再加 `tls-rustls`。只有希望把应用显式提供的 `qubit_config::Config` 转成服务配置时才需要 `config`；`ConfiguredWeb` 不会替应用读取文件或全局配置。
+这里列的是移植场景所需的直接依赖；只运行仓库自带示例时，Cargo 会使用仓库 manifest 中已有的依赖。启用 HTTPS 时按需给 `qubit-web` 增加 `tls-rustls`。只有希望把应用显式提供的 `qubit_config::Config` 转成服务配置时才需要 `config`；若代码直接引用 `qubit_config::Config`，还要在应用 manifest 中单独声明 `qubit-config`。`ConfiguredWeb` 不会替应用读取文件或全局配置。
+
+先运行仓库里的完整示例，确认服务能启动并观察最小成功结果：
+
+```sh
+cargo run --example prompt_stream --features "json ws"
+```
+
+服务监听 loopback 地址，默认是 `127.0.0.1:3001`。另开终端提交 JSON：
+
+```sh
+curl -i -H 'content-type: application/json' -d '{"prompt":"demo"}' http://127.0.0.1:3001/prompt
+```
+
+预期为 HTTP 200，响应 JSON 含 `job_id: "demo-1"` 和提交的 prompt。完整响应式流与关闭检查见后文“运行、观察和关闭”；完成这一步后，再按下文将 handler、state 和连接策略接入自己的 Router。
 
 连接额度按每个服务实例分别计算。默认上限是 1024；文件描述符、TLS 握手成本或内存预算较紧时，可以调小，但必须大于零：
 
@@ -75,13 +93,16 @@ let app = Router::new()
 
 ### 在应用状态中共享 SSE 和 WebSocket policy
 
-应用启动时各创建一次长连接 policy，放进 Axum 的 state。handler 从 `State<AppState>` 取出后克隆，再调用策略：
+先运行 [`examples/prompt_stream.rs`](../examples/prompt_stream.rs) 看完整装配，再按应用职责移植。该示例启动时各创建一次长连接 policy，放进 `AppState`，最后由 `Router::with_state(state)` 提供给 handler。handler 从 `State<AppState>` 取出 policy 的克隆；克隆共享同一连接额度，重新调用 `default()` 或 `new()` 则会创建独立额度。
 
 ```rust,ignore
 use axum::extract::State;
 use axum::extract::WebSocketUpgrade;
 use axum::http::HeaderMap;
+use axum::http::StatusCode;
+use axum::http::header;
 use axum::response::{IntoResponse, Response};
+use axum::extract::ws::Message;
 use qubit_web::{ServerContext, SseConnectionPolicy, WebServer, WsUpgradePolicy};
 
 #[derive(Clone)]
@@ -101,13 +122,25 @@ fn app_state(server: &WebServer) -> AppState {
 }
 
 async fn progress(State(state): State<AppState>) -> Response {
-    let policy = state.sse.clone();
-    let connection = match policy.begin(&state.context) {
+    let connection = match state.sse.begin(&state.context) {
         Ok(connection) => connection,
         Err(error) => return error.into_response(),
     };
-    // 在这里传入应用的事件流。断连或停服时，取消令牌可通知生产任务停止。
-    connection.into_sse(event_stream).into_response()
+    let cancellation = connection.cancellation_token();
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move {
+        for data in ["queued", "working", "complete"] {
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                result = sender.send(axum::response::sse::Event::default()
+                    .event("progress").data(data)) => {
+                    if result.is_err() { break; }
+                }
+            }
+        }
+    });
+    // 需同时复制示例中的 EventReceiver 类型及其 Stream 实现。
+    connection.into_sse(EventReceiver(receiver)).into_response()
 }
 
 async fn websocket(
@@ -115,12 +148,31 @@ async fn websocket(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let policy = state.ws.clone();
-    policy.on_upgrade(ws, &headers, state.context.clone(), |_session| async move {})
+    // 示例占位认证：应用应替换为自己的身份认证，并在 upgrade 之前完成。
+    if headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
+        != Some("Bearer demo-only")
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    state.ws.clone().on_upgrade(ws, &headers, state.context.clone(), |mut session| async move {
+        while let Some(Ok(message)) = session.recv().await {
+            match message {
+                Message::Text(text) => {
+                    if session.try_send(Message::text(format!("demo echo: {text}"))).is_err() {
+                        break;
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    })
 }
 ```
 
-`event_stream` 表示应用自己的事件流；[`prompt_stream 示例`](../examples/prompt_stream.rs)展示了如何创建生产任务并响应取消。此片段假设应用已有 `server`，并会在组装 Axum state 时调用 `app_state`。克隆 policy 会共享同一个连接额度，因此多个路由取出的克隆共同计数。再次调用 `SseConnectionPolicy::default()` 或 `WsUpgradePolicy::new()` 则会建立独立额度，新实例接纳的连接不会占用原 policy 的额度。两类额度也各自独立：SSE 有自己的会话上限，同时仍占用 HTTP transport 额度；WebSocket 完成 HTTP upgrade 后改由其 policy 的会话上限管理。
+SSE handler 先通过 `begin` 登记会话，再把取消令牌交给事件生产任务；`EventReceiver` 将 mpsc 接收端适配为 `Stream`，`into_sse` 负责生成响应。客户端断开或服务关闭时，生产者收到取消信号并停止。上面的片段省略了 `EventReceiver` 的 `Stream` 实现，完整代码见示例链接。WebSocket handler 必须先检查 `Authorization`，验证失败返回 401，只有通过后才调用 `on_upgrade`。升级后的任务持续 `recv()` 入站消息，用 `try_send()` 回显文本；对端关闭或出站队列无法接纳消息时结束循环。示例中的 `Bearer demo-only` 只是演示占位符，不能提供生产认证。
+
+示例把 `http://localhost:3000` 配置为 `WsUpgradePolicy::allowed_origins` 的 Origin allowlist。Origin 检查只约束浏览器来源，不能代替身份认证；应用应在 `on_upgrade` 前认证，并按自身部署设置允许的来源。SSE 有独立会话上限，同时仍占用 HTTP transport 额度；WebSocket 完成 HTTP upgrade 后改由其 policy 的会话上限管理。
 
 使用配置适配器时，把 `configured.http_limits()` 在添加 Controller 前传给 `ControllerRoutes::with_http_limits`，即可替换 Controller 短路由默认策略；原生 Axum 短路由则在选定分支创建 `RequestLimitLayer`。Controller 的 `sse` 和 `ws` 路由跳过短请求 layer。`WebServer` 接收完整的 Axum `Router`，不会为路由添加限额。
 
@@ -156,19 +208,7 @@ assert!(report.graceful);
 
 关闭开始后，服务会原子地禁止新的受管 SSE/WS 会话登记、停止接收新连接，并通知现有会话。HTTP 连接和已登记会话共用同一个关闭截止时间，该期限由 `ServerOptions` 设置并经 `ServerContext` 提供给 WebSocket 会话；`WsUpgradePolicy` 不单独设置停服期限。无法表示的停服期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，服务先取消会话并回收连接任务，再返回错误。只有两者都在期限内结束，`graceful` 才为 `true`。超时则由 `unfinished_managed_sessions` 记录截止时仍未结束的受管会话数。该报告不表示任意应用后台任务都已停止；`forced_connections` 为 `None`，因为 Axum 无法提供可证明的强制关闭数量。
 
-运行演示服务：
-
-```sh
-cargo run --example prompt_stream --features "json ws"
-```
-
-它会打印 loopback 地址，默认是 `127.0.0.1:3001`。请求普通接口：
-
-```sh
-curl -i -H 'content-type: application/json' -d '{"prompt":"demo"}' http://127.0.0.1:3001/prompt
-```
-
-成功时返回 HTTP 200，JSON 中的 `job_id` 是 `demo-1`。下面发送超过 1 MiB 的请求体，`Content-Length` 会让 middleware 在 JSON 解码前返回 413：
+服务按前文命令启动后，下面发送超过 1 MiB 的请求体，`Content-Length` 会让 middleware 在 JSON 解码前返回 413：
 
 ```sh
 head -c 1048577 /dev/zero | curl -i -H 'content-type: application/json' --data-binary @- http://127.0.0.1:3001/prompt
@@ -180,7 +220,7 @@ head -c 1048577 /dev/zero | curl -i -H 'content-type: application/json' --data-b
 curl -i http://127.0.0.1:3001/admin/active-sessions
 ```
 
-SSE 或 context-aware WebSocket 未关闭时，响应正文是当前计数；会话结束后应回到 0。演示 SSE 地址为 `/prompt/demo-1/events`，WebSocket 地址为 `/prompt/demo-1/ws`。其 `Bearer demo-only` 检查只是占位示范。
+SSE 地址为 `/prompt/demo-1/events`，连接后依次收到 `progress` 事件及 `queued`、`working`、`complete` 数据。WebSocket 地址为 `/prompt/demo-1/ws`：带 `Authorization: Bearer demo-only` 才会进入升级流程，文本消息会收到 `demo echo: ...` 回显；缺少或错误 token 时返回 401。该 token 是占位示范，Origin allowlist 也只限制浏览器来源，两者都不能代替应用的生产身份认证。若已添加前述 context-aware 活跃数诊断路由，SSE 或 WebSocket 未关闭时响应正文是当前计数；会话结束后应回到 0。
 
 向演示服务发起关闭：
 
