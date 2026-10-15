@@ -46,7 +46,7 @@ required-features = ["tls-rustls", "ws"]
 
 [[test]]
 name = "integration_tests"
-required-features = ["json", "tls-rustls", "ws"]
+required-features = ["json", "tls-rustls", "ws", "config"]
 
 [[test]]
 name = "json_limits_tests"
