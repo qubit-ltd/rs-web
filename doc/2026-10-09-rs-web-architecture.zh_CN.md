@@ -38,7 +38,7 @@
 
 ## 请求预算与长连接流
 
-Controller 的 `sse`/`ws` 长连接路由使用独立于短请求 `LimitState` 的 `StreamAdmissionState`。每个接纳状态域默认每请求缓冲 1 MiB、同时接纳 256 个请求，并在 handler 生成响应头前限时 10 秒；请求体缓冲理论上限为每个状态域 256 MiB，另加请求和运行时开销。添加 Controller 前可用 `with_stream_admission_limits` 替换 builder 的接纳预算。原生 Axum SSE/WS 分支必须显式安装 `StreamAdmissionLayer`；通过 `StreamAdmissionState` 和 `from_state` 共享多个分支的容量。新 layer 会创建独立状态域。请求体超限、读取失败、容量耗尽和接纳超时分别返回 413 `body_too_large`、400 `body_read_failed`、503 `capacity_exceeded` 和 504 `request_timeout`。期限止于 handler 返回响应头，不覆盖 SSE 响应流或 WebSocket 会话。
+Controller 的 `sse`/`ws` 长连接路由使用独立于短请求 `LimitState` 的 `StreamAdmissionState`。每个接纳状态域默认每请求缓冲 1 MiB、同时接纳 256 个请求，并在 handler 生成响应头前限时 10 秒；请求体缓冲理论上限为每个状态域 256 MiB，另加请求和运行时开销。添加 Controller 前可用 `with_stream_admission_limits` 替换 builder 的接纳预算。原生 Axum SSE/WS 分支必须显式安装 `StreamAdmissionLayer`；通过 `StreamAdmissionState` 和 `from_state` 共享多个分支的容量。新 layer 会创建独立状态域。请求体超限、读取失败、容量耗尽和接纳超时分别返回 413 `body_too_large`、400 `body_read_failed`、503 `capacity_exceeded` 和 504 `request_timeout`。运行时无法表示绝对接纳期限时，layer 返回 HTTP 500 `invalid_configuration`。期限止于 handler 返回响应头，不覆盖 SSE 响应流或 WebSocket 会话。
 
 `HttpLimits::default()` 为每个请求体设置 1 MiB 上限，为并发短请求设置 256 个额度，并为 handler 工作及响应体传输设置 30 秒期限。`ControllerRoutes::new()` 默认将此策略用于 Controller 的 `short` 路由；`with_http_limits` 替换默认值，后续添加的路由使用新策略。Controller 的 `sse` 和 `ws` 路由使用流式接纳策略，不使用短请求 layer。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 按原样服务 Router，不添加路由限额。中间件在选定路由读取请求体时累计字节；不会为了执行限制而读取本来未消费的请求体。容量耗尽、请求体超限和处理超时都有稳定的拒绝结果。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，layer 返回 HTTP 500 和代码 `invalid_configuration`。普通 handler 超时仍返回 `504 Gateway Timeout`。如果响应头已发送后期限到达，会立即丢弃应用响应体并归还短请求许可，但无法更改响应状态；body error 只会在传输再次轮询响应体时报告。传输背压可能推迟客户端观察到错误的时间；该期限不会关闭连接，TCP/HTTP/2 连接仍受独立传输策略管理。
 

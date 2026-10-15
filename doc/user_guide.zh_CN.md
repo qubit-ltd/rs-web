@@ -116,6 +116,7 @@ let app = Router::new()
 | `400` `body_read_failed` | 读取请求体失败；检查客户端或代理的请求传输，确认后再决定是否重试。 |
 | `503` `capacity_exceeded` | 此状态域的接纳许可已用尽；检查状态共享方式、容量配置和请求负载。 |
 | `504` `request_timeout` | 请求体缓冲或 handler 生成响应头超时；排查慢上传和 handler 处理耗时。 |
+| `500` `invalid_configuration` | 运行时无法表示绝对接纳期限；检查期限配置，并将其作为配置或运行时异常排查。 |
 
 ### 在应用状态中共享 SSE 和 WebSocket policy
 

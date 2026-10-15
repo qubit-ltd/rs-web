@@ -102,6 +102,7 @@ Defaults per stream-admission state are 1 MiB per buffered body, 256 concurrent 
 | `400` `body_read_failed` | The request body could not be read; inspect the client/proxy request delivery and retry only when appropriate. |
 | `503` `capacity_exceeded` | All admission permits in this state domain are occupied; share state as intended or tune capacity and load. |
 | `504` `request_timeout` | Body buffering or handler response-header creation missed the admission deadline; inspect slow uploads and handler work. |
+| `500` `invalid_configuration` | The absolute admission deadline could not be represented at runtime; inspect the configured timeout and report a configuration/runtime issue. |
 
 ### Share SSE and WebSocket policies through application state
 

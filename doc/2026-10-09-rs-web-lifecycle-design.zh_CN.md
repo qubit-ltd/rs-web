@@ -4,7 +4,7 @@
 
 ## 长连接请求接纳
 
-Controller 的 `sse`/`ws` 路由和原生 Axum 长连接路由，应在启动流或 upgrade 前限制请求接纳。Controller 路由共用 builder 创建的 `StreamAdmissionState`；原生 Axum 路由需显式安装 `StreamAdmissionLayer`，多个分支要共享容量时可通过 `StreamAdmissionState`/`from_state` 共用状态。每个状态域默认每个请求体缓冲 1 MiB、同时接纳 256 个请求，且响应头产生前的期限为 10 秒；请求体缓冲理论上限为每个状态域 256 MiB，另有请求和运行时开销。中间件会在 handler 执行前收齐完整请求体；413 `body_too_large`、400 `body_read_failed`、503 `capacity_exceeded` 和 504 `request_timeout` 分别表示请求体超限、读取失败、容量耗尽和接纳超时。该期限不覆盖 SSE 响应体或 WebSocket 会话。此接纳预算独立于短请求 `RequestLimitLayer`，也独立于下文的 SSE/WebSocket 会话策略。
+Controller 的 `sse`/`ws` 路由和原生 Axum 长连接路由，应在启动流或 upgrade 前限制请求接纳。Controller 路由共用 builder 创建的 `StreamAdmissionState`；原生 Axum 路由需显式安装 `StreamAdmissionLayer`，多个分支要共享容量时可通过 `StreamAdmissionState`/`from_state` 共用状态。每个状态域默认每个请求体缓冲 1 MiB、同时接纳 256 个请求，且响应头产生前的期限为 10 秒；请求体缓冲理论上限为每个状态域 256 MiB，另有请求和运行时开销。中间件会在 handler 执行前收齐完整请求体；413 `body_too_large`、400 `body_read_failed`、503 `capacity_exceeded` 和 504 `request_timeout` 分别表示请求体超限、读取失败、容量耗尽和接纳超时。运行时无法表示绝对接纳期限时，layer 返回 HTTP 500 `invalid_configuration`。该期限不覆盖 SSE 响应体或 WebSocket 会话。此接纳预算独立于短请求 `RequestLimitLayer`，也独立于下文的 SSE/WebSocket 会话策略。
 
 ## 受管会话登记与停服
 

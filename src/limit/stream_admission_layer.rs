@@ -92,7 +92,8 @@ impl StreamAdmissionLayer {
     /// 503 (`capacity_exceeded`), and an admission timeout returns HTTP 504
     /// (`request_timeout`). The timeout covers body buffering and the handler
     /// up to response headers only; the response body is not timed by this
-    /// layer.
+    /// layer. If the absolute deadline cannot be represented at runtime, the
+    /// layer returns HTTP 500 (`invalid_configuration`).
     pub fn from_state<S>(
         state: StreamAdmissionState,
     ) -> middleware::FromFnLayer<
