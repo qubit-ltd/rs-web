@@ -184,7 +184,9 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
                 }
             } else {
                 quote! {
-                    let route = route.layer(::qubit_web::diagnostic::DiagnosticLayer::new());
+                    let route = route
+                        .layer(::qubit_web::StreamAdmissionLayer::from_state::<#state_type_ref>(stream_state.clone()))
+                        .layer(::qubit_web::diagnostic::DiagnosticLayer::new());
                 }
             };
             let filters = route.methods.iter().map(|verb| method_filter(verb));
@@ -228,6 +230,7 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
                     self: ::std::sync::Arc<Self>,
                     mut router: ::axum::Router<#state_type>,
                     limit_state: ::qubit_web::limit::LimitState,
+                    stream_state: ::qubit_web::limit::StreamAdmissionState,
                 ) -> ::axum::Router<#state_type> {
                     #(#registrations)*
                     router

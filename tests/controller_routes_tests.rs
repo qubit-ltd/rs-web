@@ -6,6 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -21,8 +22,10 @@ use axum::extract::State;
 use axum::http::Method;
 use axum::http::Request;
 use axum::http::StatusCode;
+use axum::response::Response;
 use axum::routing::get;
 use qubit_web::HttpLimits;
+use qubit_web::StreamAdmissionLimits;
 use qubit_web::mvc::ControllerRouteError;
 use qubit_web::mvc::ControllerRoutes;
 use qubit_web::rest_controller;
@@ -96,6 +99,14 @@ impl Users {
         "socket"
     }
 
+    #[route("/streaming-events", method = "GET", kind = "sse")]
+    async fn streaming_events(&self) -> Response {
+        Response::new(Body::from_stream(futures_util::stream::once(async {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            Ok::<_, Infallible>(Bytes::from_static(b"events"))
+        })))
+    }
+
     #[post_mapping("/short-payload")]
     async fn short_payload(&self, body: Bytes) -> String {
         String::from_utf8_lossy(&body).into_owned()
@@ -106,9 +117,9 @@ impl Users {
         String::from_utf8_lossy(&body).into_owned()
     }
 
-    #[route("/socket-payload", method = "POST", kind = "ws")]
-    async fn socket_payload(&self, body: Bytes) -> String {
-        String::from_utf8_lossy(&body).into_owned()
+    #[route("/socket", method = "GET", kind = "ws")]
+    async fn socket(&self) -> &'static str {
+        "socket"
     }
 
     #[qubit_web::get("/short-alias")]
@@ -143,13 +154,14 @@ impl BlockingController {
 }
 
 #[tokio::test]
-async fn controller_short_routes_enforce_configured_body_limit_but_stream_routes_skip_it() {
+async fn controller_short_and_stream_routes_use_independent_body_limits() {
     let users = Arc::new(Users {
         prefix: "user".to_owned(),
     });
     let limits = HttpLimits::default().with_max_body_bytes(1).unwrap();
     let controller = ControllerRoutes::new()
         .with_http_limits(limits)
+        .with_stream_admission_limits(StreamAdmissionLimits::default().with_max_body_bytes(1).unwrap())
         .add(users)
         .unwrap()
         .finish();
@@ -168,30 +180,30 @@ async fn controller_short_routes_enforce_configured_body_limit_but_stream_routes
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-    for path in ["/users/event-payload", "/users/socket-payload"] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(path)
-                    .body(Body::from("xx"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "{path}");
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"xx", "{path}");
-    }
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/users/event-payload")
+                .body(Body::from("xx"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]
-async fn controller_stream_routes_skip_short_request_deadline() {
+async fn controller_admission_deadline_covers_headers_but_not_stream_response_body() {
     let controller = ControllerRoutes::new()
         .with_http_limits(
             HttpLimits::default()
                 .with_request_timeout(Duration::from_millis(5))
+                .unwrap(),
+        )
+        .with_stream_admission_limits(
+            StreamAdmissionLimits::default()
+                .with_admission_timeout(Duration::from_millis(5))
                 .unwrap(),
         )
         .add(Arc::new(Users {
@@ -208,8 +220,100 @@ async fn controller_stream_routes_skip_short_request_deadline() {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT, "{path}");
     }
+
+    let response = app
+        .oneshot(Request::get("/users/streaming-events").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+    assert_eq!(&body[..], b"events");
+}
+
+#[tokio::test]
+async fn controller_stream_admission_rejects_before_handler_and_ws_get_route_remains_available() {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    struct AdmissionController {
+        calls: Arc<AtomicUsize>,
+        started: Arc<Semaphore>,
+        release: Arc<Semaphore>,
+    }
+    #[rest_controller("/admission")]
+    impl AdmissionController {
+        #[route("/sse", method = "POST", kind = "sse")]
+        async fn sse(&self, body: Bytes) -> String {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            String::from_utf8_lossy(&body).into_owned()
+        }
+
+        #[route("/slow-sse", method = "POST", kind = "sse")]
+        async fn slow_sse(&self) -> &'static str {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+            "accepted"
+        }
+
+        #[route("/ws", method = "GET", kind = "ws")]
+        async fn ws(&self) -> &'static str {
+            "ws route"
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let routes = ControllerRoutes::new()
+        .with_stream_admission_limits(
+            StreamAdmissionLimits::default()
+                .with_max_body_bytes(1)
+                .unwrap()
+                .with_max_concurrent_admissions(1)
+                .unwrap(),
+        )
+        .add(Arc::new(AdmissionController {
+            calls: calls.clone(),
+            started: started.clone(),
+            release: release.clone(),
+        }))
+        .unwrap()
+        .finish();
+    let app = Router::new().merge(routes).with_state(AppState("state"));
+    let rejected = app
+        .clone()
+        .oneshot(Request::post("/admission/sse").body(Body::from("xx")).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let first_app = app.clone();
+    let first = tokio::spawn(async move {
+        first_app
+            .oneshot(Request::post("/admission/slow-sse").body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    });
+    started.acquire().await.unwrap().forget();
+    let exhausted = app
+        .clone()
+        .oneshot(Request::post("/admission/sse").body(Body::from("x")).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(exhausted.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    release.add_permits(1);
+    assert_eq!(first.await.unwrap().status(), StatusCode::OK);
+
+    let ws = app
+        .oneshot(Request::get("/admission/ws").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(ws.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -473,7 +577,12 @@ fn manually_declared_invalid_path_returns_invalid_path_error() {
             &ROUTES
         }
 
-        fn register(self: Arc<Self>, router: Router<()>, _: qubit_web::limit::LimitState) -> Router<()> {
+        fn register(
+            self: Arc<Self>,
+            router: Router<()>,
+            _: qubit_web::limit::LimitState,
+            _: qubit_web::limit::StreamAdmissionState,
+        ) -> Router<()> {
             INVALID_PATH_REGISTER_CALLED.store(true, Ordering::Relaxed);
             router
         }
