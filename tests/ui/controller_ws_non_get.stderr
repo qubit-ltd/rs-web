@@ -1,0 +1,5 @@
+error: WebSocket route kind requires GET
+  --> tests/ui/controller_ws_non_get.rs:14:5
+   |
+14 |     #[post_mapping("/ws", kind = "ws")]
+   |     ^

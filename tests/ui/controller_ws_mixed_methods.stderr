@@ -1,0 +1,5 @@
+error: WebSocket route kind requires GET
+  --> tests/ui/controller_ws_mixed_methods.rs:14:5
+   |
+14 |     #[route("/ws", method = "GET", method = "POST", kind = "ws")]
+   |     ^
