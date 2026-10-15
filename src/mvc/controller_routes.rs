@@ -170,7 +170,12 @@ where
             }
             self.declared.entry(route.path()).or_default().insert(route.method());
         }
-        self.router = C::register(controller, self.router, self.limit_state.clone(), self.stream_state.clone());
+        self.router = C::register(
+            controller,
+            self.router,
+            self.limit_state.clone(),
+            self.stream_state.clone(),
+        );
         Ok(self)
     }
 

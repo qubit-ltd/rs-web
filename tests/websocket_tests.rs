@@ -19,15 +19,15 @@ use axum::extract::WebSocketUpgrade;
 use axum::extract::ws::Message;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
-use axum::response::Response;
 use axum::response::IntoResponse;
+use axum::response::Response;
 use axum::routing::get;
-use qubit_web::mvc::ControllerRoutes;
-use qubit_web::rest_controller;
 use qubit_web::ServerContext;
 use qubit_web::ServerOptions;
 use qubit_web::ShutdownReport;
 use qubit_web::WebServer;
+use qubit_web::mvc::ControllerRoutes;
+use qubit_web::rest_controller;
 
 type RegisteredCheckpoint = Arc<Mutex<Option<oneshot::Sender<usize>>>>;
 type DelayedUpgradeChannels = (

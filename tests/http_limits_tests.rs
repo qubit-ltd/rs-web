@@ -177,11 +177,7 @@ async fn record_side_effect_before_reading(
     mut request: axum::extract::Request,
 ) -> &'static str {
     count.0.fetch_add(1, Ordering::SeqCst);
-    while let Some(frame) = std::future::poll_fn(|context| {
-        Pin::new(request.body_mut()).poll_frame(context)
-    })
-    .await
-    {
+    while let Some(frame) = std::future::poll_fn(|context| Pin::new(request.body_mut()).poll_frame(context)).await {
         match frame {
             Ok(frame) => {
                 let _ = frame.into_data();
@@ -206,10 +202,7 @@ async fn streamed_body_limit_can_reject_after_handler_side_effect() {
         poll_count: Arc::new(AtomicUsize::new(0)),
     });
 
-    let response = app
-        .oneshot(Request::post("/").body(body).unwrap())
-        .await
-        .unwrap();
+    let response = app.oneshot(Request::post("/").body(body).unwrap()).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(side_effects.load(Ordering::SeqCst), 1);
@@ -230,12 +223,7 @@ async fn declared_body_limit_rejects_before_handler_side_effect() {
     });
 
     let response = app
-        .oneshot(
-            Request::post("/")
-                .header(CONTENT_LENGTH, "5")
-                .body(body)
-                .unwrap(),
-        )
+        .oneshot(Request::post("/").header(CONTENT_LENGTH, "5").body(body).unwrap())
         .await
         .unwrap();
 
@@ -260,10 +248,7 @@ async fn unconsumed_oversized_body_is_not_polled_by_request_limit() {
             HttpLimits::default().with_max_body_bytes(4).unwrap(),
         ));
 
-    let response = app
-        .oneshot(Request::post("/").body(body).unwrap())
-        .await
-        .unwrap();
+    let response = app.oneshot(Request::post("/").body(body).unwrap()).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(poll_count.load(Ordering::SeqCst), 0);

@@ -192,10 +192,7 @@ async fn controller_short_and_stream_routes_use_independent_body_limits() {
         .await
         .unwrap();
     assert_eq!(accepted_short.status(), StatusCode::OK);
-    assert_eq!(
-        axum::body::to_bytes(accepted_short.into_body(), 16).await.unwrap(),
-        "x"
-    );
+    assert_eq!(axum::body::to_bytes(accepted_short.into_body(), 16).await.unwrap(), "x");
 
     let accepted = app
         .clone()

@@ -94,8 +94,7 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
             if let Some(verb) = marker_verb(&name) {
                 let mapping = parse2::<MappingArgs>(attr.meta.require_list()?.tokens.clone())?;
                 let (_, kind) = parse_options(mapping.options, false)?;
-                let route =
-                    make_route(&prefix.value(), mapping.path, vec![verb.to_owned()], kind)?;
+                let route = make_route(&prefix.value(), mapping.path, vec![verb.to_owned()], kind)?;
                 validate_websocket_methods(&route.methods, &route.kind, attr.span())?;
                 routes.push(route);
             } else if name == "route" {
