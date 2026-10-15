@@ -2,6 +2,10 @@
 
 > 日期：2026-10-09。本文记录 `qubit-web` 0.2.0 的现行合同。接入步骤见[中文用户指南](user_guide.zh_CN.md)和[英文用户指南](user_guide.md)；[2026-10-08 设计记录](2026-10-08-rs-web-design.md)属于历史文档，其中部分 API 草案已被取代。
 
+## 长连接请求接纳
+
+Controller 的 `sse`/`ws` 路由和原生 Axum 长连接路由，应在启动流或 upgrade 前限制请求接纳。Controller 路由共用 builder 创建的 `StreamAdmissionState`；原生 Axum 路由需显式安装 `StreamAdmissionLayer`，多个分支要共享容量时可通过 `StreamAdmissionState`/`from_state` 共用状态。每个状态域默认每个请求体缓冲 1 MiB、同时接纳 256 个请求，且响应头产生前的期限为 10 秒；请求体缓冲理论上限为每个状态域 256 MiB，另有请求和运行时开销。中间件会在 handler 执行前收齐完整请求体；413 `body_too_large`、400 `body_read_failed`、503 `capacity_exceeded` 和 504 `request_timeout` 分别表示请求体超限、读取失败、容量耗尽和接纳超时。该期限不覆盖 SSE 响应体或 WebSocket 会话。此接纳预算独立于短请求 `RequestLimitLayer`，也独立于下文的 SSE/WebSocket 会话策略。
+
 ## 受管会话登记与停服
 
 `ServerContext::try_register_session()` 会在一个原子操作中登记会话；停服开始后，新的登记失败。`active_sessions()` 包含受管 SSE，以及通过 `WsUpgradePolicy::on_upgrade` 接纳的 WebSocket；即使升级响应尚未完成，计数也已增加。停服后，新的 SSE/WS 接纳会被拒绝。普通 HTTP 请求、原生 Axum upgrade 和任意应用后台任务不属于受管会话。

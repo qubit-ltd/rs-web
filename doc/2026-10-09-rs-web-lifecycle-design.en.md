@@ -2,6 +2,10 @@
 
 > Date: 2026-10-09. This summary describes the current `qubit-web` 0.2.0 contract. For operational steps, see the [English user guide](user_guide.md) and [Chinese user guide](user_guide.zh_CN.md). The [2026-10-08 design record](2026-10-08-rs-web-design.md) is historical and includes superseded API proposals.
 
+## Long-lived request admission
+
+Controller `sse`/`ws` routes and native Axum long-lived routes need bounded request admission before a stream or upgrade starts. Controller routes share a builder-owned `StreamAdmissionState`; native Axum routes install `StreamAdmissionLayer` explicitly, using `StreamAdmissionState`/`from_state` when branches should share capacity. Each state domain defaults to 1 MiB per buffered body, 256 concurrent admissions, and a 10-second deadline through response headers. That permits up to 256 MiB of request-body buffers per domain plus request/runtime overhead. The middleware buffers the complete request before the handler; 413 `body_too_large`, 400 `body_read_failed`, 503 `capacity_exceeded`, and 504 `request_timeout` identify size, read, capacity, and deadline failures. The deadline does not cover an SSE response body or WebSocket session. This admission budget is separate from short-request `RequestLimitLayer` and from the SSE/WebSocket session policies below.
+
 ## Managed session admission and shutdown
 
 `ServerContext::try_register_session()` atomically reserves a managed session unless shutdown has begun. `active_sessions()` includes managed SSE connections and WebSocket upgrades admitted through `WsUpgradePolicy::on_upgrade`, even while the upgrade response is pending. SSE and WS admission after shutdown begins is rejected. Ordinary HTTP requests, native Axum upgrades, and arbitrary application background tasks are not managed sessions.

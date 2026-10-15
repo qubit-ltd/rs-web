@@ -33,7 +33,8 @@ pub type StreamAdmissionFuture = Pin<Box<dyn Future<Output = Response> + Send>>;
 pub type StreamAdmissionMiddleware = fn(State<StreamAdmissionState>, Request<Body>, Next) -> StreamAdmissionFuture;
 
 /// Creates middleware that buffers request bodies before invoking a long-lived
-/// route handler. The deadline ends when response headers are produced.
+/// route handler. The deadline ends when response headers are produced; it
+/// does not cover streaming the response body or a WebSocket session.
 #[must_use]
 pub struct StreamAdmissionLayer;
 
@@ -57,6 +58,10 @@ impl StreamAdmissionLayer {
     ///
     /// An Axum middleware layer that buffers the complete request body before
     /// running the handler and holds a permit until response headers exist.
+    /// With default limits, the body is at most 1 MiB and up to 256 admissions
+    /// share the layer's state domain, for a theoretical body-buffer budget of
+    /// 256 MiB plus request/runtime overhead. Independent layers have
+    /// independent budgets.
     #[allow(clippy::new_ret_no_self)]
     pub fn new<S>(
         limits: super::stream_admission_limits::StreamAdmissionLimits,
@@ -81,6 +86,13 @@ impl StreamAdmissionLayer {
     /// # Returns
     ///
     /// An Axum middleware layer reusing the supplied capacity domain.
+    ///
+    /// Oversized bodies return HTTP 413 (`body_too_large`), body read failures
+    /// return HTTP 400 (`body_read_failed`), exhausted capacity returns HTTP
+    /// 503 (`capacity_exceeded`), and an admission timeout returns HTTP 504
+    /// (`request_timeout`). The timeout covers body buffering and the handler
+    /// up to response headers only; the response body is not timed by this
+    /// layer.
     pub fn from_state<S>(
         state: StreamAdmissionState,
     ) -> middleware::FromFnLayer<

@@ -87,9 +87,9 @@ where
     /// Replaces the default finite limits for all short routes added to this
     /// builder afterward.
     ///
-    /// SSE and WebSocket routes keep the same diagnostics but skip the
-    /// short-request body, concurrency, and deadline limits. Configure this
-    /// before adding Controllers so their routes share one concurrency limit.
+    /// SSE and WebSocket routes use their separate stream-admission limits.
+    /// Configure this before adding Controllers so their short routes share
+    /// one concurrency limit.
     ///
     /// # Parameters
     ///

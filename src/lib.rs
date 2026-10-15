@@ -15,7 +15,12 @@
 //! use qubit_web::{ServerOptions, WebServer};
 //!
 //! # async fn run() -> Result<(), qubit_web::WebServerError> {
-//! let app = Router::new().route("/health", get(|| async { "ok" }));
+//! use qubit_web::{HttpLimits, RequestLimitLayer};
+//!
+//! let app = Router::new().route(
+//!     "/health",
+//!     get(|| async { "ok" }).layer(RequestLimitLayer::new(HttpLimits::default())),
+//! );
 //! let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap())).await?;
 //! let shutdown = std::future::pending::<()>();
 //! server.serve(app, shutdown).await?;
@@ -33,6 +38,14 @@
 //! timeout (30 seconds by default). `ShutdownReport::forced_connections` is
 //! `None` because Axum does not expose a provable count. The shutdown future
 //! must be `Send`.
+//!
+//! `WebServer` serves the supplied router without installing route limits.
+//! Install [`StreamAdmissionLayer`] explicitly on native Axum SSE and
+//! WebSocket branches; it buffers each request body before the handler and
+//! its deadline ends when response headers are produced. The 1 MiB body,
+//! 256-admission, and 10-second defaults apply per shared admission state
+//! domain. This is separate from `RequestLimitLayer`, which is intended for
+//! short requests.
 //!
 //! Controller macros are re-exported by this crate and can be assembled into
 //! a normal Axum router:

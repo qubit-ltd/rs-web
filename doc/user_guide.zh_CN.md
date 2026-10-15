@@ -70,7 +70,7 @@ let server = WebServer::bind_http(server_options).await?;
 
 ## 装配普通接口与长连接
 
-Controller 短路由默认使用每个请求体 1 MiB、每个 builder 共享 256 个并发请求、handler 工作及响应体传输 30 秒的预算。添加 Controller 前调用 `with_http_limits` 可替换该策略。原生 Axum 路由不会继承 Controller 限额，需在选定的普通短路由分支显式安装 `RequestLimitLayer`。`WebServer` 按原样服务调用方提供的 Router，不会添加路由 layer。限额约束被读取的请求体数据、处理中的 handler 并发数和所选分支的请求期限。handler 超过期限时 layer 返回 `504 Gateway Timeout`。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，layer 返回 HTTP 500 和代码 `invalid_configuration`。若响应头已经发出，期限到达会立即丢弃应用响应体并归还短请求许可，但无法更改状态码；下一次轮询响应体时才会报告一次超时错误。慢客户端或传输背压可能推迟客户端观察到该错误的时间。此期限不会关闭 TCP 或 HTTP/2 连接，连接仍由独立的传输策略管理：
+Controller 短路由默认使用每个请求体 1 MiB、每个 builder 共享 256 个并发请求、handler 工作及响应体传输 30 秒的预算。添加 Controller 前调用 `with_http_limits` 可替换该策略。原生 Axum 路由不会继承 Controller 限额，需在选定的普通短路由分支显式安装 `RequestLimitLayer`。`WebServer` 按原样服务调用方提供的 Router，不会添加路由 layer。限额约束被读取的请求体数据、处理中的 handler 并发数和所选分支的请求期限。handler 超过期限时 layer 返回 `504 Gateway Timeout`。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，layer 返回 HTTP 500 和代码 `invalid_configuration`。若响应头已经发出，期限到达会立即丢弃应用响应体并归还短请求许可，但无法更改状态码；下一次轮询响应体时才会报告一次超时错误。慢客户端或传输背压可能推迟客户端观察到该错误的时间。此期限不会关闭 TCP 或 HTTP/2 连接，连接仍由独立的传输策略管理。对于没有超限 `Content-Length` 的分块短请求，handler 可能先产生副作用，之后读取到超限帧才返回 413；该响应不会回滚副作用。若业务要求先验证完整请求体再产生副作用，应先完整读取并验证 body。
 
 ```rust
 use std::time::Duration;
@@ -87,9 +87,35 @@ let app = Router::new()
     .route("/ws", get(websocket));
 ```
 
-片段中的 `submit`、`progress` 和 `websocket` 是应用自己的 handler；完整组合可参考 [`examples/prompt_stream.rs`](../examples/prompt_stream.rs)。Controller 短路由已有默认限额；调用 `ControllerRoutes::with_http_limits` 可替换默认策略。Controller 的 `sse` 和 `ws` 路由会跳过短请求 layer。SSE/WS 路由不要套用 `RequestLimitLayer`：它的期限还会覆盖响应流，只适合短请求。
+片段中的 `submit`、`progress` 和 `websocket` 是应用自己的 handler；完整组合可参考 [`examples/prompt_stream.rs`](../examples/prompt_stream.rs)。Controller 短路由已有默认限额；调用 `ControllerRoutes::with_http_limits` 可替换默认策略。Controller 的 `sse` 和 `ws` 路由使用独立的流式接纳 layer；`with_http_limits` 只改变短路由策略。原生 SSE/WS 分支不要套用 `RequestLimitLayer`：它的期限还会覆盖响应流。宏把 `kind` 作为限额策略分类，`ws` 只允许 `GET`，但不会验证 handler 是否真正实现了对应协议。
 
 `ControllerRoutes::add` 会在注册前检查当前 Controller 的全部路由声明。重复的 method/path、无效路径或匹配模板冲突（例如参数别名和重叠通配符）会返回 `ControllerRouteError`。不同 method 可以共用同一模板，`finish()` 直接返回 `Router`。检查范围是 builder 收集的声明；之后与原生 Axum Router 合并仍遵循 Axum 自身行为。`rest_controller` 也支持在同一模块中装配末段名称相同、但实际类型不同的 Controller。
+
+### 为原生 SSE 和 WebSocket 请求安装接纳层
+
+`WebServer` 不会修改调用方提供的 Router。原生 SSE/WS 分支需显式安装 `StreamAdmissionLayer`。需要多个分支共用接纳容量时，先创建一个 `StreamAdmissionState`，再克隆使用：
+
+```rust,ignore
+use axum::{Router, routing::get};
+use qubit_web::{StreamAdmissionLayer, StreamAdmissionLimits, StreamAdmissionState};
+
+let limits = StreamAdmissionLimits::default();
+let shared = StreamAdmissionState::new(limits);
+let app = Router::new()
+    .route("/events", get(progress).layer(StreamAdmissionLayer::from_state::<()>(shared.clone())))
+    .route("/ws", get(websocket).layer(StreamAdmissionLayer::from_state::<()>(shared)));
+```
+
+每次调用 `StreamAdmissionLayer::new::<()>(limits)` 都会创建独立容量域。`ControllerRoutes` 会让同一 builder 中的 `sse`/`ws` 路由共用一个状态域；添加 Controller 前调用 `with_stream_admission_limits(limits)` 可替换默认预算。`with_http_limits` 只配置 `short` 路由，因此 builder 中短请求和流式接纳额度彼此独立。
+
+每个流式接纳状态域默认允许单个请求体缓冲 1 MiB、同时接纳 256 个请求，并在 handler 生成响应头前限时 10 秒。请求体缓冲的理论上限为每个状态域 256 MiB，另加请求和运行时开销；请按内存预算调低请求体或并发上限。layer 会在 handler 运行前收齐请求体，因此超限或读取失败的 body 不会进入 handler。SSE 响应体和 WebSocket 会话不受该接纳期限限制。
+
+| 结果 | 含义与处理建议 |
+| --- | --- |
+| `413` `body_too_large` | 声明长度或实际缓冲数据超过上限；缩小请求，或按内存预算调高请求体限额。 |
+| `400` `body_read_failed` | 读取请求体失败；检查客户端或代理的请求传输，确认后再决定是否重试。 |
+| `503` `capacity_exceeded` | 此状态域的接纳许可已用尽；检查状态共享方式、容量配置和请求负载。 |
+| `504` `request_timeout` | 请求体缓冲或 handler 生成响应头超时；排查慢上传和 handler 处理耗时。 |
 
 ### 在应用状态中共享 SSE 和 WebSocket policy
 
@@ -174,7 +200,7 @@ SSE handler 先通过 `begin` 登记会话，再把取消令牌交给事件生�
 
 示例把 `http://localhost:3000` 配置为 `WsUpgradePolicy::allowed_origins` 的 Origin allowlist。Origin 检查只约束浏览器来源，不能代替身份认证；应用应在 `on_upgrade` 前认证，并按自身部署设置允许的来源。SSE 有独立会话上限，同时仍占用 HTTP transport 额度；WebSocket 完成 HTTP upgrade 后改由其 policy 的会话上限管理。
 
-使用配置适配器时，把 `configured.http_limits()` 在添加 Controller 前传给 `ControllerRoutes::with_http_limits`，即可替换 Controller 短路由默认策略；原生 Axum 短路由则在选定分支创建 `RequestLimitLayer`。Controller 的 `sse` 和 `ws` 路由跳过短请求 layer。`WebServer` 接收完整的 Axum `Router`，不会为路由添加限额。
+使用配置适配器时，把 `configured.http_limits()` 在添加 Controller 前传给 `ControllerRoutes::with_http_limits`，即可替换 Controller 短路由默认策略；原生 Axum 短路由则在选定分支创建 `RequestLimitLayer`。Controller 的 `sse` 和 `ws` 路由使用单独的流式接纳额度。原生 Axum SSE/WS 分支需安装 `StreamAdmissionLayer`；`WebServer` 接收完整的 Axum `Router`，不会为路由添加限额。
 
 启用 HTTPS 时，在绑定前加载可信证书材料，再传给 `WebServer::bind_https`：
 

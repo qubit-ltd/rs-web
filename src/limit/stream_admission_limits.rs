@@ -16,7 +16,10 @@ use std::time::Duration;
 /// The defaults are 1 MiB per body, 256 simultaneous admissions, and 10
 /// seconds. Limits apply per shared [`super::StreamAdmissionState`] domain.
 /// Bodies are buffered before the handler starts; active response bodies and
-/// WebSocket sessions are outside the admission deadline.
+/// WebSocket sessions are outside the admission deadline. The default
+/// theoretical request-body buffer budget is therefore 256 MiB per independent
+/// state domain, excluding request and runtime overhead; reduce either limit
+/// to fit the application's memory budget.
 #[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamAdmissionLimits {

@@ -15,6 +15,10 @@ use tokio::sync::Semaphore;
 use super::stream_admission_limits::StreamAdmissionLimits;
 
 /// Cloneable limits and capacity shared by admission middleware instances.
+///
+/// A newly constructed state is an independent capacity domain. Clones share
+/// the same semaphore; the configured body-byte and admission-count defaults
+/// are 1 MiB and 256, respectively, and apply per state domain.
 #[derive(Clone)]
 #[must_use]
 pub struct StreamAdmissionState {

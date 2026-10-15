@@ -6,7 +6,7 @@
 
 `WebServer` 持有已绑定的 TCP listener、每个服务实例的传输策略和共享的 `ServerContext`。它接收并限制传输连接，可选执行 TLS 握手，再将连接适配为支持 upgrade 的 Hyper 连接。Hyper 将请求交给应用的 Axum `Router<()>`。
 
-应用可以直接构造 router，也可以使用 `ControllerRoutes` 和 controller 宏。末段名称相同但实际类型不同的 Controller，也可以在同一模块分别使用 `rest_controller` 并装配到一起。`ControllerRoutes::add` 会增量复用路由 matcher 来检查完整路由模板，并在注册前对重复 method/path、无效路径和匹配模板冲突返回 `ControllerRouteError`。这只改变装配成本；错误分类、注册前完整预检和路由行为保持不变。`finish()` 直接返回 Axum `Router`。之后与原生 Axum Router 合并仍遵循 Axum 自身的冲突行为。Controller 的 `short` 路由默认使用 builder 的短请求预算，Controller 的 `sse` 和 `ws` 路由跳过该预算；原生 Axum 短路由需应用显式安装 `RequestLimitLayer`。`WebServer` 按原样服务 Router，不会向整个 Router 添加路由限额。诊断中间件记录允许列表中的请求元数据：method、匹配的路由模板、响应状态码、耗时、连接 ID，以及可选的声明请求体长度。
+应用可以直接构造 router，也可以使用 `ControllerRoutes` 和 controller 宏。末段名称相同但实际类型不同的 Controller，也可以在同一模块分别使用 `rest_controller` 并装配到一起。`ControllerRoutes::add` 会增量复用路由 matcher 来检查完整路由模板，并在注册前对重复 method/path、无效路径和匹配模板冲突返回 `ControllerRouteError`。这只改变装配成本；错误分类、注册前完整预检和路由行为保持不变。`finish()` 直接返回 Axum `Router`。之后与原生 Axum Router 合并仍遵循 Axum 自身的冲突行为。Controller 的 `short` 路由默认使用 builder 的短请求预算，`sse`/`ws` 路由则使用独立的流式接纳状态；原生 Axum 路由需由应用显式安装相应 layer。`WebServer` 按原样服务 Router，不会向整个 Router 添加路由限额。诊断中间件记录允许列表中的请求元数据：method、匹配的路由模板、响应状态码、耗时、连接 ID，以及可选的声明请求体长度。
 
 主要模块职责如下：
 
@@ -14,7 +14,7 @@
 | --- | --- |
 | `server` | 绑定 HTTP/HTTPS listener、运行 Axum router、限制传输连接、协调停服并生成停服报告。 |
 | `mvc` | 装配 controller 路由，在注册前拒绝重复 method 和冲突的路由模板，并提供路由元数据。 |
-| `limit` | 为 Controller `short` 路由提供默认请求体、并发和处理时间预算；原生 Axum 短路由需显式安装 layer。Controller `sse` 和 `ws` 路由跳过短请求限额；`WebServer` 不向整个 Router 添加路由限额。 |
+| `limit` | 为短请求和长连接接纳提供请求体、并发和时间预算。Controller 两类路由默认使用彼此独立的状态域；原生 Axum 路由需显式安装相应 layer。`WebServer` 不向整个 Router 添加路由限额。 |
 | `json` | 启用 `json` feature 时限制严格 JSON 输入/输出的字节数和结构规模。 |
 | `sse` | 接纳有容量上限的 server-sent event 流，并将其登记为受管会话。 |
 | `ws` | 启用 `ws` feature 时校验 WebSocket 策略与 Origin、预留容量并管理会话 I/O。 |
@@ -38,7 +38,9 @@
 
 ## 请求预算与长连接流
 
-`HttpLimits::default()` 为每个请求体设置 1 MiB 上限，为并发短请求设置 256 个额度，并为 handler 工作及响应体传输设置 30 秒期限。`ControllerRoutes::new()` 默认将此策略用于 Controller 的 `short` 路由；`with_http_limits` 替换默认值，后续添加的路由使用新策略。Controller 的 `sse` 和 `ws` 路由跳过短请求 layer。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 按原样服务 Router，不添加路由限额。中间件在选定路由读取请求体时累计字节；不会为了执行限制而读取本来未消费的请求体。容量耗尽、请求体超限和处理超时都有稳定的拒绝结果。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，layer 返回 HTTP 500 和代码 `invalid_configuration`。普通 handler 超时仍返回 `504 Gateway Timeout`。如果响应头已发送后期限到达，会立即丢弃应用响应体并归还短请求许可，但无法更改响应状态；body error 只会在传输再次轮询响应体时报告。传输背压可能推迟客户端观察到错误的时间；该期限不会关闭连接，TCP/HTTP/2 连接仍受独立传输策略管理。
+Controller 的 `sse`/`ws` 长连接路由使用独立于短请求 `LimitState` 的 `StreamAdmissionState`。每个接纳状态域默认每请求缓冲 1 MiB、同时接纳 256 个请求，并在 handler 生成响应头前限时 10 秒；请求体缓冲理论上限为每个状态域 256 MiB，另加请求和运行时开销。添加 Controller 前可用 `with_stream_admission_limits` 替换 builder 的接纳预算。原生 Axum SSE/WS 分支必须显式安装 `StreamAdmissionLayer`；通过 `StreamAdmissionState` 和 `from_state` 共享多个分支的容量。新 layer 会创建独立状态域。请求体超限、读取失败、容量耗尽和接纳超时分别返回 413 `body_too_large`、400 `body_read_failed`、503 `capacity_exceeded` 和 504 `request_timeout`。期限止于 handler 返回响应头，不覆盖 SSE 响应流或 WebSocket 会话。
+
+`HttpLimits::default()` 为每个请求体设置 1 MiB 上限，为并发短请求设置 256 个额度，并为 handler 工作及响应体传输设置 30 秒期限。`ControllerRoutes::new()` 默认将此策略用于 Controller 的 `short` 路由；`with_http_limits` 替换默认值，后续添加的路由使用新策略。Controller 的 `sse` 和 `ws` 路由使用流式接纳策略，不使用短请求 layer。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 按原样服务 Router，不添加路由限额。中间件在选定路由读取请求体时累计字节；不会为了执行限制而读取本来未消费的请求体。容量耗尽、请求体超限和处理超时都有稳定的拒绝结果。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，layer 返回 HTTP 500 和代码 `invalid_configuration`。普通 handler 超时仍返回 `504 Gateway Timeout`。如果响应头已发送后期限到达，会立即丢弃应用响应体并归还短请求许可，但无法更改响应状态；body error 只会在传输再次轮询响应体时报告。传输背压可能推迟客户端观察到错误的时间；该期限不会关闭连接，TCP/HTTP/2 连接仍受独立传输策略管理。
 
 启用 `json` 时，`JsonLimits::default()` 分别将输入和输出 payload 限制为 1 MiB，嵌套深度限制为 64，值节点数限制为 100,000，数组元素数和对象成员数各限制为 10,000，键长度限制为 16 KiB，字符串长度限制为 256 KiB，数字文本长度限制为 128 字节。JSON 限制与通用 HTTP 请求体限制相互独立；两者同时生效时，应配置兼容的值。
 
