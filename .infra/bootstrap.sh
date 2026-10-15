@@ -108,6 +108,7 @@ case "$entrypoint" in
         run_latest rs-infra-style --project "$project_root" fix "$@"
         ;;
     .infra/bin/ci-check.sh)
+        source "$shared_root/.infra/lib/cleanup-build-artifacts.sh"
         prepare_dependencies
         run_latest rs-infra-ci --project "$project_root" "$@" check
         ;;

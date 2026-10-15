@@ -44,7 +44,7 @@
     },
     ".infra/bootstrap.sh": {
       "executable": true,
-      "sha256": "c3b2d59a440a8898fc783080c5200a58bbbad0f0e5082705e3b904ea900560f9"
+      "sha256": "51448c0ab75c1962189a5066df452ce6ad741ac53bff4cb70b7f5c4d0020fd5b"
     },
     ".infra/ci/local-path-dependencies.tsv": {
       "executable": false,
@@ -79,8 +79,8 @@
       "sha256": "d4687f8f57286d023b55185be016306fa9cc536c69fc9d1888316ad078846cfe"
     }
   },
-  "package_sha256": "74e19a5ec3f65037c07b3b510a0e73e5412a557696127bfaf071bd079b487551",
+  "package_sha256": "7b738182cabc9392dbaa3bf98072e2f6defbbbd3317d0e2aa80d157556270d0a",
   "schema": 1,
   "source_repository": "https://github.com/qubit-ltd/rs-infra-tools.git",
-  "source_revision": "499bf89da342681e19428d5056cf97686ed21526"
+  "source_revision": "e0cdb1879a2ffe6d6317d2caa9f53390e46671b5"
 }
