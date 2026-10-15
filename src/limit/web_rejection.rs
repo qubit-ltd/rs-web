@@ -29,6 +29,9 @@ pub enum WebRejection {
     BodyTooLarge,
     /// No short-request capacity was available.
     CapacityExceeded,
+    /// Reading a buffered stream-admission request body failed; the underlying
+    /// error is not included in the response.
+    BodyReadFailed,
     /// An ordinary short request exceeded its processing deadline.
     RequestTimedOut,
     /// The configured deadline cannot be represented at request time.
@@ -47,6 +50,7 @@ impl WebRejection {
         match self {
             Self::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::CapacityExceeded => StatusCode::SERVICE_UNAVAILABLE,
+            Self::BodyReadFailed => StatusCode::BAD_REQUEST,
             Self::RequestTimedOut => StatusCode::GATEWAY_TIMEOUT,
             Self::InvalidConfiguration => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -63,6 +67,7 @@ impl WebRejection {
         match self {
             Self::BodyTooLarge => "body_too_large",
             Self::CapacityExceeded => "capacity_exceeded",
+            Self::BodyReadFailed => "body_read_failed",
             Self::RequestTimedOut => "request_timeout",
             Self::InvalidConfiguration => "invalid_configuration",
         }
@@ -79,6 +84,7 @@ impl IntoResponse for WebRejection {
         let title = match self {
             Self::BodyTooLarge => "Payload Too Large",
             Self::CapacityExceeded => "Service Unavailable",
+            Self::BodyReadFailed => "Bad Request",
             Self::RequestTimedOut => "Gateway Timeout",
             Self::InvalidConfiguration => "Internal Server Error",
         };

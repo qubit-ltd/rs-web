@@ -56,7 +56,7 @@ let server = WebServer::bind_http(server_options).await?;
 
 ## Assemble short routes and long-lived routes
 
-Controller short routes have a default budget of 1 MiB per request body, 256 concurrent requests shared by the builder, and 30 seconds for handler work plus response-body streaming. Call `with_http_limits` before adding Controllers to replace that policy. Native Axum routes do not inherit Controller limits; install `RequestLimitLayer` on each selected ordinary short route. `WebServer` serves the supplied Router without adding route layers. These limits protect consumed request-body data, concurrent handler work, and the selected branch's deadline. If the handler misses the deadline, the layer returns `504 Gateway Timeout`. Unrepresentable absolute request deadlines are rejected as `WebServerError::InvalidConfig`; if the deadline becomes unrepresentable at runtime, the layer returns HTTP 500 with code `invalid_configuration`. If the deadline expires after response headers have been sent, the layer immediately drops the application response body and releases the short-request permit; the status cannot be changed, and the body reports one timeout error on its next poll. A slow client or transport backpressure may delay when that error is observed. This deadline does not close the TCP or HTTP/2 connection, which remains governed by the independent transport policy.
+Controller short routes have a default budget of 1 MiB per request body, 256 concurrent requests shared by the builder, and 30 seconds for handler work plus response-body streaming. Call `with_http_limits` before adding Controllers to replace that policy. Native Axum routes do not inherit Controller limits; install `RequestLimitLayer` on each selected ordinary short route. `WebServer` serves the supplied Router without adding route layers. These limits protect consumed request-body data, concurrent handler work, and the selected branch's deadline. If the handler misses the deadline, the layer returns `504 Gateway Timeout`. Unrepresentable absolute request deadlines are rejected as `WebServerError::InvalidConfig`; if the deadline becomes unrepresentable at runtime, the layer returns HTTP 500 with code `invalid_configuration`. If the deadline expires after response headers have been sent, the layer immediately drops the application response body and releases the short-request permit; the status cannot be changed, and the body reports one timeout error on its next poll. A slow client or transport backpressure may delay when that error is observed. This deadline does not close the TCP or HTTP/2 connection, which remains governed by the independent transport policy. For streamed short-route bodies without an oversized declared `Content-Length`, the handler may perform side effects before consuming the over-limit frame; the resulting 413 does not roll those effects back. If validation must precede a side effect, consume and validate the complete body first.
 
 ```rust
 use std::time::Duration;
@@ -73,9 +73,36 @@ let app = Router::new()
     .route("/ws", get(websocket));
 ```
 
-The example fragments assume application handlers `submit`, `progress`, and `websocket`; the full runnable composition is in [`examples/prompt_stream.rs`](../examples/prompt_stream.rs). Controller routes already receive default limits; call `ControllerRoutes::with_http_limits` before adding them to replace those limits. Controller `sse` and `ws` routes skip the short-request layer. Keep SSE and WebSocket routes outside `RequestLimitLayer`: the layer's deadline also covers response streaming and is intended for short requests.
+The example fragments assume application handlers `submit`, `progress`, and `websocket`; the full runnable composition is in [`examples/prompt_stream.rs`](../examples/prompt_stream.rs). Controller routes already receive default limits; call `ControllerRoutes::with_http_limits` before adding them to replace those limits. Controller `sse` and `ws` routes use a separate stream-admission layer; `with_http_limits` only changes short-route limits. Keep native SSE and WebSocket branches outside `RequestLimitLayer`: its deadline also covers response streaming. The macro treats `kind` as a limit-policy classification, requires `GET` for `ws`, and does not verify that the handler implements the declared wire protocol.
 
 `ControllerRoutes::add` checks the complete set of Controller route declarations before registering them. It returns `ControllerRouteError` for duplicate method/path pairs, invalid paths, or matching-template conflicts such as parameter aliases and overlapping wildcards. Different methods can share one template, and `finish()` returns the `Router` directly. This check covers declarations collected by the builder; later merges with native Axum routers retain Axum's own behavior. `rest_controller` also supports distinct Controller types with the same terminal type name in one module.
+
+### Admit native SSE and WebSocket requests
+
+`WebServer` does not add middleware to a supplied router. Install one `StreamAdmissionLayer` on each native SSE or WebSocket branch. Reuse a `StreamAdmissionState` when branches should share capacity:
+
+```rust,ignore
+use axum::{Router, routing::get};
+use qubit_web::{StreamAdmissionLayer, StreamAdmissionLimits, StreamAdmissionState};
+
+let limits = StreamAdmissionLimits::default();
+let shared = StreamAdmissionState::new(limits);
+let app = Router::new()
+    .route("/events", get(progress).layer(StreamAdmissionLayer::from_state::<()>(shared.clone())))
+    .route("/ws", get(websocket).layer(StreamAdmissionLayer::from_state::<()>(shared)));
+```
+
+Each `StreamAdmissionLayer::new::<()>(limits)` creates a separate capacity domain. The `ControllerRoutes` builder creates one shared stream domain for its `sse`/`ws` routes; call `with_stream_admission_limits(limits)` before `add` to replace it. `with_http_limits` configures only `short` routes, so a builder has two independent request-policy domains.
+
+Defaults per stream-admission state are 1 MiB per buffered body, 256 concurrent admissions, and 10 seconds from entering admission through handler response headers. The theoretical body-buffer budget is 256 MiB per state domain, plus request and runtime overhead; lower the body or concurrency limit to fit your memory budget. The layer reads the complete body before invoking the handler, so an oversized or unreadable body cannot reach handler code. An active SSE response body or WebSocket session is outside this deadline.
+
+| Result | Meaning and next step |
+| --- | --- |
+| `413` `body_too_large` | Declared or buffered body exceeded the limit; reduce the request or raise the configured body budget. |
+| `400` `body_read_failed` | The request body could not be read; inspect the client/proxy request delivery and retry only when appropriate. |
+| `503` `capacity_exceeded` | All admission permits in this state domain are occupied; share state as intended or tune capacity and load. |
+| `504` `request_timeout` | Body buffering or handler response-header creation missed the admission deadline; inspect slow uploads and handler work. |
+| `500` `invalid_configuration` | The absolute admission deadline could not be represented at runtime; inspect the configured timeout and report a configuration/runtime issue. |
 
 ### Share SSE and WebSocket policies through application state
 
@@ -181,7 +208,7 @@ async fn websocket(
 
 The code is an application-module excerpt: it assumes `AppState` and the state assembly function above, and requires `tokio`, `futures-core`, and Axum as direct dependencies. The executable source of truth, including its imports, event producer, route assembly, and `main`, is [`examples/prompt_stream.rs`](../examples/prompt_stream.rs) (`EventReceiver`, `progress`, `websocket`, and `Router::with_state`). `Router::with_state(state)` supplies the single startup-created state instance to these handlers. The example's `Bearer demo-only` check only demonstrates authentication ordering and is not production authentication; replace it with the application's identity and authorization checks. `WsUpgradePolicy::allowed_origins` independently restricts browser origins; an Origin allowlist does not authenticate a client. Cloning either policy shares its connection-capacity domain, so all routes using clones draw from one configured allowance. Calling `SseConnectionPolicy::default()` or `WsUpgradePolicy::new()` again creates an independent domain; requests handled by that new instance do not consume the original policy's allowance. These are separate caps: SSE has its own session cap and remains within the HTTP transport cap, while an upgraded WebSocket uses its policy cap after the HTTP upgrade completes. A successful `try_send` means only that a message entered the outbound queue, not that the network delivered it.
 
-For a configuration-driven service, pass `configured.http_limits()` to `ControllerRoutes::with_http_limits` before adding controllers to replace its default policy, or to `RequestLimitLayer::new` on selected native Axum branches. Controller `sse` and `ws` routes skip the short-request layer. `WebServer` receives a completed Axum `Router` and does not add route limits.
+For a configuration-driven service, pass `configured.http_limits()` to `ControllerRoutes::with_http_limits` before adding controllers to replace its default policy, or to `RequestLimitLayer::new` on selected native Axum branches. Controller `sse` and `ws` routes use their separate stream-admission budget. Native Axum SSE/WS branches need `StreamAdmissionLayer`; `WebServer` receives a completed Axum `Router` and does not add route limits.
 
 For HTTPS, load trusted certificate material before binding and pass it to `WebServer::bind_https`:
 

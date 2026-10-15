@@ -11,6 +11,9 @@ mod http_limits;
 mod internal;
 mod limit_state;
 mod request_limit_layer;
+mod stream_admission_layer;
+mod stream_admission_limits;
+mod stream_admission_state;
 mod web_rejection;
 
 pub use http_limits::HttpLimits;
@@ -20,4 +23,7 @@ pub use request_limit_layer::LimitFuture;
 #[doc(hidden)]
 pub use request_limit_layer::LimitMiddleware;
 pub use request_limit_layer::RequestLimitLayer;
+pub use stream_admission_layer::StreamAdmissionLayer;
+pub use stream_admission_limits::StreamAdmissionLimits;
+pub use stream_admission_state::StreamAdmissionState;
 pub use web_rejection::WebRejection;

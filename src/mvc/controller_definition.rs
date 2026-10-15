@@ -11,6 +11,7 @@ use axum::Router;
 
 use super::RouteMetadata;
 use crate::limit::LimitState;
+use crate::limit::StreamAdmissionState;
 
 /// Internal contract implemented by `#[rest_controller]` expansions.
 ///
@@ -33,5 +34,10 @@ where
     fn route_metadata() -> &'static [RouteMetadata];
 
     /// Adds all routes for one explicitly supplied Controller instance.
-    fn register(self: Arc<Self>, router: Router<S>, limit_state: LimitState) -> Router<S>;
+    fn register(
+        self: Arc<Self>,
+        router: Router<S>,
+        limit_state: LimitState,
+        stream_state: StreamAdmissionState,
+    ) -> Router<S>;
 }

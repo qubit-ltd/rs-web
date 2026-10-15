@@ -78,9 +78,9 @@ curl -i -X POST http://127.0.0.1:3000/admin/shutdown
 
 健康检查返回 `200 OK`，正文为 `ok`；停服路由返回 `202 Accepted`，并通知传给 `serve` 的关闭 future。示例仅绑定 loopback。请求限额只安装在短请求 `/health` 上；`WebServer` 直接运行传入的 Router，不会自动安装 HTTP 限额。停服路由没有认证，仅供本机演示，不能对外开放。
 
-另一个独立的内存 CRUD 示例可用 `cargo run --example controller_crud --all-features` 启动。`/users` 属于该示例，并不存在于上面的最小服务中；创建用户会返回 `201 Created`。在 [`examples/controller_crud.rs`](examples/controller_crud.rs) 可查看如何用 `ControllerRoutes::with_http_limits` 替换 Controller 短路由的默认限额。原生 Axum 路由需要在每个选定的短路由分支上安装 `RequestLimitLayer::new(http_limits)`；Controller 的 `sse` 和 `ws` 路由不会使用短请求限额。
+另一个独立的内存 CRUD 示例可用 `cargo run --example controller_crud --all-features` 启动。`/users` 属于该示例，并不存在于上面的最小服务中；创建用户会返回 `201 Created`。在 [`examples/controller_crud.rs`](examples/controller_crud.rs) 可查看如何用 `ControllerRoutes::with_http_limits` 替换 Controller 短路由的默认限额。原生 Axum 路由需要在选定的短路由分支安装 `RequestLimitLayer::new(http_limits)`，并在 SSE/WS 分支安装 `StreamAdmissionLayer`。Controller 的 `sse` 和 `ws` 路由使用独立的流式接纳预算。
 
-启用 `config` feature 后，`ConfiguredWeb::from_config` 会分别返回 `ServerOptions` 和 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；将配置所得限额传给 `with_http_limits` 可替换默认策略。原生 Axum 路由则需在选定分支显式安装 `RequestLimitLayer`；`WebServer` 不会替 Router 应用限额。
+启用 `config` feature 后，`ConfiguredWeb::from_config` 会分别返回 `ServerOptions` 和 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；将配置所得限额传给 `with_http_limits` 可替换默认策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`，并在 SSE/WS 分支安装 `StreamAdmissionLayer`；`WebServer` 不会替 Router 应用限额。
 
 ## 流式示例
 
@@ -104,7 +104,7 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 ## 限额与运行边界
 
 - Controller 的 `short` 路由默认使用 `HttpLimits::default()`；原生 Axum 路由必须在需要限额的短请求分支上显式安装 `RequestLimitLayer`。`WebServer` 不会替传入的 Router 自动添加路由限额。
-- 新建的 SSE 或 WebSocket policy 各自管理独立容量。需要多个路由共用预算时，应将同一 policy 放入应用共享状态并克隆使用。传输连接上限单独计算；SSE 也会占用 HTTP 连接。
+- Controller 的 `sse`/`ws` 路由共用 builder 的 `StreamAdmissionState`；添加路由前可用 `with_stream_admission_limits` 替换预算。原生 Axum 分支必须显式安装 `StreamAdmissionLayer`：`new` 创建独立预算，`from_state` 可共享预算。默认每个状态域最多缓冲 1 MiB/请求、接纳 256 个请求，并在响应头产生前限时 10 秒；请求体缓冲理论上限为每个状态域 256 MiB，另有请求和运行时开销。`RequestLimitLayer` 仍是独立的短请求策略。传输连接数和 SSE/WS 会话额度另行计算；SSE 也占用 HTTP 连接。
 - 认证、授权、业务状态，以及流式数据的保存和重放由应用负责。WebSocket 升级前必须先完成认证；Origin 检查只限制浏览器来源。示例 token 和无认证停服入口仅供 loopback 演示。
 - 启用 HTTPS 需要 `tls-rustls` 与有效证书，也可由部署方配置可信反向代理。停服由应用发起，并遵守服务端配置的截止时间。
 

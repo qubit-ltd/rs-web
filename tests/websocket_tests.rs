@@ -19,12 +19,15 @@ use axum::extract::WebSocketUpgrade;
 use axum::extract::ws::Message;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::get;
 use qubit_web::ServerContext;
 use qubit_web::ServerOptions;
 use qubit_web::ShutdownReport;
 use qubit_web::WebServer;
+use qubit_web::mvc::ControllerRoutes;
+use qubit_web::rest_controller;
 
 type RegisteredCheckpoint = Arc<Mutex<Option<oneshot::Sender<usize>>>>;
 type DelayedUpgradeChannels = (
@@ -99,6 +102,44 @@ async fn serve_with_shutdown_timeout(
     let task =
         spawn(async move { server.serve(app, shutdown.cancelled_owned()).await.unwrap() }.with_subscriber(dispatch));
     (addr, task)
+}
+
+struct ControllerUpgrade;
+
+#[rest_controller("/controller")]
+impl ControllerUpgrade {
+    #[route("/ws", method = "GET", kind = "ws")]
+    async fn upgrade(&self, ws: WebSocketUpgrade) -> Response {
+        ws.on_upgrade(|mut socket| async move {
+            if let Some(Ok(Message::Text(text))) = socket.recv().await {
+                socket.send(Message::Text(text)).await.unwrap();
+            }
+        })
+        .into_response()
+    }
+}
+
+#[tokio::test]
+async fn controller_stream_admission_preserves_native_websocket_upgrade() {
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let shutdown = CancellationToken::new();
+    let app = ControllerRoutes::<()>::new()
+        .add(Arc::new(ControllerUpgrade))
+        .unwrap()
+        .finish();
+    let task_shutdown = shutdown.clone();
+    let task = spawn(async move { server.serve(app, task_shutdown.cancelled_owned()).await.unwrap() });
+
+    let (mut client, status) = handshake_path(address, "/controller/ws", None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    send_masked_text(&mut client, b"admission-upgrade").await;
+    assert_eq!(read_server_text(&mut client).await, b"admission-upgrade");
+    drop(client);
+    shutdown.cancel();
+    assert!(timeout(Duration::from_secs(2), task).await.unwrap().unwrap().graceful);
 }
 
 #[test]

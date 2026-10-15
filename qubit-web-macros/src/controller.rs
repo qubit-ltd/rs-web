@@ -94,7 +94,9 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
             if let Some(verb) = marker_verb(&name) {
                 let mapping = parse2::<MappingArgs>(attr.meta.require_list()?.tokens.clone())?;
                 let (_, kind) = parse_options(mapping.options, false)?;
-                routes.push(make_route(&prefix.value(), mapping.path, vec![verb.to_owned()], kind)?);
+                let route = make_route(&prefix.value(), mapping.path, vec![verb.to_owned()], kind)?;
+                validate_websocket_methods(&route.methods, &route.kind, attr.span())?;
+                routes.push(route);
             } else if name == "route" {
                 let route = parse2::<RouteArgs>(attr.meta.require_list()?.tokens.clone())?;
                 let (verbs, kind) = parse_options(route.options, true)?;
@@ -104,7 +106,9 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
                         "route requires at least one method = \"...\"",
                     ));
                 }
-                routes.push(make_route(&prefix.value(), route.path, verbs, kind)?);
+                let route = make_route(&prefix.value(), route.path, verbs, kind)?;
+                validate_websocket_methods(&route.methods, &route.kind, attr.span())?;
+                routes.push(route);
             } else {
                 method.attrs.push(attr);
             }
@@ -179,7 +183,9 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
                 }
             } else {
                 quote! {
-                    let route = route.layer(::qubit_web::diagnostic::DiagnosticLayer::new());
+                    let route = route
+                        .layer(::qubit_web::StreamAdmissionLayer::from_state::<#state_type_ref>(stream_state.clone()))
+                        .layer(::qubit_web::diagnostic::DiagnosticLayer::new());
                 }
             };
             let filters = route.methods.iter().map(|verb| method_filter(verb));
@@ -223,6 +229,7 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
                     self: ::std::sync::Arc<Self>,
                     mut router: ::axum::Router<#state_type>,
                     limit_state: ::qubit_web::limit::LimitState,
+                    stream_state: ::qubit_web::limit::StreamAdmissionState,
                 ) -> ::axum::Router<#state_type> {
                     #(#registrations)*
                     router
@@ -258,6 +265,13 @@ fn marker_verb(name: &str) -> Option<&'static str> {
         "delete_mapping" | "delete" => Some("DELETE"),
         _ => None,
     }
+}
+
+fn validate_websocket_methods(methods: &[String], kind: &str, span: Span) -> syn::Result<()> {
+    if kind == "ws" && methods.iter().any(|method| method != "GET") {
+        return Err(syn::Error::new(span, "WebSocket route kind requires GET"));
+    }
+    Ok(())
 }
 
 /// Validates route options and returns methods plus the selected strategy.

@@ -56,6 +56,11 @@ impl RequestLimitLayer {
     /// them and stops polling the body after the first over-limit frame. An
     /// extractor error caused by that frame becomes a stable 413 rejection.
     /// Unconsumed request bodies are not read solely to enforce the limit.
+    /// For a streamed body without an oversized declared `Content-Length`, a
+    /// handler may perform side effects before consuming the frame that makes
+    /// the body exceed its budget. A later 413 does not roll those effects
+    /// back; applications needing validation before side effects must consume
+    /// and validate the complete body first.
     /// The deadline covers handler work and response-body streaming. If it
     /// expires after response headers are sent, the application body and
     /// capacity permit are released even when the transport stops polling;

@@ -78,9 +78,9 @@ curl -i -X POST http://127.0.0.1:3000/admin/shutdown
 
 The first request returns `200 OK` with body `ok`; the second returns `202 Accepted` and signals the shutdown future passed to `serve`. The example binds only to loopback. The request limit is attached only to the short `/health` route; `WebServer` serves the Router as supplied and does not install HTTP limits implicitly. The shutdown route is an unauthenticated demonstration endpoint and should not be exposed beyond loopback.
 
-For the separate in-memory CRUD example, run `cargo run --example controller_crud --all-features`. Its `/users` route belongs to that example, not the minimal service above. Creating a user there returns `201 Created`; see [`examples/controller_crud.rs`](examples/controller_crud.rs) for replacing Controller short-route defaults with `ControllerRoutes::with_http_limits`. For native Axum routes, install `RequestLimitLayer::new(http_limits)` on each selected short route branch. Controller `sse` and `ws` routes do not use the short-request limit.
+For the separate in-memory CRUD example, run `cargo run --example controller_crud --all-features`. Its `/users` route belongs to that example, not the minimal service above. Creating a user there returns `201 Created`; see [`examples/controller_crud.rs`](examples/controller_crud.rs) for replacing Controller short-route defaults with `ControllerRoutes::with_http_limits`. For native Axum routes, install `RequestLimitLayer::new(http_limits)` on selected short branches and `StreamAdmissionLayer` on SSE/WS branches. Controller `sse` and `ws` routes use a separate stream-admission budget.
 
-When using the `config` feature, `ConfiguredWeb::from_config` returns `ServerOptions` and `HttpLimits` as separate values. Controller short routes already have `HttpLimits::default()`; pass the configured limits to `with_http_limits` to replace that policy. For native Axum routes, install `RequestLimitLayer` on selected branches. `WebServer` does not apply either policy to the Router.
+When using the `config` feature, `ConfiguredWeb::from_config` returns `ServerOptions` and `HttpLimits` as separate values. Controller short routes already have `HttpLimits::default()`; pass the configured limits to `with_http_limits` to replace that policy. For native Axum routes, install `RequestLimitLayer` on selected short branches and `StreamAdmissionLayer` on SSE/WS branches. `WebServer` does not apply either policy to the Router.
 
 ## Streaming example
 
@@ -104,7 +104,7 @@ The sample bearer token is `demo-only`; it illustrates a handler check and is no
 ## Limits and operational boundaries
 
 - Controller `short` routes start with `HttpLimits::default()`; native Axum routes need an explicit `RequestLimitLayer` on each selected short-request branch. `WebServer` does not install route limits for a supplied Router.
-- Each new SSE or WebSocket policy owns a separate capacity domain. Clone a policy from shared application state when routes should share that budget. Transport connection limits are separate; SSE also occupies an HTTP connection.
+- Controller `sse`/`ws` routes share their builder’s `StreamAdmissionState`; `with_stream_admission_limits` changes that budget for routes added afterward. Native Axum branches must install `StreamAdmissionLayer` explicitly; layers made with `new` have independent budgets, while `from_state` shares one. Defaults are 1 MiB buffered per request, 256 admissions, and 10 seconds through response headers per state domain (up to 256 MiB of body buffers plus overhead). `RequestLimitLayer` remains the separate short-request policy. Transport and SSE/WS session limits are separate; SSE also occupies an HTTP connection.
 - Applications own authentication, authorization, business state, and stream persistence or replay. Authenticate before WebSocket upgrade; Origin checks only restrict browser origins. The sample token and unauthenticated shutdown endpoint are loopback demonstrations.
 - HTTPS requires `tls-rustls` and valid certificates, or a trusted reverse proxy configured by the deployer. Shutdown is initiated by the application and follows the server's configured deadline.
 

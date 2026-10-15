@@ -15,6 +15,8 @@ use super::ControllerDefinition;
 use super::ControllerRouteError;
 use crate::limit::HttpLimits;
 use crate::limit::LimitState;
+use crate::limit::StreamAdmissionLimits;
+use crate::limit::StreamAdmissionState;
 
 /// Builds an Axum router from explicitly supplied Controller instances.
 ///
@@ -42,6 +44,8 @@ pub struct ControllerRoutes<S = ()> {
     declared: HashMap<&'static str, HashSet<&'static str>>,
     /// Shared limits passed to each registered controller.
     limit_state: LimitState,
+    /// Shared admission budget passed to each SSE and WebSocket route.
+    stream_state: StreamAdmissionState,
 }
 
 impl<S> Default for ControllerRoutes<S>
@@ -76,15 +80,16 @@ where
             matcher: matchit::Router::new(),
             declared: HashMap::new(),
             limit_state: LimitState::new(HttpLimits::default()),
+            stream_state: StreamAdmissionState::new(StreamAdmissionLimits::default()),
         }
     }
 
     /// Replaces the default finite limits for all short routes added to this
     /// builder afterward.
     ///
-    /// SSE and WebSocket routes keep the same diagnostics but skip the
-    /// short-request body, concurrency, and deadline limits. Configure this
-    /// before adding Controllers so their routes share one concurrency limit.
+    /// SSE and WebSocket routes use their separate stream-admission limits.
+    /// Configure this before adding Controllers so their short routes share
+    /// one concurrency limit.
     ///
     /// # Parameters
     ///
@@ -96,6 +101,17 @@ where
     /// The same builder with the replacement policy installed.
     pub fn with_http_limits(mut self, http_limits: HttpLimits) -> Self {
         self.limit_state = LimitState::new(http_limits);
+        self
+    }
+
+    /// Replaces the default admission budgets for SSE and WebSocket routes
+    /// added to this builder afterward.
+    ///
+    /// Each builder has its own shared admission capacity domain. This policy
+    /// is independent from the short-route policy configured by
+    /// [`Self::with_http_limits`].
+    pub fn with_stream_admission_limits(mut self, limits: StreamAdmissionLimits) -> Self {
+        self.stream_state = StreamAdmissionState::new(limits);
         self
     }
 
@@ -154,7 +170,12 @@ where
             }
             self.declared.entry(route.path()).or_default().insert(route.method());
         }
-        self.router = C::register(controller, self.router, self.limit_state.clone());
+        self.router = C::register(
+            controller,
+            self.router,
+            self.limit_state.clone(),
+            self.stream_state.clone(),
+        );
         Ok(self)
     }
 

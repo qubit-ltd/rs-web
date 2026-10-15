@@ -26,7 +26,9 @@ use proc_macro::TokenStream;
 /// child path to that prefix. Use `#[route(path, method = "GET", kind = "sse")`
 /// for explicit methods and transport kinds. Supported kinds are `short`,
 /// `sse`, and `ws`; generic impl blocks and `where` clauses produce
-/// compile-time diagnostics.
+/// compile-time diagnostics. The kind selects a route-limit policy; it does
+/// not verify that the handler implements the corresponding wire protocol.
+/// A `ws` route must declare only `GET` methods.
 ///
 /// # Parameters
 ///
@@ -70,7 +72,9 @@ mapping_macro! {
 ///
 /// The first argument is a string literal child path. Repeat `method = "..."`
 /// for each supported method (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`,
-/// or `OPTIONS`); optionally set `kind` to `short`, `sse`, or `ws`. Duplicate
+/// or `OPTIONS`); optionally set `kind` to `short`, `sse`, or `ws`. A `ws`
+/// route accepts only `GET`. The kind selects a route-limit policy and does
+/// not verify the handler's protocol behavior. Duplicate
 /// methods, unknown options, and invalid route templates produce compile-time
 /// diagnostics.
 ///
