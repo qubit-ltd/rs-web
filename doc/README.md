@@ -11,10 +11,7 @@
 
 ## Historical decisions
 
-- [rs-web onboarding and downstream current-source interoperability design (2026-10-13)](design-20261013T160345113Z-029cf798.md) and [implementation plan](implementation-plan-20261013T160345113Z-029cf798.md): these files preserve the original proposal, which was still awaiting implementation when written. Its bilingual quick starts and current-source downstream gate have since been implemented in the [English README](../README.md), [Chinese README](../README.zh_CN.md), and [downstream interoperability workflow](../.github/workflows/downstream-interop.yml). The workflow checks out both repositories, asserts Cargo resolves `qubit-web` from the current `rs-web` checkout, and runs the downstream interoperability test; this documents the configured gate, not a remote CI result.
-- [rs-web request-deadline overflow design (2026-10-13)](design-20261013T095931709Z-31b89cb3.md) and [implementation plan](implementation-plan-20261013T095931709Z-31b89cb3.md): checked deadline overflow, shutdown cleanup, and response-body private type layout.
-- [rs-web short-response deadline design (2026-10-13)](design-20261013T073858154Z-7cc1c7fc.md) and [implementation plan](implementation-plan-20261013T073858154Z-7cc1c7fc.md): historical implementation record; use the current guides above for behavior.
 - [rs-web first PRD (2026-10-08)](2026-10-08-rs-web-prd.md): original requirements and acceptance baseline, with implementation status at the top.
 - [rs-web detailed design record (2026-10-08)](2026-10-08-rs-web-design.md): technical decisions and implementation notes, preserving the original decision history.
 
-The 2026-10-08 documents record historical decisions and may describe superseded proposals. Current behavior is described by the architecture overview, lifecycle summaries, and user guides above.
+The historical records above preserve past decisions and may describe superseded proposals. Current behavior is documented in the architecture overview, lifecycle summaries, and user guides above. The implemented downstream source interoperability gate is in [downstream-interop.yml](../.github/workflows/downstream-interop.yml).
