@@ -161,7 +161,7 @@ async fn controller_short_and_stream_routes_use_independent_body_limits() {
     let limits = HttpLimits::default().with_max_body_bytes(1).unwrap();
     let controller = ControllerRoutes::new()
         .with_http_limits(limits)
-        .with_stream_admission_limits(StreamAdmissionLimits::default().with_max_body_bytes(1).unwrap())
+        .with_stream_admission_limits(StreamAdmissionLimits::default().with_max_body_bytes(2).unwrap())
         .add(users)
         .unwrap()
         .finish();
@@ -180,7 +180,25 @@ async fn controller_short_and_stream_routes_use_independent_body_limits() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-    let response = app
+    let accepted_short = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/users/short-payload")
+                .body(Body::from("x"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted_short.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(accepted_short.into_body(), 16).await.unwrap(),
+        "x"
+    );
+
+    let accepted = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -190,7 +208,20 @@ async fn controller_short_and_stream_routes_use_independent_body_limits() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(accepted.status(), StatusCode::OK);
+    assert_eq!(axum::body::to_bytes(accepted.into_body(), 16).await.unwrap(), "xx");
+
+    let rejected = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/users/event-payload")
+                .body(Body::from("xxx"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]
