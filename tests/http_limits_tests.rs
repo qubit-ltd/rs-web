@@ -169,6 +169,106 @@ async fn declared_and_streamed_body_limits_use_exact_byte_boundaries() {
     assert_eq!(declared_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
+#[derive(Clone)]
+struct SideEffectCount(Arc<AtomicUsize>);
+
+async fn record_side_effect_before_reading(
+    axum::extract::State(count): axum::extract::State<SideEffectCount>,
+    mut request: axum::extract::Request,
+) -> &'static str {
+    count.0.fetch_add(1, Ordering::SeqCst);
+    while let Some(frame) = std::future::poll_fn(|context| {
+        Pin::new(request.body_mut()).poll_frame(context)
+    })
+    .await
+    {
+        match frame {
+            Ok(frame) => {
+                let _ = frame.into_data();
+            }
+            Err(_) => break,
+        }
+    }
+    "read complete body"
+}
+
+#[tokio::test]
+async fn streamed_body_limit_can_reject_after_handler_side_effect() {
+    let side_effects = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/", post(record_side_effect_before_reading))
+        .with_state(SideEffectCount(side_effects.clone()))
+        .layer(RequestLimitLayer::new(
+            HttpLimits::default().with_max_body_bytes(4).unwrap(),
+        ));
+    let body = Body::new(ObservedChunks {
+        chunks: VecDeque::from([Bytes::from_static(b"12"), Bytes::from_static(b"345")]),
+        poll_count: Arc::new(AtomicUsize::new(0)),
+    });
+
+    let response = app
+        .oneshot(Request::post("/").body(body).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(side_effects.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn declared_body_limit_rejects_before_handler_side_effect() {
+    let side_effects = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/", post(record_side_effect_before_reading))
+        .with_state(SideEffectCount(side_effects.clone()))
+        .layer(RequestLimitLayer::new(
+            HttpLimits::default().with_max_body_bytes(4).unwrap(),
+        ));
+    let body = Body::new(ObservedChunks {
+        chunks: VecDeque::from([Bytes::from_static(b"1")]),
+        poll_count: Arc::new(AtomicUsize::new(0)),
+    });
+
+    let response = app
+        .oneshot(
+            Request::post("/")
+                .header(CONTENT_LENGTH, "5")
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(side_effects.load(Ordering::SeqCst), 0);
+}
+
+async fn ignore_request_body(_: axum::extract::Request) -> &'static str {
+    "ignored body"
+}
+
+#[tokio::test]
+async fn unconsumed_oversized_body_is_not_polled_by_request_limit() {
+    let poll_count = Arc::new(AtomicUsize::new(0));
+    let body = Body::new(ObservedChunks {
+        chunks: VecDeque::from([Bytes::from_static(b"12345")]),
+        poll_count: poll_count.clone(),
+    });
+    let app = Router::new()
+        .route("/", post(ignore_request_body))
+        .layer(RequestLimitLayer::new(
+            HttpLimits::default().with_max_body_bytes(4).unwrap(),
+        ));
+
+    let response = app
+        .oneshot(Request::post("/").body(body).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(poll_count.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn zero_byte_limit_is_rejected() {
     assert!(HttpLimits::default().with_max_body_bytes(0).is_err());
