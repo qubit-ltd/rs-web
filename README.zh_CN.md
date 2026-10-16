@@ -101,6 +101,8 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 
 示例 bearer token `demo-only` 只用于演示 handler 检查，不构成认证。WebSocket 客户端可连接 `ws://127.0.0.1:3001/prompt/demo-1/ws`，发送 `Authorization: Bearer demo-only`；若发送 Origin，则须使用允许的 `http://localhost:3000`。这些端点只演示传输，不会运行 Agent、保存 Prompt 或持久化任务。policy 的共享方式、容量规划和关闭流程见[中文用户指南](doc/user_guide.zh_CN.md)；[英文用户指南](doc/user_guide.md)也介绍了同一场景。
 
+在 [`examples/prompt_stream.rs`](examples/prompt_stream.rs) 中，原生 SSE 和 WebSocket 路由共用一个 `StreamAdmissionState`。默认每个请求最多缓冲 1 MiB 请求体，共享接纳容量为 256 个并发许可，从开始接纳到 handler 生成响应头的期限为 10 秒。响应头就绪后期限即结束，不会覆盖 SSE 流本身或 WebSocket 升级后的会话。SSE 和 WebSocket 会话容量仍分别由 `SseConnectionPolicy` 和 `WsUpgradePolicy` 管理。
+
 ## 限额与运行边界
 
 - Controller 的 `short` 路由默认使用 `HttpLimits::default()`；原生 Axum 路由必须在需要限额的短请求分支上显式安装 `RequestLimitLayer`。`WebServer` 不会替传入的 Router 自动添加路由限额。

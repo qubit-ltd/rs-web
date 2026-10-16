@@ -106,6 +106,8 @@ let app = Router::new()
     .route("/ws", get(websocket).layer(StreamAdmissionLayer::from_state::<()>(shared)));
 ```
 
+可运行的 [`prompt_stream` 示例](../examples/prompt_stream.rs)现已采用同样的装配方式：原生 SSE 和 WebSocket 路由拿到的是同一个 `StreamAdmissionState` 的克隆。使用默认限额时，这个共享状态每个请求最多缓冲 1 MiB 请求体，同时最多接纳 256 个请求；从开始接纳到 handler 生成响应头的期限为 10 秒。响应头就绪后期限即结束，不覆盖后续 SSE 流，也不覆盖 WebSocket 升级后的会话。会话容量仍分别由 `SseConnectionPolicy` 和 `WsUpgradePolicy` 管理。
+
 每次调用 `StreamAdmissionLayer::new::<()>(limits)` 都会创建独立容量域。`ControllerRoutes` 会让同一 builder 中的 `sse`/`ws` 路由共用一个状态域；添加 Controller 前调用 `with_stream_admission_limits(limits)` 可替换默认预算。`with_http_limits` 只配置 `short` 路由，因此 builder 中短请求和流式接纳额度彼此独立。
 
 每个流式接纳状态域默认允许单个请求体缓冲 1 MiB、同时接纳 256 个请求，并在 handler 生成响应头前限时 10 秒。请求体缓冲的理论上限为每个状态域 256 MiB，另加请求和运行时开销；请按内存预算调低请求体或并发上限。layer 会在 handler 运行前收齐请求体，因此超限或读取失败的 body 不会进入 handler。SSE 响应体和 WebSocket 会话不受该接纳期限限制。
