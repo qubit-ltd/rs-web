@@ -2,6 +2,7 @@
 arc-swap ^1.9
 async-lock ^3
 async-stream ^0.3
+axum ^0.8
 base64 ^0.23
 bigdecimal ^0.4
 bitflags ^2.10
@@ -50,6 +51,7 @@ process-wrap ^10.0
 proptest ^1.11
 quote ^1
 rayon ^1.12
+rcgen ^0.13
 redis ^0.32.7
 regex ^1.13
 reqwest ^0.13
@@ -57,6 +59,7 @@ roxmltree ^0.21
 rusqlite ^0.32
 rust_decimal ^1.43
 rustix ^1.1
+rustls ^0.23
 same-file ^1.0
 semver ^1.0
 serde ^1.0
@@ -70,6 +73,9 @@ tempfile ^3.27
 thiserror ^2.0
 threadpool ^1.8
 tokio ^1.53
+tokio-rustls ^0.26
+tokio-tungstenite ^0.29
+tokio-util ^0.7
 toml ^0.9
 tracing ^0.1
 tracing-subscriber ^0.3
@@ -78,4 +84,5 @@ unicode-general-category ^1.1
 uom ^0.38
 url ^2.5
 uuid ^1.26
+webpki-roots ^1
 windows-sys ^0.61
