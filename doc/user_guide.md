@@ -92,6 +92,8 @@ let app = Router::new()
     .route("/ws", get(websocket).layer(StreamAdmissionLayer::from_state::<()>(shared)));
 ```
 
+The runnable [`prompt_stream` example](../examples/prompt_stream.rs) now uses this same arrangement: its native SSE and WebSocket routes receive clones of one `StreamAdmissionState`. With the default limits, that shared state buffers at most 1 MiB per request, allows up to 256 concurrent admissions, and applies a 10-second deadline from admission through handler response headers. The deadline ends when response headers are ready; it does not cover an SSE stream or a WebSocket session after upgrade. Session capacity remains controlled separately by `SseConnectionPolicy` and `WsUpgradePolicy`.
+
 Each `StreamAdmissionLayer::new::<()>(limits)` creates a separate capacity domain. The `ControllerRoutes` builder creates one shared stream domain for its `sse`/`ws` routes; call `with_stream_admission_limits(limits)` before `add` to replace it. `with_http_limits` configures only `short` routes, so a builder has two independent request-policy domains.
 
 Defaults per stream-admission state are 1 MiB per buffered body, 256 concurrent admissions, and 10 seconds from entering admission through handler response headers. The theoretical body-buffer budget is 256 MiB per state domain, plus request and runtime overhead; lower the body or concurrency limit to fit your memory budget. The layer reads the complete body before invoking the handler, so an oversized or unreadable body cannot reach handler code. An active SSE response body or WebSocket session is outside this deadline.

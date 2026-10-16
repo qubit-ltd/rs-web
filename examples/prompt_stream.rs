@@ -35,6 +35,9 @@ use qubit_web::RequestLimitLayer;
 use qubit_web::ServerContext;
 use qubit_web::ServerOptions;
 use qubit_web::SseConnectionPolicy;
+use qubit_web::StreamAdmissionLayer;
+use qubit_web::StreamAdmissionLimits;
+use qubit_web::StreamAdmissionState;
 use qubit_web::WebServer;
 use qubit_web::WsUpgradePolicy;
 use qubit_web::json_response;
@@ -143,6 +146,77 @@ async fn shutdown(State(state): State<AppState>) -> StatusCode {
     }
 }
 
+fn build_router(state: AppState, http_limits: HttpLimits, stream_limits: StreamAdmissionLimits) -> Router {
+    let stream_state = StreamAdmissionState::new(stream_limits);
+    Router::new()
+        .route("/prompt", post(submit).layer(RequestLimitLayer::new(http_limits)))
+        .route(
+            "/prompt/demo-1/events",
+            get(progress).layer(StreamAdmissionLayer::from_state::<()>(stream_state.clone())),
+        )
+        .route(
+            "/prompt/demo-1/ws",
+            get(websocket).layer(StreamAdmissionLayer::from_state::<()>(stream_state)),
+        )
+        .route(
+            "/admin/shutdown",
+            post(shutdown).layer(RequestLimitLayer::new(http_limits)),
+        )
+        .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::http::StatusCode;
+    use qubit_web::HttpLimits;
+    use qubit_web::ServerOptions;
+    use qubit_web::SseConnectionPolicy;
+    use qubit_web::StreamAdmissionLimits;
+    use qubit_web::WebServer;
+    use qubit_web::WsUpgradePolicy;
+    use tokio::sync::oneshot;
+    use tower::ServiceExt;
+
+    use super::AppState;
+    use super::build_router;
+
+    #[tokio::test]
+    async fn stream_routes_reject_oversized_bodies_before_handlers() {
+        let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        let state = AppState {
+            context: server.context(),
+            sse: SseConnectionPolicy::default(),
+            ws: WsUpgradePolicy::new().allowed_origins(["http://localhost:3000"]),
+            shutdown: Arc::new(Mutex::new(Some(shutdown_tx))),
+        };
+        let stream_limits = StreamAdmissionLimits::default().with_max_body_bytes(8).unwrap();
+        let app = build_router(state, HttpLimits::default(), stream_limits);
+
+        for uri in ["/prompt/demo-1/events", "/prompt/demo-1/ws"] {
+            let response = app
+                .clone()
+                .oneshot(Request::get(uri).body(Body::from("123456789")).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{uri}");
+        }
+
+        let response = app
+            .oneshot(Request::get("/prompt/demo-1/events").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
 #[tokio_main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = ServerOptions::new("127.0.0.1:3001".parse::<SocketAddr>()?).with_max_transport_connections(128)?;
@@ -156,15 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ws: WsUpgradePolicy::new().allowed_origins(["http://localhost:3000"]),
         shutdown: Arc::new(Mutex::new(Some(shutdown_tx))),
     };
-    let app = Router::new()
-        .route("/prompt", post(submit).layer(RequestLimitLayer::new(http_limits)))
-        .route("/prompt/demo-1/events", get(progress))
-        .route("/prompt/demo-1/ws", get(websocket))
-        .route(
-            "/admin/shutdown",
-            post(shutdown).layer(RequestLimitLayer::new(http_limits)),
-        )
-        .with_state(state);
+    let app = build_router(state, http_limits, StreamAdmissionLimits::default());
     println!(
         "listening on http://{}; POST /admin/shutdown to stop",
         server.local_addr()

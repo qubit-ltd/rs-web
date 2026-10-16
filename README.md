@@ -101,6 +101,8 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 
 The sample bearer token is `demo-only`; it illustrates a handler check and is not authentication. A WebSocket client may connect to `ws://127.0.0.1:3001/prompt/demo-1/ws` with `Authorization: Bearer demo-only` and, if it sends an Origin, the allowed Origin `http://localhost:3000`. The endpoints demonstrate transport only: they do not run an Agent, save prompts, or persist jobs. See the [English user guide](doc/user_guide.md) for policy sharing, capacity planning, and shutdown details; the [Chinese user guide](doc/user_guide.zh_CN.md) covers the same workflow.
 
+In [`examples/prompt_stream.rs`](examples/prompt_stream.rs), the native SSE and WebSocket routes share one `StreamAdmissionState`. Its defaults allow up to 1 MiB of buffered request body per request, 256 concurrent admissions, and a 10-second deadline from admission through handler response headers. The deadline ends when response headers are ready; it does not cover the SSE stream or the WebSocket session after upgrade. SSE and WebSocket session capacity remains controlled separately by `SseConnectionPolicy` and `WsUpgradePolicy`.
+
 ## Limits and operational boundaries
 
 - Controller `short` routes start with `HttpLimits::default()`; native Axum routes need an explicit `RequestLimitLayer` on each selected short-request branch. `WebServer` does not install route limits for a supplied Router.
