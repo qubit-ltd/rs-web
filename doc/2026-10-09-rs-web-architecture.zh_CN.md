@@ -19,7 +19,7 @@
 | `sse` | 接纳有容量上限的 server-sent event 流，并将其登记为受管会话。 |
 | `ws` | 启用 `ws` feature 时校验 WebSocket 策略与 Origin、预留容量并管理会话 I/O。 |
 | `config` | 启用 `config` feature 时，将显式配置解析为 listener 选项及独立的 HTTP 路由限制。 |
-| `tls` | 启用 `tls-rustls` 时，为 HTTPS 加载或封装 rustls 配置。 |
+| `tls` | 启用 `tls` 时，为 HTTPS 加载或封装 rustls 配置。 |
 | `diagnostic`、`error`、`route_kind` | 提供请求诊断、稳定的公开错误和共享的路由分类。 |
 
 ## 容量域与默认值

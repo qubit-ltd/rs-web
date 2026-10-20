@@ -17,7 +17,7 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 ```
 
-这里列的是移植场景所需的直接依赖；只运行仓库自带示例时，Cargo 会使用仓库 manifest 中已有的依赖。启用 HTTPS 时按需给 `qubit-web` 增加 `tls-rustls`。只有希望把应用显式提供的 `qubit_config::Config` 转成服务配置时才需要 `config`；若代码直接引用 `qubit_config::Config`，还要在应用 manifest 中单独声明 `qubit-config`。`ConfiguredWeb` 不会替应用读取文件或全局配置。
+这里列的是移植场景所需的直接依赖；只运行仓库自带示例时，Cargo 会使用仓库 manifest 中已有的依赖。启用 HTTPS 时按需给 `qubit-web` 增加 `tls`。只有希望把应用显式提供的 `qubit_config::Config` 转成服务配置时才需要 `config`；若代码直接引用 `qubit_config::Config`，还要在应用 manifest 中单独声明 `qubit-config`。`ConfiguredWeb` 不会替应用读取文件或全局配置。
 
 先运行仓库里的完整示例，确认服务能启动并观察最小成功结果：
 

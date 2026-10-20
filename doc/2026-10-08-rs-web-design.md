@@ -77,7 +77,7 @@ flowchart LR
 | `server` | `WebServer`, `ServerOptions`, `ShutdownReport`, `bind_http`, `bind_https` | 持有已绑定监听、运行 Router、停止及地址查询 |
 | `mvc` | `ControllerRoutes`, `RouterExt` | 接收宏生成的路由描述，检查 Controller 间冲突并装配 Axum Router |
 | `qubit-web-macros` | `rest_controller`, `get_mapping` 等、`get` 等短别名、`route` | 编译期解析属性并生成无反射的路由代码；由 `qubit-web` 重导出 |
-| `tls`（`tls-rustls` feature） | `TlsConfig::from_pem_files`, `TlsConfig::from_rustls` | 证书/密钥加载与明确失败；TLS 终结复用同一 Router |
+| `tls`（`tls` feature） | `TlsConfig::from_pem_files`, `TlsConfig::from_rustls` | 证书/密钥加载与明确失败；TLS 终结复用同一 Router |
 | `limit` | `HttpLimits`, `RequestLimitLayer`, `WsLimits` | HTTP body 与 WS 大小/连接/队列约束；每路由可覆盖 |
 | `json`（`json` feature） | `BoundedJson<T>`, `JsonLimits` | 严格 JSON、输入/结构预算及响应编码预算 |
 | `ws`（`ws` feature） | `WsUpgradePolicy`, `WsSession`, `WsSendQueue` | 握手限制、长连接取消、心跳和有界发送 |
@@ -149,7 +149,7 @@ let app = app.merge(hand_written_router);
 
 ### 5.1 监听与 TLS
 
-基础 HTTP 使用 Axum 0.8/Tokio 监听；`tls-rustls` feature 使用 `axum-server` 0.8 的 rustls 集成。官方 Axum TLS 示例也采用 `axum-server`；借用成熟的 accept/TLS 服务封装，比在本 crate 自写 Hyper/Tokio-Rustls accept loop 更容易控制 API 与维护风险。两种监听使用同一个 `Router` 与相同的请求层。HTTPS 上的 `WebSocketUpgrade` 自然协商 WSS；不单独启动另一个 WS 服务器。
+基础 HTTP 使用 Axum 0.8/Tokio 监听；`tls` feature 使用 `axum-server` 0.8 的 rustls 集成。官方 Axum TLS 示例也采用 `axum-server`；借用成熟的 accept/TLS 服务封装，比在本 crate 自写 Hyper/Tokio-Rustls accept loop 更容易控制 API 与维护风险。两种监听使用同一个 `Router` 与相同的请求层。HTTPS 上的 `WebSocketUpgrade` 自然协商 WSS；不单独启动另一个 WS 服务器。
 
 必须显式指定监听地址和模式。示例与测试使用 loopback；公开绑定需由部署者提供可信 HTTPS 或明确的可信反向代理 TLS 终结。反向代理模式不默认信任 `Forwarded`/`X-Forwarded-*`，真实客户端 IP、scheme 与主机名只有在应用配置了受信代理范围后才可采用。首版不提供证书签发/续期和热重载，但允许调用方传入已构建的 rustls 配置，为后续安全轮换留接口。TLS 私钥内容绝不进入错误或日志。
 
@@ -199,7 +199,7 @@ SSE 响应应设置 `text/event-stream`、禁用会改变实时交付语义的�
 | `qubit-http` | 不依赖 | Rust 出站客户端；测试可用它做黑盒 HTTP/HTTPS/SSE 请求，但不组成运行时依赖环 |
 | `qubit-event-bus`、`qubit-id`、`qubit-clock` | 按真实消费者再评估 | 事件持久化、领域 ID 和时间权威属于应用；基础心跳用 Tokio 时间即可 |
 
-外部底座：Axum 0.8、Tokio、Tower/Tower-HTTP；`tls-rustls` feature 使用 `axum-server` 0.8/rustls；`ws` feature 使用 Axum 原生 WS。准确的最小兼容版本与 feature 组合在实施时通过 `cargo tree` 和 Cargo feature matrix 锁定。保持本仓库独立 Cargo workspace、Rust 1.94、现行 rs-infra bootstrap，不把其他 `rs-*` 项目复制进源码。
+外部底座：Axum 0.8、Tokio、Tower/Tower-HTTP；`tls` feature 使用 `axum-server` 0.8/rustls；`ws` feature 使用 Axum 原生 WS。准确的最小兼容版本与 feature 组合在实施时通过 `cargo tree` 和 Cargo feature matrix 锁定。保持本仓库独立 Cargo workspace、Rust 1.94、现行 rs-infra bootstrap，不把其他 `rs-*` 项目复制进源码。
 
 ## 10. 仓库文件布局与分阶段交付
 
@@ -218,7 +218,7 @@ rs-web/
     options.rs
     error.rs
     limit.rs
-    tls.rs            # tls-rustls feature
+    tls.rs            # tls feature
     json.rs           # json feature
     sse.rs
     ws.rs             # ws feature
@@ -263,7 +263,7 @@ rs-web/
 | WS 大帧、分片重组、队列满与空闲 | 每种上限触发可观察的拒绝/关闭，连接不继续无限排队 |
 | shutdown | 新连接停止、短请求完成、SSE/WS 收到关闭、超期连接被终止；无后台任务泄漏 |
 | 日志隐私 | Authorization、Cookie、敏感 query、Prompt/body、TLS key 与 WS 消息不出现在默认和 TRACE 诊断中 |
-| 各 feature 独立构建 | 默认、`json`、`ws`、`tls-rustls`、全 feature 均可编译测试；禁用可选 feature 不拉入对应重依赖 |
+| 各 feature 独立构建 | 默认、`json`、`ws`、`tls`、全 feature 均可编译测试；禁用可选 feature 不拉入对应重依赖 |
 
 不把 HTTP 层测试当作应用幂等、SSE 事件重放或 Agent 执行成功的证据。那些场景由消费项目自己的合同和端到端测试负责。
 
@@ -337,7 +337,7 @@ HTTP/HTTPS 均在 `bind_*` 阶段先完成配置检查和 socket 绑定；HTTPS 
 
 ### 13.7 依赖及 feature 组合
 
-`default = []` 仍包含 HTTP 运行、REST 宏、限制、SSE 和基础诊断；这里的空默认 feature 集表示这些是主包基础依赖，不代表没有宏能力。`qubit-web-macros` 是同一 workspace 的过程宏成员，由主包依赖并重导出；`json` 才引入 `qubit-json`/`qubit-budget`，`ws` 才启用 Axum WS 支持，`tls-rustls` 才引入 rustls 服务端集成，`config` 才引入 `qubit-config`。`qubit-redact` 的 `http` 功能属于默认诊断依赖。各 feature 可独立开启；`--all-features` 必须同时成立。依赖版本以实施时的 Cargo 解析和兼容测试锁定，不能仅凭文档中的版本号推断可编译。
+`default = []` 仍包含 HTTP 运行、REST 宏、限制、SSE 和基础诊断；这里的空默认 feature 集表示这些是主包基础依赖，不代表没有宏能力。`qubit-web-macros` 是同一 workspace 的过程宏成员，由主包依赖并重导出；`json` 才引入 `qubit-json`/`qubit-budget`，`ws` 才启用 Axum WS 支持，`tls` 才引入 rustls 服务端集成，`config` 才引入 `qubit-config`。`qubit-redact` 的 `http` 功能属于默认诊断依赖。各 feature 可独立开启；`--all-features` 必须同时成立。依赖版本以实施时的 Cargo 解析和兼容测试锁定，不能仅凭文档中的版本号推断可编译。
 
 ### 13.8 需求到模块和测试的追踪
 

@@ -17,7 +17,7 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 ```
 
-These are the direct dependencies used to move the [`prompt_stream` example](../examples/prompt_stream.rs) into a separate application. To run the repository example itself, use the repository's manifest and the command in [Run, observe, and stop the service](#run-observe-and-stop-the-service). For HTTPS add `tls-rustls`. Add `config` only if you want `ConfiguredWeb` to parse a `qubit_config::Config` value supplied by your application; it does not load a file or global settings source for you. If your application imports `qubit_config::Config` directly, declare `qubit-config` as a direct dependency too.
+These are the direct dependencies used to move the [`prompt_stream` example](../examples/prompt_stream.rs) into a separate application. To run the repository example itself, use the repository's manifest and the command in [Run, observe, and stop the service](#run-observe-and-stop-the-service). For HTTPS add `tls`. Add `config` only if you want `ConfiguredWeb` to parse a `qubit_config::Config` value supplied by your application; it does not load a file or global settings source for you. If your application imports `qubit_config::Config` directly, declare `qubit-config` as a direct dependency too.
 
 Choose the listener capacity for each server instance. The default is 1024 transport connections. Set a positive value explicitly when the service's file descriptor, TLS, or memory budget calls for a smaller cap:
 

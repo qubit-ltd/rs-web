@@ -19,7 +19,7 @@ The main module responsibilities are:
 | `sse` | Admit bounded server-sent event streams and track them as managed sessions. |
 | `ws` | Validate WebSocket policy and Origin, reserve capacity, and manage inbound/outbound session I/O when the `ws` feature is enabled. |
 | `config` | Parse explicit configuration values into listener options and separate HTTP route limits when the `config` feature is enabled. |
-| `tls` | Load or wrap rustls configuration for HTTPS when `tls-rustls` is enabled. |
+| `tls` | Load or wrap rustls configuration for HTTPS when `tls` is enabled. |
 | `diagnostic`, `error`, `route_kind` | Supply request diagnostics, stable public errors, and shared route classification. |
 
 ## Capacity domains and defaults
