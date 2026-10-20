@@ -85,7 +85,7 @@ pub mod sse;
 pub mod config;
 #[cfg(feature = "json")]
 pub mod json;
-#[cfg(feature = "tls-rustls")]
+#[cfg(feature = "tls")]
 pub mod tls;
 #[cfg(feature = "ws")]
 pub mod ws;
@@ -133,7 +133,7 @@ pub use server::ShutdownReport;
 pub use server::WebServer;
 pub use sse::SseCapacityExceeded;
 pub use sse::SseConnectionPolicy;
-#[cfg(feature = "tls-rustls")]
+#[cfg(feature = "tls")]
 pub use tls::TlsConfig;
 #[cfg(feature = "ws")]
 pub use ws::WsPolicyError;

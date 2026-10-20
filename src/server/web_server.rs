@@ -24,7 +24,7 @@ use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-#[cfg(feature = "tls-rustls")]
+#[cfg(feature = "tls")]
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 
@@ -76,7 +76,7 @@ pub struct WebServer {
     /// Shared shutdown and session-tracking state.
     context: ServerContext,
     /// TLS acceptor when this server was created from HTTPS configuration.
-    #[cfg(feature = "tls-rustls")]
+    #[cfg(feature = "tls")]
     tls_acceptor: Option<TlsAcceptor>,
 }
 
@@ -116,7 +116,7 @@ impl WebServer {
             local_addr,
             options,
             context,
-            #[cfg(feature = "tls-rustls")]
+            #[cfg(feature = "tls")]
             tls_acceptor: None,
         })
     }
@@ -137,7 +137,7 @@ impl WebServer {
     /// Returns [`WebServerError::InvalidConfig`] for invalid options or
     /// [`WebServerError::BindFailed`] when binding fails or
     /// [`WebServerError::LocalAddressFailed`] when address lookup fails.
-    #[cfg(feature = "tls-rustls")]
+    #[cfg(feature = "tls")]
     pub async fn bind_https(options: ServerOptions, config: crate::tls::TlsConfig) -> Result<Self, WebServerError> {
         options.validate()?;
         let listener = TcpListener::bind(options.addr)
@@ -162,7 +162,7 @@ impl WebServer {
     ///
     /// Returns [`WebServerError::InvalidConfig`] or
     /// [`WebServerError::LocalAddressFailed`] if address lookup fails.
-    #[cfg(feature = "tls-rustls")]
+    #[cfg(feature = "tls")]
     pub(crate) fn from_tls_listener(
         options: ServerOptions,
         listener: TcpListener,
@@ -233,7 +233,7 @@ impl WebServer {
             listener,
             options,
             context,
-            #[cfg(feature = "tls-rustls")]
+            #[cfg(feature = "tls")]
             tls_acceptor,
             ..
         } = self;
@@ -262,13 +262,13 @@ impl WebServer {
                     };
                     let app = app.clone();
                     let watcher = graceful.watcher();
-                    #[cfg(feature = "tls-rustls")]
+                    #[cfg(feature = "tls")]
                     let tls_acceptor = tls_acceptor.clone();
-                    #[cfg(feature = "tls-rustls")]
+                    #[cfg(feature = "tls")]
                     let cancellation = context.cancellation_token();
                     connections.spawn(async move {
                         let _permit = permit;
-                        #[cfg(feature = "tls-rustls")]
+                        #[cfg(feature = "tls")]
                         if let Some(acceptor) = tls_acceptor {
                             let accepted = tokio::select! {
                                 biased;

@@ -5,7 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-#![cfg(feature = "tls-rustls")]
+#![cfg(feature = "tls")]
 
 use std::future::pending;
 use std::io::BufRead;
@@ -27,11 +27,11 @@ use std::sync::mpsc::channel;
 use std::time::Duration;
 
 use axum::Router;
-#[cfg(all(feature = "tls-rustls", feature = "ws"))]
+#[cfg(all(feature = "tls", feature = "ws"))]
 use axum::extract::ws::Message;
-#[cfg(all(feature = "tls-rustls", feature = "ws"))]
+#[cfg(all(feature = "tls", feature = "ws"))]
 use axum::extract::ws::WebSocket;
-#[cfg(all(feature = "tls-rustls", feature = "ws"))]
+#[cfg(all(feature = "tls", feature = "ws"))]
 use axum::extract::ws::WebSocketUpgrade;
 use axum::routing::get;
 use qubit_web::ServerOptions;
@@ -196,7 +196,7 @@ async fn capture_tls_client_hello() -> Vec<u8> {
     client_hello
 }
 
-#[cfg(all(feature = "tls-rustls", feature = "ws"))]
+#[cfg(all(feature = "tls", feature = "ws"))]
 #[tokio_test]
 async fn test_serves_a_websocket_echo_over_tls() {
     let tls = TlsConfig::from_pem_files(fixture("cert.pem"), fixture("key.pem"))
@@ -227,7 +227,7 @@ async fn test_serves_a_websocket_echo_over_tls() {
     assert_eq!(echoed, "wss-echo-sentinel");
 }
 
-#[cfg(all(feature = "tls-rustls", feature = "ws"))]
+#[cfg(all(feature = "tls", feature = "ws"))]
 #[tokio_test]
 async fn test_websocket_upgrade_releases_transport_capacity_for_another_https_request() {
     let tls = TlsConfig::from_pem_files(fixture("cert.pem"), fixture("key.pem"))
@@ -275,7 +275,7 @@ async fn test_websocket_upgrade_releases_transport_capacity_for_another_https_re
     assert!(serving.await.unwrap().unwrap().graceful);
 }
 
-#[cfg(all(feature = "tls-rustls", feature = "ws"))]
+#[cfg(all(feature = "tls", feature = "ws"))]
 fn wss_echo(address: SocketAddr) -> String {
     let mut child = Command::new("timeout")
         .args([
@@ -391,7 +391,7 @@ fn https_request(address: SocketAddr, path: &str) -> String {
     response
 }
 
-#[cfg(all(feature = "tls-rustls", feature = "ws"))]
+#[cfg(all(feature = "tls", feature = "ws"))]
 fn wss_open_until_stopped(address: SocketAddr, ready: oneshot::Sender<String>, stop: Receiver<()>) {
     let mut child = Command::new("timeout")
         .args([

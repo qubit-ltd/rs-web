@@ -5,7 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-#![cfg(all(feature = "json", feature = "ws", feature = "tls-rustls", feature = "config"))]
+#![cfg(all(feature = "json", feature = "ws", feature = "tls", feature = "config"))]
 
 use std::convert::Infallible;
 use std::io::BufRead;
