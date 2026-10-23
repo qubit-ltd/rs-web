@@ -1778,6 +1778,10 @@ name = "qubit-http"
 version = "0.16.0"
 
 [[patch.unused]]
+name = "qubit-io"
+version = "0.19.0"
+
+[[patch.unused]]
 name = "qubit-ioc"
 version = "0.4.0"
 
