@@ -79,7 +79,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["limit", "trace"] }
 tracing = "0.1"
 qubit-json = { version = "0.12", optional = true }
-qubit-budget = { version = "0.9.1", features = ["json"], optional = true }
+qubit-budget = { version = "0.10", features = ["json"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 qubit-config = { version = "0.15", default-features = false, optional = true }
 axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
