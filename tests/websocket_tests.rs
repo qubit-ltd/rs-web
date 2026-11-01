@@ -851,7 +851,7 @@ async fn test_context_session_is_released_after_shutdown_deadline_without_peer_a
 }
 
 #[tokio_test]
-async fn test_stalled_writer_shutdown_releases_resources() {
+async fn test_full_application_queue_shutdown_releases_resources() {
     #[derive(Clone)]
     struct StalledWriterState {
         policy: WsUpgradePolicy,
@@ -909,8 +909,8 @@ async fn test_stalled_writer_shutdown_releases_resources() {
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
     timeout(Duration::from_secs(2), ready_rx)
         .await
-        .expect("handler should fill the send queue without client reads")
-        .expect("handler should report its send loop checkpoint");
+        .expect("handler should observe a full application queue without client reads")
+        .expect("handler should report the application queue checkpoint");
 
     shutdown.cancel();
     let _report = timeout(Duration::from_secs(2), &mut serving)
@@ -927,6 +927,104 @@ async fn test_stalled_writer_shutdown_releases_resources() {
     .expect("shutdown should release the managed session and connection permit");
     assert_eq!(context.active_sessions(), 0);
     assert_eq!(policy.active_connections(), 0);
+}
+
+#[tokio_test]
+async fn test_session_close_is_idempotent() {
+    async fn upgrade(
+        State((policy, context, result_tx)): State<(
+            WsUpgradePolicy,
+            ServerContext,
+            Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+        )>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, |mut session| async move {
+            session.close().await;
+            let first_close_succeeded = timeout(Duration::from_secs(1), session.close()).await.is_ok();
+            let _ = result_tx.lock().unwrap().take().unwrap().send(first_close_succeeded);
+        })
+    }
+
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(100)),
+    )
+    .await
+    .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new().max_connections(1);
+    let (result_tx, result_rx) = oneshot::channel();
+    let app = Router::new().route("/ws", get(upgrade)).with_state((
+        policy.clone(),
+        context.clone(),
+        Arc::new(Mutex::new(Some(result_tx))),
+    ));
+    let shutdown = CancellationToken::new();
+    let serving = spawn(server.serve(app, shutdown.clone().cancelled_owned()));
+
+    let (_client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    assert!(
+        timeout(Duration::from_secs(2), result_rx)
+            .await
+            .expect("handler should finish both close calls")
+            .expect("close result should be reported")
+    );
+    shutdown.cancel();
+    let _report = serving.await.unwrap().unwrap();
+    assert_eq!(policy.active_connections(), 0);
+    assert_eq!(context.active_sessions(), 0);
+}
+
+#[tokio_test]
+async fn test_recv_after_explicit_close_returns_none() {
+    async fn upgrade(
+        State((policy, context, result_tx)): State<(
+            WsUpgradePolicy,
+            ServerContext,
+            Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+        )>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, |mut session| async move {
+            session.close().await;
+            let returned_none = session.recv().await.is_none();
+            let _ = result_tx.lock().unwrap().take().unwrap().send(returned_none);
+        })
+    }
+
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(100)),
+    )
+    .await
+    .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new().max_connections(1);
+    let (result_tx, result_rx) = oneshot::channel();
+    let app = Router::new().route("/ws", get(upgrade)).with_state((
+        policy.clone(),
+        context.clone(),
+        Arc::new(Mutex::new(Some(result_tx))),
+    ));
+    let shutdown = CancellationToken::new();
+    let serving = spawn(server.serve(app, shutdown.clone().cancelled_owned()));
+
+    let (_client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    assert!(
+        timeout(Duration::from_secs(2), result_rx)
+            .await
+            .expect("handler should report recv after close")
+            .expect("recv result should be reported")
+    );
+    shutdown.cancel();
+    let _report = serving.await.unwrap().unwrap();
+    assert_eq!(policy.active_connections(), 0);
+    assert_eq!(context.active_sessions(), 0);
 }
 
 #[tokio_test]

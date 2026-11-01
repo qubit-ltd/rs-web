@@ -484,8 +484,8 @@ impl WsUpgradePolicy {
                     shutdown: session_shutdown,
                     idle_timeout: policy.inner.idle_timeout,
                     shutdown_timeout,
-                    writer,
-                    reader,
+                    writer: Some(writer),
+                    reader: Some(reader),
                 };
                 select! {
                     biased;

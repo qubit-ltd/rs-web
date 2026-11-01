@@ -14,12 +14,11 @@ use std::time::Duration;
 
 use axum::extract::ws::CloseFrame;
 use axum::extract::ws::Message;
-use axum::extract::ws::WebSocket;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use futures_util::Sink;
 use futures_util::SinkExt;
-use futures_util::stream::SplitSink;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio::time::timeout_at;
@@ -68,7 +67,7 @@ pub(in crate::ws) fn server_shutting_down_response() -> Response {
         .into_response()
 }
 
-/// Sends a close frame and waits for the reader's peer-acknowledgement signal.
+/// Sends a close frame through a sink and waits for the reader's peer-acknowledgement signal.
 ///
 /// # Parameters
 ///
@@ -76,12 +75,14 @@ pub(in crate::ws) fn server_shutting_down_response() -> Response {
 /// * `close_ack` - Signal receiver completed when the reader observes a close.
 /// * `code` - Protocol close code to send.
 /// * `deadline` - Absolute latest time for sending and acknowledging close.
-pub(in crate::ws) async fn send_close_and_wait(
-    sink: &mut SplitSink<WebSocket, Message>,
+pub(in crate::ws) async fn send_close_and_wait<S>(
+    sink: &mut S,
     close_ack: &mut oneshot::Receiver<()>,
     code: u16,
     deadline: Instant,
-) {
+) where
+    S: Sink<Message> + Unpin,
+{
     match timeout_at(deadline, sink.send(server_shutdown_close(code))).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) | Err(_) => return,
