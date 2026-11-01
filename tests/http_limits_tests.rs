@@ -17,6 +17,7 @@ use std::task::Poll;
 use axum::Router;
 use axum::body::Body;
 use axum::body::Bytes;
+use axum::extract::State;
 use axum::http::Request;
 use axum::http::StatusCode;
 use axum::http::header::CONTENT_LENGTH;
@@ -128,6 +129,31 @@ async fn handler_starts_before_the_request_body_reaches_eof() {
 
 async fn echo(_: Bytes) -> &'static str {
     "ok"
+}
+
+#[derive(Clone)]
+struct AppState(Arc<AtomicUsize>);
+
+async fn stateful_handler(State(state): State<AppState>) -> &'static str {
+    state.0.fetch_add(1, Ordering::SeqCst);
+    "ok"
+}
+
+#[tokio::test]
+async fn request_limit_layer_installs_on_router_with_application_state() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/", post(stateful_handler))
+        .with_state(AppState(calls.clone()))
+        .layer(RequestLimitLayer::new(HttpLimits::default()));
+
+    let response = app
+        .oneshot(Request::post("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

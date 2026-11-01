@@ -41,9 +41,26 @@ pub type LimitMiddleware = fn(State<LimitState>, Request<Body>, Next) -> LimitFu
 /// # Examples
 ///
 /// ```
+/// use axum::Router;
+/// use axum::routing::get;
 /// use qubit_web::{HttpLimits, RequestLimitLayer};
 ///
-/// let _layer = RequestLimitLayer::new::<()>(HttpLimits::default());
+/// async fn handler() -> &'static str { "ok" }
+///
+/// let app: Router<()> = Router::new()
+///     .route("/", get(handler))
+///     .layer(RequestLimitLayer::new(HttpLimits::default()));
+/// # let _ = app;
+///
+/// #[derive(Clone)]
+/// struct AppState;
+/// async fn stateful(_: axum::extract::State<AppState>) -> &'static str { "ok" }
+///
+/// let app = Router::new()
+///     .route("/stateful", get(stateful))
+///     .with_state(AppState)
+///     .layer(RequestLimitLayer::new(HttpLimits::default()));
+/// # let _ = app;
 /// ```
 #[must_use]
 pub struct RequestLimitLayer;
@@ -71,10 +88,6 @@ impl RequestLimitLayer {
     /// `invalid_configuration` and releases the acquired capacity permit.
     /// Long-lived SSE and WebSocket routes must not use this layer.
     ///
-    /// # Type Parameters
-    ///
-    /// - `S`: Axum router state type for the selected branch.
-    ///
     /// # Parameters
     ///
     /// - `limits`: validated body, concurrency, and timeout budgets.
@@ -83,15 +96,13 @@ impl RequestLimitLayer {
     ///
     /// A middleware layer carrying a fresh shared state for this branch.
     #[allow(clippy::new_ret_no_self)]
-    pub fn new<S>(limits: HttpLimits) -> middleware::FromFnLayer<LimitMiddleware, LimitState, S> {
+    pub fn new(
+        limits: HttpLimits,
+    ) -> middleware::FromFnLayer<LimitMiddleware, LimitState, (State<LimitState>, Request<Body>)> {
         Self::from_state(LimitState::new(limits))
     }
 
     /// Creates a middleware using a previously shared branch state.
-    ///
-    /// # Type Parameters
-    ///
-    /// - `S`: Axum router state type for the selected branch.
     ///
     /// # Parameters
     ///
@@ -101,8 +112,13 @@ impl RequestLimitLayer {
     ///
     /// A middleware layer that reuses the supplied branch state.
     #[doc(hidden)]
-    pub fn from_state<S>(state: LimitState) -> middleware::FromFnLayer<LimitMiddleware, LimitState, S> {
-        middleware::from_fn_with_state::<_, LimitState, S>(state, enforce_limits as LimitMiddleware)
+    pub fn from_state(
+        state: LimitState,
+    ) -> middleware::FromFnLayer<LimitMiddleware, LimitState, (State<LimitState>, Request<Body>)> {
+        middleware::from_fn_with_state::<_, LimitState, (State<LimitState>, Request<Body>)>(
+            state,
+            enforce_limits as LimitMiddleware,
+        )
     }
 }
 

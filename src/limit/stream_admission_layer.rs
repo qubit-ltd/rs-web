@@ -35,6 +35,31 @@ pub type StreamAdmissionMiddleware = fn(State<StreamAdmissionState>, Request<Bod
 /// Creates middleware that buffers request bodies before invoking a long-lived
 /// route handler. The deadline ends when response headers are produced; it
 /// does not cover streaming the response body or a WebSocket session.
+///
+/// # Example
+///
+/// ```
+/// use axum::Router;
+/// use axum::routing::post;
+/// use qubit_web::{StreamAdmissionLayer, StreamAdmissionLimits};
+///
+/// async fn handler() -> &'static str { "ok" }
+///
+/// let app: Router<()> = Router::new()
+///     .route("/", post(handler))
+///     .layer(StreamAdmissionLayer::new(StreamAdmissionLimits::default()));
+/// # let _ = app;
+///
+/// #[derive(Clone)]
+/// struct AppState;
+/// async fn stateful(_: axum::extract::State<AppState>) -> &'static str { "ok" }
+///
+/// let app = Router::new()
+///     .route("/stateful", post(stateful))
+///     .with_state(AppState)
+///     .layer(StreamAdmissionLayer::new(StreamAdmissionLimits::default()));
+/// # let _ = app;
+/// ```
 #[must_use]
 pub struct StreamAdmissionLayer;
 
@@ -44,10 +69,6 @@ impl StreamAdmissionLayer {
     /// Each independent layer created this way has its own semaphore. Clone a
     /// [`StreamAdmissionState`] and use [`Self::from_state`] when multiple
     /// branches need to share a capacity budget.
-    ///
-    /// # Type Parameters
-    ///
-    /// - `S`: router state type used when applying the layer.
     ///
     /// # Parameters
     ///
@@ -63,21 +84,17 @@ impl StreamAdmissionLayer {
     /// 256 MiB plus request/runtime overhead. Independent layers have
     /// independent budgets.
     #[allow(clippy::new_ret_no_self)]
-    pub fn new<S>(
+    pub fn new(
         limits: super::stream_admission_limits::StreamAdmissionLimits,
     ) -> middleware::FromFnLayer<
         StreamAdmissionMiddleware,
         StreamAdmissionState,
         (State<StreamAdmissionState>, Request<Body>),
     > {
-        Self::from_state::<S>(StreamAdmissionState::new(limits))
+        Self::from_state(StreamAdmissionState::new(limits))
     }
 
     /// Creates middleware from a state shared with other route branches.
-    ///
-    /// # Type Parameters
-    ///
-    /// - `S`: router state type used when applying the layer.
     ///
     /// # Parameters
     ///
@@ -94,7 +111,7 @@ impl StreamAdmissionLayer {
     /// up to response headers only; the response body is not timed by this
     /// layer. If the absolute deadline cannot be represented at runtime, the
     /// layer returns HTTP 500 (`invalid_configuration`).
-    pub fn from_state<S>(
+    pub fn from_state(
         state: StreamAdmissionState,
     ) -> middleware::FromFnLayer<
         StreamAdmissionMiddleware,

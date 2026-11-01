@@ -57,7 +57,7 @@ fn app(limits: StreamAdmissionLimits, calls: Arc<AtomicUsize>) -> Router {
     Router::new()
         .route("/", post(accepted_handler))
         .with_state(calls)
-        .layer(StreamAdmissionLayer::new::<()>(limits))
+        .layer(StreamAdmissionLayer::new(limits))
 }
 
 async fn body(response: Response) -> String {
@@ -115,7 +115,7 @@ async fn over_limit_body_is_rejected_even_when_handler_would_not_read_it() {
     let router = Router::new()
         .route("/", post(ignore_body))
         .with_state(calls.clone())
-        .layer(StreamAdmissionLayer::new::<()>(StreamAdmissionLimits::default()));
+        .layer(StreamAdmissionLayer::new(StreamAdmissionLimits::default()));
     let response = router
         .oneshot(
             Request::post("/")
@@ -226,7 +226,7 @@ async fn admission_permit_is_released_after_response_headers() {
     let router = Router::new()
         .route("/", post(blocked))
         .with_state(gate.clone())
-        .layer(StreamAdmissionLayer::new::<()>(limits));
+        .layer(StreamAdmissionLayer::new(limits));
     let first = tokio::spawn(router.clone().oneshot(Request::post("/").body(Body::empty()).unwrap()));
     gate.entered.notified().await;
     let rejected = router
@@ -246,6 +246,43 @@ async fn admission_permit_is_released_after_response_headers() {
 }
 
 #[tokio::test]
+async fn shared_state_limits_admissions_across_router_branches() {
+    let gate = Gate {
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let limits = StreamAdmissionLimits::default()
+        .with_max_concurrent_admissions(1)
+        .unwrap();
+    let state = qubit_web::StreamAdmissionState::new(limits);
+    let router = Router::new()
+        .route(
+            "/first",
+            post(blocked).layer(StreamAdmissionLayer::from_state(state.clone())),
+        )
+        .route("/second", post(blocked).layer(StreamAdmissionLayer::from_state(state)))
+        .with_state(gate.clone());
+
+    let first = tokio::spawn(
+        router
+            .clone()
+            .oneshot(Request::post("/first").body(Body::empty()).unwrap()),
+    );
+    gate.entered.notified().await;
+    let rejected = router
+        .clone()
+        .oneshot(Request::post("/second").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+
+    gate.release.add_permits(1);
+    assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn admission_deadline_covers_handler_but_not_response_body() {
     async fn slow() -> &'static str {
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -256,7 +293,7 @@ async fn admission_deadline_covers_handler_but_not_response_body() {
         .unwrap();
     let response = Router::new()
         .route("/", post(slow))
-        .layer(StreamAdmissionLayer::new::<()>(limits))
+        .layer(StreamAdmissionLayer::new(limits))
         .oneshot(Request::post("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -270,7 +307,7 @@ async fn admission_deadline_covers_handler_but_not_response_body() {
     }
     let response = Router::new()
         .route("/", post(streaming))
-        .layer(StreamAdmissionLayer::new::<()>(limits))
+        .layer(StreamAdmissionLayer::new(limits))
         .oneshot(Request::post("/").body(Body::empty()).unwrap())
         .await
         .unwrap();

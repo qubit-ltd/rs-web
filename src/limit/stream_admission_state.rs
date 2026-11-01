@@ -19,6 +19,25 @@ use super::stream_admission_limits::StreamAdmissionLimits;
 /// A newly constructed state is an independent capacity domain. Clones share
 /// the same semaphore; the configured body-byte and admission-count defaults
 /// are 1 MiB and 256, respectively, and apply per state domain.
+///
+/// # Example
+///
+/// ```
+/// use axum::Router;
+/// use axum::routing::post;
+/// use qubit_web::{StreamAdmissionLayer, StreamAdmissionLimits, StreamAdmissionState};
+///
+/// async fn handler() -> &'static str { "ok" }
+///
+/// let state = StreamAdmissionState::new(
+///     StreamAdmissionLimits::default().with_max_concurrent_admissions(4)?,
+/// );
+/// let app: Router<()> = Router::new()
+///     .route("/events", post(handler).layer(StreamAdmissionLayer::from_state(state.clone())))
+///     .route("/socket", post(handler).layer(StreamAdmissionLayer::from_state(state)));
+/// # let _ = app;
+/// # Ok::<(), qubit_web::WebServerError>(())
+/// ```
 #[derive(Clone)]
 #[must_use]
 pub struct StreamAdmissionState {

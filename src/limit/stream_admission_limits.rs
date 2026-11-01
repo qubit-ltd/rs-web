@@ -20,6 +20,24 @@ use std::time::Duration;
 /// theoretical request-body buffer budget is therefore 256 MiB per independent
 /// state domain, excluding request and runtime overhead; reduce either limit
 /// to fit the application's memory budget.
+///
+/// # Example
+///
+/// ```
+/// use axum::Router;
+/// use axum::routing::post;
+/// use qubit_web::{StreamAdmissionLayer, StreamAdmissionLimits};
+///
+/// async fn handler() -> &'static str { "ok" }
+///
+/// let limits = StreamAdmissionLimits::default()
+///     .with_max_concurrent_admissions(8)?;
+/// let app: Router<()> = Router::new()
+///     .route("/events", post(handler))
+///     .layer(StreamAdmissionLayer::new(limits));
+/// # let _ = app;
+/// # Ok::<(), qubit_web::WebServerError>(())
+/// ```
 #[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamAdmissionLimits {

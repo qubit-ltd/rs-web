@@ -152,11 +152,11 @@ fn build_router(state: AppState, http_limits: HttpLimits, stream_limits: StreamA
         .route("/prompt", post(submit).layer(RequestLimitLayer::new(http_limits)))
         .route(
             "/prompt/demo-1/events",
-            get(progress).layer(StreamAdmissionLayer::from_state::<()>(stream_state.clone())),
+            get(progress).layer(StreamAdmissionLayer::from_state(stream_state.clone())),
         )
         .route(
             "/prompt/demo-1/ws",
-            get(websocket).layer(StreamAdmissionLayer::from_state::<()>(stream_state)),
+            get(websocket).layer(StreamAdmissionLayer::from_state(stream_state)),
         )
         .route(
             "/admin/shutdown",

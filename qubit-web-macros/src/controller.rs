@@ -184,7 +184,7 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
             } else {
                 quote! {
                     let route = route
-                        .layer(::qubit_web::StreamAdmissionLayer::from_state::<#state_type_ref>(stream_state.clone()))
+                        .layer(::qubit_web::StreamAdmissionLayer::from_state(stream_state.clone()))
                         .layer(::qubit_web::diagnostic::DiagnosticLayer::new());
                 }
             };
