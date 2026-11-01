@@ -931,12 +931,11 @@ async fn test_full_application_queue_shutdown_releases_resources() {
 
 #[tokio_test]
 async fn test_session_close_is_idempotent() {
+    type CloseResultSender = Arc<Mutex<Option<oneshot::Sender<bool>>>>;
+    type CloseHandlerState = (WsUpgradePolicy, ServerContext, CloseResultSender);
+
     async fn upgrade(
-        State((policy, context, result_tx)): State<(
-            WsUpgradePolicy,
-            ServerContext,
-            Arc<Mutex<Option<oneshot::Sender<bool>>>>,
-        )>,
+        State((policy, context, result_tx)): State<CloseHandlerState>,
         headers: HeaderMap,
         ws: WebSocketUpgrade,
     ) -> Response {
@@ -980,12 +979,11 @@ async fn test_session_close_is_idempotent() {
 
 #[tokio_test]
 async fn test_recv_after_explicit_close_returns_none() {
+    type CloseResultSender = Arc<Mutex<Option<oneshot::Sender<bool>>>>;
+    type CloseHandlerState = (WsUpgradePolicy, ServerContext, CloseResultSender);
+
     async fn upgrade(
-        State((policy, context, result_tx)): State<(
-            WsUpgradePolicy,
-            ServerContext,
-            Arc<Mutex<Option<oneshot::Sender<bool>>>>,
-        )>,
+        State((policy, context, result_tx)): State<CloseHandlerState>,
         headers: HeaderMap,
         ws: WebSocketUpgrade,
     ) -> Response {
