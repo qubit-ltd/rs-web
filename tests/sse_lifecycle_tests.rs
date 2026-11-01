@@ -33,6 +33,7 @@ use hyper_util::rt::TokioExecutor;
 use qubit_web::ServerOptions;
 use qubit_web::SseConnectionPolicy;
 use qubit_web::WebServer;
+use qubit_web::WebServerError;
 use qubit_web::sse::SseAdmissionError;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
@@ -418,5 +419,14 @@ fn test_sse_policy_defaults_and_zero_keep_alive_validation() {
         SseConnectionPolicy::new(NonZeroUsize::new(128).unwrap())
             .with_keep_alive_interval(Duration::ZERO)
             .is_err()
+    );
+    assert!(matches!(
+        SseConnectionPolicy::new(NonZeroUsize::new(1).unwrap()).with_keep_alive_interval(Duration::MAX),
+        Err(WebServerError::InvalidConfig)
+    ));
+    assert!(
+        SseConnectionPolicy::new(NonZeroUsize::new(1).unwrap())
+            .with_keep_alive_interval(Duration::from_secs(1))
+            .is_ok()
     );
 }

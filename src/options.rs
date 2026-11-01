@@ -35,7 +35,8 @@ pub struct ServerOptions {
     pub(crate) shutdown_timeout: Duration,
     /// Maximum duration allowed to receive HTTP/1 request headers. HTTPS TLS
     /// handshakes use the same duration; HTTP/2 request headers are not timed
-    /// by the HTTP/1 header timer. Defaults to 10 seconds.
+    /// by the HTTP/1 header timer. The timeout must form a representable Tokio
+    /// deadline. Defaults to 10 seconds.
     pub(crate) request_header_timeout: Duration,
     /// Maximum duration a transport connection may remain without an active
     /// request or response body.
@@ -129,8 +130,8 @@ impl ServerOptions {
     ///
     /// # Parameters
     ///
-    /// * `timeout` - Header receive deadline; zero is rejected during
-    ///   validation.
+    /// * `timeout` - Header receive deadline; zero or a duration that cannot
+    ///   form a representable Tokio deadline is rejected during validation.
     ///
     /// # Returns
     ///
@@ -192,18 +193,21 @@ impl ServerOptions {
     ///
     /// # Returns
     ///
-    /// `Ok(())` when all timeouts are positive, the shutdown deadline can be
-    /// represented, and connection limits are valid.
+    /// `Ok(())` when all timeouts are positive, the shutdown and request-header
+    /// deadlines can be represented by Tokio, and connection limits are valid.
     ///
     /// # Errors
     ///
     /// Returns [`WebServerError::InvalidConfig`] if a timeout is zero, the
-    /// shutdown deadline cannot be represented, or the transport capacity
-    /// exceeds `tokio::sync::Semaphore::MAX_PERMITS`.
+    /// shutdown or request-header deadline cannot be represented by Tokio, or
+    /// the transport capacity exceeds `tokio::sync::Semaphore::MAX_PERMITS`.
     pub fn validate(&self) -> Result<(), WebServerError> {
         if self.shutdown_timeout.is_zero()
             || tokio::time::Instant::now().checked_add(self.shutdown_timeout).is_none()
             || self.request_header_timeout.is_zero()
+            || tokio::time::Instant::now()
+                .checked_add(self.request_header_timeout)
+                .is_none()
             || self.transport_idle_timeout.is_zero()
         {
             return Err(WebServerError::InvalidConfig);

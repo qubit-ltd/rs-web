@@ -106,11 +106,13 @@ impl SseConnectionPolicy {
 
     /// Sets the interval between SSE keep-alive comment frames.
     ///
-    /// A zero interval is rejected to prevent a busy loop.
+    /// A zero interval or a duration that cannot form a representable Tokio
+    /// deadline is rejected.
     ///
     /// # Parameters
     ///
-    /// * `interval` - Positive delay between keep-alive comment frames.
+    /// * `interval` - Positive delay between keep-alive comment frames that can
+    ///   form a representable Tokio deadline at construction time.
     ///
     /// # Returns
     ///
@@ -118,10 +120,10 @@ impl SseConnectionPolicy {
     ///
     /// # Errors
     ///
-    /// Returns [`WebServerError::InvalidConfig`] if the interval is
-    /// zero.
+    /// Returns [`WebServerError::InvalidConfig`] if the interval is zero or
+    /// cannot form a representable Tokio deadline at construction time.
     pub fn with_keep_alive_interval(mut self, interval: Duration) -> Result<Self, WebServerError> {
-        if interval.is_zero() {
+        if interval.is_zero() || tokio::time::Instant::now().checked_add(interval).is_none() {
             return Err(WebServerError::InvalidConfig);
         }
         self.keep_alive_interval = interval;

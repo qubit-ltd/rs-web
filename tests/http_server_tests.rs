@@ -109,6 +109,16 @@ async fn test_rejects_invalid_options_and_reports_socket_conflicts() {
         invalid_header_timeout.validate(),
         Err(WebServerError::InvalidConfig)
     ));
+    let unrepresentable_header_timeout =
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_request_header_timeout(Duration::MAX);
+    assert!(matches!(
+        unrepresentable_header_timeout.validate(),
+        Err(WebServerError::InvalidConfig)
+    ));
+    assert!(matches!(
+        WebServer::bind_http(unrepresentable_header_timeout).await,
+        Err(WebServerError::InvalidConfig)
+    ));
     let invalid_idle_timeout =
         ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_transport_idle_timeout(Duration::ZERO);
     assert!(matches!(
