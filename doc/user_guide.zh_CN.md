@@ -1,6 +1,6 @@
 # 为 HTTP 服务配置连接限额与流式接口
 
-本文面向使用 `qubit-web` 0.2.0（Rust 1.94 或更新版本）的 Rust 服务开发者。我们用一个具体服务串起完整流程：接收有大小上限的 JSON 请求，通过 SSE 推送进度，可选地提供 WebSocket 回显，并由宿主控制关闭。示例里的 prompt 和 token 都是演示数据；它不会运行 Agent，演示 token 也不能用于生产认证。
+本文面向使用 `qubit-web` 0.3.0（Rust 1.94 或更新版本）的 Rust 服务开发者。我们用一个具体服务串起完整流程：接收有大小上限的 JSON 请求，通过 SSE 推送进度，可选地提供 WebSocket 回显，并由宿主控制关闭。示例里的 prompt 和 token 都是演示数据；它不会运行 Agent，演示 token 也不能用于生产认证。
 
 先看[中文版 README](../README.zh_CN.md)了解项目范围和 feature 选择；也可查看[英文 README](../README.md)。阅读顺序是：准备可移植依赖、运行完整示例确认响应，再按需把路由和长连接 policy 接入自己的 Axum 应用，最后根据验证结果和故障现象排查。公开 API 细节可查[在线 API 文档](https://docs.rs/qubit-web)和 crate Rustdoc；[英文指南](user_guide.md)记录同一组事实。
 
@@ -12,7 +12,7 @@
 [dependencies]
 axum = "0.8"
 futures-core = "0.3"
-qubit-web = { version = "0.2", features = ["json", "ws"] }
+qubit-web = { version = "0.3", features = ["json", "ws"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 ```
@@ -102,13 +102,25 @@ use qubit_web::{StreamAdmissionLayer, StreamAdmissionLimits, StreamAdmissionStat
 let limits = StreamAdmissionLimits::default();
 let shared = StreamAdmissionState::new(limits);
 let app = Router::new()
-    .route("/events", get(progress).layer(StreamAdmissionLayer::from_state::<()>(shared.clone())))
-    .route("/ws", get(websocket).layer(StreamAdmissionLayer::from_state::<()>(shared)));
+    .route("/events", get(progress).layer(StreamAdmissionLayer::from_state(shared.clone())))
+    .route("/ws", get(websocket).layer(StreamAdmissionLayer::from_state(shared)));
 ```
 
 可运行的 [`prompt_stream` 示例](../examples/prompt_stream.rs)现已采用同样的装配方式：原生 SSE 和 WebSocket 路由拿到的是同一个 `StreamAdmissionState` 的克隆。使用默认限额时，这个共享状态每个请求最多缓冲 1 MiB 请求体，同时最多接纳 256 个请求；从开始接纳到 handler 生成响应头的期限为 10 秒。响应头就绪后期限即结束，不覆盖后续 SSE 流，也不覆盖 WebSocket 升级后的会话。会话容量仍分别由 `SseConnectionPolicy` 和 `WsUpgradePolicy` 管理。
 
-每次调用 `StreamAdmissionLayer::new::<()>(limits)` 都会创建独立容量域。`ControllerRoutes` 会让同一 builder 中的 `sse`/`ws` 路由共用一个状态域；添加 Controller 前调用 `with_stream_admission_limits(limits)` 可替换默认预算。`with_http_limits` 只配置 `short` 路由，因此 builder 中短请求和流式接纳额度彼此独立。
+Layer 构造器不再接收 Router 状态类型参数。旧调用只需去掉 turbofish：
+
+```rust
+// 旧写法
+RequestLimitLayer::new::<()>(http_limits);
+StreamAdmissionLayer::from_state::<()>(shared.clone());
+
+// 当前写法
+RequestLimitLayer::new(http_limits);
+StreamAdmissionLayer::from_state(shared.clone());
+```
+
+每次调用 `StreamAdmissionLayer::new(limits)` 都会创建独立容量域。`ControllerRoutes` 会让同一 builder 中的 `sse`/`ws` 路由共用一个状态域；添加 Controller 前调用 `with_stream_admission_limits(limits)` 可替换默认预算。`with_http_limits` 只配置 `short` 路由，因此 builder 中短请求和流式接纳额度彼此独立。
 
 每个流式接纳状态域默认允许单个请求体缓冲 1 MiB、同时接纳 256 个请求，并在 handler 生成响应头前限时 10 秒。请求体缓冲的理论上限为每个状态域 256 MiB，另加请求和运行时开销；请按内存预算调低请求体或并发上限。layer 会在 handler 运行前收齐请求体，因此超限或读取失败的 body 不会进入 handler。SSE 响应体和 WebSocket 会话不受该接纳期限限制。
 
@@ -265,9 +277,9 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 
 transport 许可用满后，accept loop 会在 accept 新 socket 前等待。客户端可能留在操作系统 listen backlog 中，也可能连接失败；尚未 accept 的连接没有 HTTP handler，因此不能保证返回 503。backlog 行为取决于部署平台，不应当作应用响应。
 
-`request_header_timeout` 默认 10 秒，用于限制 HTTP/1 请求头；HTTPS TLS 握手也沿用该期限。`transport_idle_timeout` 默认 30 秒，在 handler 和响应体都不活跃时回收空闲 HTTP/1/2 连接。活跃请求停滞不会由空闲期限中断；此类情况应使用路由限额或部署层策略处理。`HttpLimits::with_request_timeout` 与传输空闲期限不同：Controller `short` 路由默认使用该请求期限，原生 Axum 路由则只有显式安装 `RequestLimitLayer` 后才使用。
+`request_header_timeout` 默认 10 秒，用于限制 HTTP/1 请求头；零值或 Tokio 无法通过 `Instant::checked_add` 表示的期限（包括 `Duration::MAX`）会以 `WebServerError::InvalidConfig` 拒绝。SSE keep-alive interval 也必须是正数且可表示。未匹配请求的诊断日志只使用固定标记 `<unmatched>`，不会记录 URI、查询参数或秘密信息。HTTPS TLS 握手也沿用该期限。`transport_idle_timeout` 默认 30 秒，在 handler 和响应体都不活跃时回收空闲 HTTP/1/2 连接。活跃请求停滞不会由空闲期限中断；此类情况应使用路由限额或部署层策略处理。`HttpLimits::with_request_timeout` 与传输空闲期限不同：Controller `short` 路由默认使用该请求期限，原生 Axum 路由则只有显式安装 `RequestLimitLayer` 后才使用。
 
-对 WebSocket，`WsUpgradePolicy::idle_timeout` 也限制入站消息交付给应用时无进展的最长时间。若应用没有调用 `WsSession::recv()`，导致容量为 64 条消息的入站通道满载，期限到达后会话会以关闭码 `1013`（原因 `inbound backpressure`）关闭。应定期排空消息，并在接收后再转交较长的业务处理。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达；对端或会话关闭后，它会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。
+对 WebSocket，`WsUpgradePolicy::idle_timeout` 也限制入站消息交付给应用时无进展的最长时间。若应用没有调用 `WsSession::recv()`，导致容量为 64 条消息的入站通道满载，期限到达后会话会以关闭码 `1013`（原因 `inbound backpressure`）关闭。应定期排空消息，并在接收后再转交较长的业务处理。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达；对端或会话关闭后，它会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。关闭后 `recv()` 返回 `None`。
 
 `WsUpgradePolicy::validate()` 按最终配置字段值校验；同一 setter 后续设置的值会覆盖此前的值。`max_connections` 的合法范围是 `1..=tokio::sync::Semaphore::MAX_PERMITS`：零值返回 `WsPolicyError::ZeroLimit`，超过上限返回 `WsPolicyError::ConnectionLimitTooLarge`。无效策略会使 `on_upgrade` 返回 HTTP 500，不能完成升级。例如，先设为零、再修正为 1 后，校验通过：
 

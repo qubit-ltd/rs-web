@@ -1,6 +1,10 @@
 # rs-web architecture overview
 
-> Date: 2026-10-09. This document describes the current `qubit-web` 0.2.0 module layout. See the [lifecycle and resource boundary summary](2026-10-09-rs-web-lifecycle-design.en.md) for shutdown and session contracts, and the [English user guide](user_guide.md) for integration steps. The [2026-10-08 design record](2026-10-08-rs-web-design.md) is historical.
+> Date: 2026-10-09. This document describes the current `qubit-web` 0.3.0 module layout. See the [lifecycle and resource boundary summary](2026-10-09-rs-web-lifecycle-design.en.md) for shutdown and session contracts, and the [English user guide](user_guide.md) for integration steps. The [2026-10-08 design record](2026-10-08-rs-web-design.md) is historical.
+
+## Current API and operational notes
+
+Native Axum construction uses `RequestLimitLayer::new(limits)` and `StreamAdmissionLayer::new(limits)` or `StreamAdmissionLayer::from_state(state)` without Router-state type parameters. Existing calls that explicitly supplied those turbofish type arguments must remove them. `WsSession::close()` is idempotent and can be retried after cancelling its future; `recv()` returns `None` after close. Unmatched-route diagnostics use only `<unmatched>`. Zero or unrepresentable request-header and SSE keep-alive durations are rejected as `InvalidConfig`.
 
 ## Request path and module map
 

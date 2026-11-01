@@ -16,7 +16,7 @@ For the minimal native Axum service below, declare the dependencies it uses dire
 ```toml
 [dependencies]
 axum = "0.8"
-qubit-web = "0.2"
+qubit-web = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 ```
 
@@ -105,6 +105,8 @@ In [`examples/prompt_stream.rs`](examples/prompt_stream.rs), the native SSE and 
 
 ## Limits and operational boundaries
 
+`WsSession::close()` is idempotent. If its future is cancelled while waiting, call it again to retry; after close, `recv()` returns `None`. The fallback diagnostic uses the fixed `<unmatched>` route marker for unmatched requests and never records their URI or secrets. Zero or unrepresentable `request_header_timeout` and SSE keep-alive intervals are rejected as `WebServerError::InvalidConfig`.
+
 - Controller `short` routes start with `HttpLimits::default()`; native Axum routes need an explicit `RequestLimitLayer` on each selected short-request branch. `WebServer` does not install route limits for a supplied Router.
 - Controller `sse`/`ws` routes share their builder’s `StreamAdmissionState`; `with_stream_admission_limits` changes that budget for routes added afterward. Native Axum branches must install `StreamAdmissionLayer` explicitly; layers made with `new` have independent budgets, while `from_state` shares one. Defaults are 1 MiB buffered per request, 256 admissions, and 10 seconds through response headers per state domain (up to 256 MiB of body buffers plus overhead). `RequestLimitLayer` remains the separate short-request policy. Transport and SSE/WS session limits are separate; SSE also occupies an HTTP connection.
 - Applications own authentication, authorization, business state, and stream persistence or replay. Authenticate before WebSocket upgrade; Origin checks only restrict browser origins. The sample token and unauthenticated shutdown endpoint are loopback demonstrations.
@@ -114,10 +116,10 @@ See the [English user guide](doc/user_guide.md) or [Chinese user guide](doc/user
 
 ## Testing
 
-Run the workspace checks used for this crate:
+Run the crate WebSocket contract check:
 
 ```sh
-cargo test --workspace --all-features --all-targets --locked
+cargo test -p qubit-web --no-default-features --features ws --test websocket_tests --locked
 ```
 
 ## License
@@ -126,7 +128,7 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the f
 
 ## Contributing
 
-Contributions are welcome. Before submitting a pull request, run `./.infra/bin/ci-check.sh` and confirm the CI checks pass. Please open an [issue](https://github.com/qubit-ltd/rs-web/issues) to discuss a change or submit a [pull request](https://github.com/qubit-ltd/rs-web/pulls).
+Contributions are welcome. The manual WebSocket workflow checks this crate only; it does not check downstream crates. Before submitting a pull request, run the repository checks for this crate with `./.infra/bin/ci-check.sh`. Please open an [issue](https://github.com/qubit-ltd/rs-web/issues) to discuss a change or submit a [pull request](https://github.com/qubit-ltd/rs-web/pulls).
 
 ## Author
 

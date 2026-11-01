@@ -14,4 +14,9 @@
 - [rs-web first PRD (2026-10-08)](2026-10-08-rs-web-prd.md): original requirements and acceptance baseline, with implementation status at the top.
 - [rs-web detailed design record (2026-10-08)](2026-10-08-rs-web-design.md): technical decisions and implementation notes, preserving the original decision history.
 
-The historical records above preserve past decisions and may describe superseded proposals. Current behavior is documented in the architecture overview, lifecycle summaries, and user guides above. The implemented downstream source interoperability gate is in [downstream-interop.yml](../.github/workflows/downstream-interop.yml).
+The historical records above preserve past decisions and may describe superseded proposals. Current behavior is documented in the architecture overview, lifecycle summaries, and user guides above. The manual WebSocket workflow at [downstream-interop.yml](../.github/workflows/downstream-interop.yml) checks only this crate; it does not check out or gate downstream crates. The repository CI contract remains scoped to the current crate.
+
+## Current review implementation record
+
+- [Implementation plan (2026-11-01)](implementation-plan-20261101T225639100Z-cf58538d.md): task scope, focused verification evidence, and integration gate.
+- [Design (2026-11-01)](design-20261101T225639100Z-cf58538d.md): accepted behavior and compatibility decisions.

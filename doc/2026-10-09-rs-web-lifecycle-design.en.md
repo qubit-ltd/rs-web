@@ -1,6 +1,6 @@
 # rs-web lifecycle and resource boundary design
 
-> Date: 2026-10-09. This summary describes the current `qubit-web` 0.2.0 contract. For operational steps, see the [English user guide](user_guide.md) and [Chinese user guide](user_guide.zh_CN.md). The [2026-10-08 design record](2026-10-08-rs-web-design.md) is historical and includes superseded API proposals.
+> Date: 2026-10-09. This summary describes the current `qubit-web` 0.3.0 contract. For operational steps, see the [English user guide](user_guide.md) and [Chinese user guide](user_guide.zh_CN.md). The [2026-10-08 design record](2026-10-08-rs-web-design.md) is historical and includes superseded API proposals.
 
 ## Long-lived request admission
 
@@ -26,6 +26,10 @@ All clones of a WebSocket send queue share its closed state. After the peer or s
 
 An ordinary write stops waiting for its flush when server shutdown is cancelled. After the peer has sent Close, the writer's final flush is bounded by the server's shared close deadline. Under backpressure, a Close frame may not be delivered. When the writer exits, its connection-policy permit and managed-session registration are released.
 
+## Session close and configuration boundaries
+
+`WsSession::close()` is idempotent. If the close future is cancelled while waiting, it can be called again; after closure `recv()` returns `None`. The writer releases queued-byte budget, its policy permit, and managed-session registration when shutdown completes, including when the sink shutdown remains pending. The HTTP request-header timeout and SSE keep-alive interval reject zero or durations that cannot be represented by `Tokio Instant::checked_add`, including `Duration::MAX`, with `WebServerError::InvalidConfig`.
+
 ## Origin and application authentication
 
 `WsUpgradePolicy::new()` permits a request with no Origin to proceed to application authentication. If a request includes Origin, the default policy rejects it; configure `allowed_origins` to accept exact values. Applications remain responsible for authenticating before calling `on_upgrade`. Origin validation is not authentication.
@@ -34,4 +38,4 @@ An ordinary write stops waiting for its flush when server shutdown is cancelled.
 
 `WebServerError` retains socket bind, local-address, and accept failures as `io::Error` sources. Callers can inspect `std::error::Error::source()` for diagnostics. Default `Display` and `Debug` output omit the underlying OS error text; TLS and configuration errors do not expose potentially sensitive source chains.
 
-Version 0.2.0 has intentional breaking changes: token-only WebSocket upgrades are removed in favor of `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)`, WebSocket shutdown timing is configured only through `ServerOptions` and `ServerContext`, `WebServerError` is no longer a copyable source-free enum, and SSE admission distinguishes capacity exhaustion from shutdown rejection.
+Historical note — version 0.2.0 introduced these intentional breaking changes: token-only WebSocket upgrades are removed in favor of `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)`, WebSocket shutdown timing is configured only through `ServerOptions` and `ServerContext`, `WebServerError` is no longer a copyable source-free enum, and SSE admission distinguishes capacity exhaustion from shutdown rejection.

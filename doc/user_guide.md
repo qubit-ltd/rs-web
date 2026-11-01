@@ -1,6 +1,6 @@
 # Running an HTTP service with bounded streams
 
-This guide is for Rust service developers using `qubit-web` 0.2.0 (Rust 1.94 or newer). It follows one service that accepts a bounded JSON prompt request, streams progress over SSE, optionally echoes a WebSocket, and shuts down under host control. The prompt and token are demonstration data; the example does not run an agent and its token is not production authentication.
+This guide is for Rust service developers using `qubit-web` 0.3.0 (Rust 1.94 or newer). It follows one service that accepts a bounded JSON prompt request, streams progress over SSE, optionally echoes a WebSocket, and shuts down under host control. The prompt and token are demonstration data; the example does not run an agent and its token is not production authentication.
 
 Start with the [English README](../README.md) for project scope and feature selection. The [Chinese README](../README.zh_CN.md) and [Chinese guide](user_guide.zh_CN.md) are also available. This guide covers operational setup. Public API details are in [docs.rs](https://docs.rs/qubit-web) and crate Rustdoc.
 
@@ -12,7 +12,7 @@ The portable `prompt_stream` scenario imports Axum, `futures-core`, Serde, Tokio
 [dependencies]
 axum = "0.8"
 futures-core = "0.3"
-qubit-web = { version = "0.2", features = ["json", "ws"] }
+qubit-web = { version = "0.3", features = ["json", "ws"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 ```
@@ -88,13 +88,25 @@ use qubit_web::{StreamAdmissionLayer, StreamAdmissionLimits, StreamAdmissionStat
 let limits = StreamAdmissionLimits::default();
 let shared = StreamAdmissionState::new(limits);
 let app = Router::new()
-    .route("/events", get(progress).layer(StreamAdmissionLayer::from_state::<()>(shared.clone())))
-    .route("/ws", get(websocket).layer(StreamAdmissionLayer::from_state::<()>(shared)));
+    .route("/events", get(progress).layer(StreamAdmissionLayer::from_state(shared.clone())))
+    .route("/ws", get(websocket).layer(StreamAdmissionLayer::from_state(shared)));
 ```
 
 The runnable [`prompt_stream` example](../examples/prompt_stream.rs) now uses this same arrangement: its native SSE and WebSocket routes receive clones of one `StreamAdmissionState`. With the default limits, that shared state buffers at most 1 MiB per request, allows up to 256 concurrent admissions, and applies a 10-second deadline from admission through handler response headers. The deadline ends when response headers are ready; it does not cover an SSE stream or a WebSocket session after upgrade. Session capacity remains controlled separately by `SseConnectionPolicy` and `WsUpgradePolicy`.
 
-Each `StreamAdmissionLayer::new::<()>(limits)` creates a separate capacity domain. The `ControllerRoutes` builder creates one shared stream domain for its `sse`/`ws` routes; call `with_stream_admission_limits(limits)` before `add` to replace it. `with_http_limits` configures only `short` routes, so a builder has two independent request-policy domains.
+The layer constructors no longer take a Router-state type parameter. Migrate explicit calls by removing the turbofish:
+
+```rust
+// Before
+RequestLimitLayer::new::<()>(http_limits);
+StreamAdmissionLayer::from_state::<()>(shared.clone());
+
+// Now
+RequestLimitLayer::new(http_limits);
+StreamAdmissionLayer::from_state(shared.clone());
+```
+
+Each `StreamAdmissionLayer::new(limits)` creates a separate capacity domain. The `ControllerRoutes` builder creates one shared stream domain for its `sse`/`ws` routes; call `with_stream_admission_limits(limits)` before `add` to replace it. `with_http_limits` configures only `short` routes, so a builder has two independent request-policy domains.
 
 Defaults per stream-admission state are 1 MiB per buffered body, 256 concurrent admissions, and 10 seconds from entering admission through handler response headers. The theoretical body-buffer budget is 256 MiB per state domain, plus request and runtime overhead; lower the body or concurrency limit to fit your memory budget. The layer reads the complete body before invoking the handler, so an oversized or unreadable body cannot reach handler code. An active SSE response body or WebSocket session is outside this deadline.
 
@@ -290,9 +302,9 @@ Budget transport connections separately from long-lived sessions. For example, w
 
 When all transport permits are occupied, the accept loop waits before accepting another socket. A client may remain in the OS listen backlog or fail to connect. There is no HTTP handler to return a guaranteed 503 for a socket that has not been accepted. Tune the cap and the operating system backlog as deployment-specific settings; do not treat backlog behavior as an application response.
 
-`request_header_timeout` defaults to 10 seconds. It bounds HTTP/1 request headers and is also used for the HTTPS TLS handshake. `transport_idle_timeout` defaults to 30 seconds and closes idle HTTP/1 and HTTP/2 transports when no handler or response body is active. It does not time out a stalled active request; use route limits or deployment-level policies for that case. This is separate from `HttpLimits::with_request_timeout`, which applies on Controller `short` routes by default and on native Axum routes only after `RequestLimitLayer` is installed.
+`request_header_timeout` defaults to 10 seconds; zero or a duration Tokio cannot represent with `Instant::checked_add` (including `Duration::MAX`) is rejected as `WebServerError::InvalidConfig`. The SSE keep-alive interval has the same positive, representable-duration requirement. Unmatched requests use the fixed `<unmatched>` marker in diagnostics; their URI, query, and secrets are not logged. This timeout bounds HTTP/1 request headers and is also used for the HTTPS TLS handshake. `transport_idle_timeout` defaults to 30 seconds and closes idle HTTP/1 and HTTP/2 transports when no handler or response body is active. It does not time out a stalled active request; use route limits or deployment-level policies for that case. This is separate from `HttpLimits::with_request_timeout`, which applies on Controller `short` routes by default and on native Axum routes only after `RequestLimitLayer` is installed.
 
-For WebSockets, `WsUpgradePolicy::idle_timeout` also limits the time without progress while delivering an inbound message to the application. If the 64-message inbound channel is full because the application is not calling `WsSession::recv()`, expiry closes the session with code `1013` (`inbound backpressure`). Drain messages regularly and hand off longer processing after receiving each message. `WsSession::try_send` returning success means only that the message entered the outbound queue; it does not guarantee network delivery. After the peer or session closes, it returns `WsSendError::Closed` (or `Closed` when matching the variant).
+For WebSockets, `WsUpgradePolicy::idle_timeout` also limits the time without progress while delivering an inbound message to the application. If the 64-message inbound channel is full because the application is not calling `WsSession::recv()`, expiry closes the session with code `1013` (`inbound backpressure`). Drain messages regularly and hand off longer processing after receiving each message. `WsSession::try_send` returning success means only that the message entered the outbound queue; it does not guarantee network delivery. After the peer or session closes, it returns `WsSendError::Closed` (or `Closed` when matching the variant). `WsSession::close()` is idempotent; if its future is cancelled while waiting, call it again to retry. After close, `recv()` returns `None`.
 
 `WsUpgradePolicy::validate()` checks the final configured field values, so a later setter value replaces an earlier invalid value for validation. The valid `max_connections` range is `1..=tokio::sync::Semaphore::MAX_PERMITS`; zero returns `WsPolicyError::ZeroLimit`, and a larger value returns `WsPolicyError::ConnectionLimitTooLarge`. An invalid policy is rejected by `on_upgrade` with HTTP 500 and cannot upgrade. For example, correcting a zero value before validation succeeds:
 

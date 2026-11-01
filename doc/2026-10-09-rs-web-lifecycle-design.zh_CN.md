@@ -1,6 +1,6 @@
 # rs-web 生命周期与资源边界设计摘要
 
-> 日期：2026-10-09。本文记录 `qubit-web` 0.2.0 的现行合同。接入步骤见[中文用户指南](user_guide.zh_CN.md)和[英文用户指南](user_guide.md)；[2026-10-08 设计记录](2026-10-08-rs-web-design.md)属于历史文档，其中部分 API 草案已被取代。
+> 日期：2026-10-09。本文记录 `qubit-web` 0.3.0 的现行合同。接入步骤见[中文用户指南](user_guide.zh_CN.md)和[英文用户指南](user_guide.md)；[2026-10-08 设计记录](2026-10-08-rs-web-design.md)属于历史文档，其中部分 API 草案已被取代。
 
 ## 长连接请求接纳
 
@@ -26,6 +26,10 @@ WebSocket 发送队列的所有克隆共享关闭状态。对端或会话关闭�
 
 服务取消时，普通写入会停止等待刷新完成。对端发送 Close 后，writer 的最终刷新受服务器共享的关闭截止时间约束。发生背压时，Close 帧可能无法送达。writer 退出时会释放其连接策略许可，并解除受管会话登记。
 
+## 会话关闭与时间配置边界
+
+`WsSession::close()` 可幂等调用。如果等待期间取消了 close future，可以再次调用重试；关闭后 `recv()` 返回 `None`。writer 退出时会归还队列字节预算、策略许可和受管会话登记，包括 sink shutdown 一直处于 Pending 的情况。HTTP 请求头期限和 SSE keep-alive interval 若为零，或无法由 `Tokio Instant::checked_add` 表示（包括 `Duration::MAX`），会以 `WebServerError::InvalidConfig` 拒绝。
+
 ## Origin 与应用认证
 
 `WsUpgradePolicy::new()` 默认允许不携带 Origin 的请求继续进入应用认证。请求若携带 Origin，则默认拒绝；只有配置 `allowed_origins` 并精确匹配后才会接纳。应用仍须在调用 `on_upgrade` 前完成认证。Origin 校验不等同于身份认证。
@@ -34,4 +38,4 @@ WebSocket 发送队列的所有克隆共享关闭状态。对端或会话关闭�
 
 `WebServerError` 会保留 socket 绑定、本地地址查询和 accept 故障的 `io::Error` source，调用方可通过 `std::error::Error::source()` 主动诊断。默认 `Display` 和 `Debug` 不输出底层操作系统错误文本；TLS 与配置错误也不会暴露可能包含敏感信息的 source 链。
 
-0.2.0 包含明确的破坏性变更：移除只接收 token 的 WebSocket 升级入口，统一使用 `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)`；WebSocket 停服期限统一通过 `ServerOptions` 配置并由 `ServerContext` 提供；`WebServerError` 不再是可复制、无 source 的枚举；SSE 接纳错误区分容量耗尽和停服拒绝。
+历史说明：0.2.0 曾引入以下破坏性变更：移除只接收 token 的 WebSocket 升级入口，统一使用 `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)`；WebSocket 停服期限统一通过 `ServerOptions` 配置并由 `ServerContext` 提供；`WebServerError` 不再是可复制、无 source 的枚举；SSE 接纳错误区分容量耗尽和停服拒绝。

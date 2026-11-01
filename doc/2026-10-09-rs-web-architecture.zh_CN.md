@@ -1,6 +1,10 @@
 # rs-web 架构概览
 
-> 日期：2026-10-09。本文说明 `qubit-web` 0.2.0 的现行模块布局。停服与会话合同见[生命周期与资源边界摘要](2026-10-09-rs-web-lifecycle-design.zh_CN.md)，接入步骤见[中文用户指南](user_guide.zh_CN.md)。[2026-10-08 设计记录](2026-10-08-rs-web-design.md)属于历史文档。
+> 日期：2026-10-09。本文说明 `qubit-web` 0.3.0 的现行模块布局。停服与会话合同见[生命周期与资源边界摘要](2026-10-09-rs-web-lifecycle-design.zh_CN.md)，接入步骤见[中文用户指南](user_guide.zh_CN.md)。[2026-10-08 设计记录](2026-10-08-rs-web-design.md)属于历史文档。
+
+## 当前 API 与运行约定
+
+原生 Axum 路由使用 `RequestLimitLayer::new(limits)`、`StreamAdmissionLayer::new(limits)` 或 `StreamAdmissionLayer::from_state(state)`；这些构造器不再接受 Router 状态类型参数。原先显式写了 turbofish 的调用需要删除类型参数。`WsSession::close()` 可幂等调用，取消等待后可以重试；关闭后 `recv()` 返回 `None`。未匹配路由的诊断只记录固定标记 `<unmatched>`。请求头期限或 SSE 保活间隔若为零或无法表示，会以 `InvalidConfig` 拒绝。
 
 ## 请求路径与模块关系
 

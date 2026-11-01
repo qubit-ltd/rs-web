@@ -16,7 +16,7 @@
 ```toml
 [dependencies]
 axum = "0.8"
-qubit-web = "0.2"
+qubit-web = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 ```
 
@@ -105,6 +105,8 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 
 ## 限额与运行边界
 
+`WsSession::close()` 可重复调用；如果等待期间取消了 close future，可以再次调用完成关闭。关闭后，`recv()` 返回 `None`。未匹配请求的诊断日志只使用固定标记 `<unmatched>`，不会记录请求 URI 或秘密信息。`request_header_timeout` 和 SSE keep-alive interval 若为零或无法表示为 Tokio 截止时间，会以 `WebServerError::InvalidConfig` 拒绝。
+
 - Controller 的 `short` 路由默认使用 `HttpLimits::default()`；原生 Axum 路由必须在需要限额的短请求分支上显式安装 `RequestLimitLayer`。`WebServer` 不会替传入的 Router 自动添加路由限额。
 - Controller 的 `sse`/`ws` 路由共用 builder 的 `StreamAdmissionState`；添加路由前可用 `with_stream_admission_limits` 替换预算。原生 Axum 分支必须显式安装 `StreamAdmissionLayer`：`new` 创建独立预算，`from_state` 可共享预算。默认每个状态域最多缓冲 1 MiB/请求、接纳 256 个请求，并在响应头产生前限时 10 秒；请求体缓冲理论上限为每个状态域 256 MiB，另有请求和运行时开销。`RequestLimitLayer` 仍是独立的短请求策略。传输连接数和 SSE/WS 会话额度另行计算；SSE 也占用 HTTP 连接。
 - 认证、授权、业务状态，以及流式数据的保存和重放由应用负责。WebSocket 升级前必须先完成认证；Origin 检查只限制浏览器来源。示例 token 和无认证停服入口仅供 loopback 演示。
@@ -114,10 +116,10 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 
 ## 测试
 
-可运行以下命令检查整个 workspace：
+运行本 crate 的 WebSocket 合同检查：
 
 ```sh
-cargo test --workspace --all-features --all-targets --locked
+cargo test -p qubit-web --no-default-features --features ws --test websocket_tests --locked
 ```
 
 ## 许可证
