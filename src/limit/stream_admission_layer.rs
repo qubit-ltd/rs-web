@@ -54,7 +54,7 @@ pub type StreamAdmissionMiddleware = fn(State<StreamAdmissionState>, Request<Bod
 /// struct AppState;
 /// async fn stateful(_: axum::extract::State<AppState>) -> &'static str { "ok" }
 ///
-/// let app = Router::new()
+/// let app: Router = Router::<AppState>::new()
 ///     .route("/stateful", post(stateful))
 ///     .with_state(AppState)
 ///     .layer(StreamAdmissionLayer::new(StreamAdmissionLimits::default()));

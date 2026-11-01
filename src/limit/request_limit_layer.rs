@@ -56,7 +56,7 @@ pub type LimitMiddleware = fn(State<LimitState>, Request<Body>, Next) -> LimitFu
 /// struct AppState;
 /// async fn stateful(_: axum::extract::State<AppState>) -> &'static str { "ok" }
 ///
-/// let app = Router::new()
+/// let app: Router = Router::<AppState>::new()
 ///     .route("/stateful", get(stateful))
 ///     .with_state(AppState)
 ///     .layer(RequestLimitLayer::new(HttpLimits::default()));
