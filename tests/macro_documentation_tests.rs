@@ -15,6 +15,7 @@ struct Health;
 
 struct Conditional;
 
+#[allow(clippy::non_minimal_cfg)] // `all()` is intentional in the cfg propagation contract.
 #[rest_controller("/conditional")]
 impl Conditional {
     #[cfg(any())]
@@ -56,6 +57,7 @@ struct ConditionalState;
 
 struct ConditionalStateController;
 
+#[allow(clippy::non_minimal_cfg)] // `all()` is intentional in the cfg state inference contract.
 #[rest_controller("/conditional-state")]
 impl ConditionalStateController {
     #[cfg(any())]

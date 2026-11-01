@@ -1,15 +1,15 @@
 error: duplicate controller route: GET /conditional/same
- --> tests/ui/controller_conditional_overlap.rs:5:1
-  |
-5 | #[rest_controller("/conditional")]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: this error originates in the attribute macro `rest_controller` (in Nightly builds, run with -Z macro-backtrace for more info)
+  --> tests/ui/controller_conditional_overlap.rs:12:1
+   |
+12 | #[rest_controller("/conditional")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `rest_controller` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: all State extractors in one Controller must use the same state type
-  --> tests/ui/controller_conditional_overlap.rs:30:1
+  --> tests/ui/controller_conditional_overlap.rs:37:1
    |
-30 | #[rest_controller("/conditional-state")]
+37 | #[rest_controller("/conditional-state")]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the attribute macro `rest_controller` (in Nightly builds, run with -Z macro-backtrace for more info)
