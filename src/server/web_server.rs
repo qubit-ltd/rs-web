@@ -483,10 +483,8 @@ mod server_event_tests {
     use std::future::pending;
     use std::future::ready;
     use std::pin::pin;
-    use std::sync::Arc;
     use std::task::Context;
     use std::task::Poll;
-    use std::task::Wake;
     use std::task::Waker;
 
     use tokio::sync::oneshot;
@@ -535,8 +533,7 @@ mod server_event_tests {
     fn test_empty_join_set_does_not_make_selector_ready() {
         let mut connections = JoinSet::new();
         let mut event = pin!(select_server_event(&mut connections, pending::<()>(), pending::<()>(),));
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
+        let mut context = Context::from_waker(Waker::noop());
 
         assert!(matches!(event.as_mut().poll(&mut context), Poll::Pending));
     }
@@ -548,11 +545,5 @@ mod server_event_tests {
         let event = select_server_event(&mut connections, ready(()), ready("accepted")).await;
 
         assert!(matches!(event, ServerEvent::Shutdown));
-    }
-
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
     }
 }
