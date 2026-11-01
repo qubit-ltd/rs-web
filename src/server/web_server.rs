@@ -245,14 +245,15 @@ impl WebServer {
         tokio::pin!(shutdown);
 
         let accept_error = loop {
-            tokio::select! {
-                biased;
-                _ = &mut shutdown => break None,
-                accepted = async {
-                    let permit = connection_limit.clone().acquire_owned().await.ok()?;
-                    let accepted = listener.accept().await;
-                    Some((permit, accepted))
-                } => {
+            let event = select_server_event(&mut connections, &mut shutdown, async {
+                let permit = connection_limit.clone().acquire_owned().await.ok()?;
+                let accepted = listener.accept().await;
+                Some((permit, accepted))
+            })
+            .await;
+            match event {
+                ServerEvent::Shutdown => break None,
+                ServerEvent::Accept(accepted) => {
                     let Some((permit, accepted)) = accepted else {
                         break None;
                     };
@@ -299,9 +300,7 @@ impl WebServer {
                         .await;
                     });
                 }
-                joined = connections.join_next(), if !connections.is_empty() => {
-                    let _ = joined;
-                }
+                ServerEvent::Joined => {}
             }
         };
 
@@ -346,6 +345,28 @@ impl WebServer {
         } else {
             Ok(report)
         }
+    }
+}
+
+enum ServerEvent<A> {
+    Shutdown,
+    Accept(A),
+    Joined,
+}
+
+async fn select_server_event<A, S>(connections: &mut JoinSet<()>, shutdown: S, accept: A) -> ServerEvent<A::Output>
+where
+    A: Future,
+    S: Future<Output = ()>,
+{
+    tokio::select! {
+        biased;
+        _ = shutdown => ServerEvent::Shutdown,
+        joined = connections.join_next(), if !connections.is_empty() => {
+            let _ = joined;
+            ServerEvent::Joined
+        }
+        accepted = accept => ServerEvent::Accept(accepted),
     }
 }
 
@@ -466,5 +487,85 @@ mod error_tests {
                 .map(io::Error::kind),
             Some(io::ErrorKind::ConnectionAborted)
         );
+    }
+}
+
+#[cfg(test)]
+mod server_event_tests {
+    use std::future::Future;
+    use std::future::pending;
+    use std::future::ready;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::Wake;
+    use std::task::Waker;
+
+    use tokio::sync::oneshot;
+    use tokio::task::JoinSet;
+
+    use super::ServerEvent;
+    use super::select_server_event;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_accept_readiness_does_not_starve_completed_join_set_entries() {
+        let mut connections = JoinSet::new();
+        let (completed_tx, completed_rx) = oneshot::channel();
+        connections.spawn(async move {
+            completed_tx.send(()).expect("completion receiver remains open");
+        });
+        completed_rx.await.expect("connection task completed");
+        tokio::task::yield_now().await;
+
+        let mut reaped = 0;
+        for accepted in 0..8 {
+            match select_server_event(&mut connections, pending(), ready(accepted)).await {
+                ServerEvent::Accept(value) => assert_eq!(value, accepted),
+                ServerEvent::Joined => reaped += 1,
+                ServerEvent::Shutdown => panic!("shutdown is pending"),
+            }
+        }
+
+        let completed_entry_retained = connections.try_join_next().is_some();
+        assert!(
+            reaped > 0,
+            "ready accept won every biased selection; reaped={reaped}, completed entry retained={completed_entry_retained}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_accept_is_selected_when_join_set_has_no_completed_entries() {
+        let mut connections = JoinSet::new();
+
+        let event = select_server_event(&mut connections, pending(), ready("accepted")).await;
+
+        assert!(matches!(event, ServerEvent::Accept("accepted")));
+        assert!(connections.is_empty());
+    }
+
+    #[test]
+    fn test_empty_join_set_does_not_make_selector_ready() {
+        let mut connections = JoinSet::new();
+        let mut event = pin!(select_server_event(&mut connections, pending::<()>(), pending::<()>(),));
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+
+        assert!(matches!(event.as_mut().poll(&mut context), Poll::Pending));
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_is_selected_before_ready_accept() {
+        let mut connections = JoinSet::new();
+
+        let event = select_server_event(&mut connections, ready(()), ready("accepted")).await;
+
+        assert!(matches!(event, ServerEvent::Shutdown));
+    }
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
     }
 }
