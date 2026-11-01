@@ -26,10 +26,10 @@
       "features": ["ws"]
     },
     {
-      "name": "tls-rustls",
+      "name": "tls",
       "commands": ["check", "test", "doc"],
       "defaultFeatures": false,
-      "features": ["tls-rustls"]
+      "features": ["tls"]
     },
     {
       "name": "config",
@@ -41,7 +41,7 @@
       "name": "all-features",
       "commands": ["check", "test", "doc"],
       "defaultFeatures": false,
-      "features": ["json", "ws", "tls-rustls", "config"]
+      "features": ["json", "ws", "tls", "config"]
     }
   ]
 }

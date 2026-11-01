@@ -42,7 +42,7 @@ required-features = ["config"]
 
 [[test]]
 name = "https_server_tests"
-required-features = ["tls", "ws"]
+required-features = ["tls"]
 
 [[test]]
 name = "integration_tests"
