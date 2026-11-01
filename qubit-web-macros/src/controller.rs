@@ -5,12 +5,14 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 use proc_macro2::Span;
 use proc_macro2::TokenStream;
 use quote::format_ident;
 use quote::quote;
+use syn::Attribute;
 use syn::Expr;
 use syn::ExprLit;
 use syn::FnArg;
@@ -80,10 +82,12 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
 
     let mut methods = Vec::new();
     let mut declarations = Vec::new();
-    let mut used_routes = HashSet::new();
-    let mut controller_state: Option<Type> = None;
+    let mut used_routes: HashMap<(String, String), Vec<Vec<TokenStream>>> = HashMap::new();
+    let mut controller_states: Vec<(Type, Vec<TokenStream>)> = Vec::new();
+    let mut conditional_errors = Vec::new();
     for item in &mut implementation.items {
         let ImplItem::Fn(method) = item else { continue };
+        let cfg = effective_cfg(&method.attrs)?;
         let attrs = std::mem::take(&mut method.attrs);
         let mut routes = Vec::new();
         for attr in attrs {
@@ -109,6 +113,14 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
                 let route = make_route(&prefix.value(), route.path, verbs, kind)?;
                 validate_websocket_methods(&route.methods, &route.kind, attr.span())?;
                 routes.push(route);
+            } else if name == "cfg_attr" {
+                if cfg_attr_contains_mapping(&attr)? {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "route mapping attributes inside cfg_attr are not supported",
+                    ));
+                }
+                method.attrs.push(attr);
             } else {
                 method.attrs.push(attr);
             }
@@ -124,84 +136,158 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
             let Some(state) = state_extractor_type(&argument.ty) else {
                 continue;
             };
-            if controller_state
-                .as_ref()
-                .is_some_and(|existing| quote!(#existing).to_string() != quote!(#state).to_string())
+            if let Some((_, conditions)) = controller_states
+                .iter_mut()
+                .find(|(existing, _)| quote!(#existing).to_string() == quote!(#state).to_string())
             {
-                return Err(syn::Error::new_spanned(
-                    &argument.ty,
-                    "all State extractors in one Controller must use the same state type",
-                ));
+                conditions.push(cfg_condition(&cfg));
+            } else {
+                controller_states.push((state, vec![cfg_condition(&cfg)]));
             }
-            controller_state = Some(state);
         }
         for route in &routes {
             for verb in &route.methods {
-                if !used_routes.insert((verb.clone(), route.path.clone())) {
-                    return Err(syn::Error::new_spanned(
-                        method,
-                        format!("duplicate controller route: {verb} {}", route.path),
-                    ));
+                let key = (verb.clone(), route.path.clone());
+                if let Some(previous_conditions) = used_routes.get_mut(&key) {
+                    for previous_cfg in previous_conditions.iter() {
+                        if previous_cfg.is_empty() && cfg.is_empty() {
+                            return Err(syn::Error::new_spanned(
+                                method,
+                                format!("duplicate controller route: {verb} {}", route.path),
+                            ));
+                        }
+                        conditional_errors.push((
+                            combine_conditions(previous_cfg, &cfg),
+                            format!("duplicate controller route: {verb} {}", route.path),
+                        ));
+                    }
+                    previous_conditions.push(cfg.clone());
+                } else {
+                    used_routes.insert(key, vec![cfg.clone()]);
                 }
             }
         }
         let handler_name = controller_name.to_string().to_lowercase();
         let handler = format_ident!("__qubit_controller_handler_{}_{}", handler_name, methods.len());
-        declarations.push(make_handler(method, &handler, &instance_name, &self_ty));
-        methods.push(Method { routes, handler });
+        let cfg_attr = cfg_attribute(&cfg);
+        let handler_tokens = make_handler(method, &handler, &instance_name, &self_ty);
+        declarations.push(quote! { #cfg_attr #handler_tokens });
+        methods.push(Method { routes, handler, cfg });
     }
 
-    let metadata = methods.iter().flat_map(|method| {
-        method.routes.iter().flat_map(|route| {
-            route.methods.iter().map(|verb| {
-                let path = &route.path;
-                let kind = route_kind(&route.kind);
-                quote! { ::qubit_web::mvc::RouteMetadata::new(#verb, #path, #kind) }
+    let metadata: Vec<_> = methods
+        .iter()
+        .flat_map(|method| {
+            method.routes.iter().flat_map(|route| {
+                route.methods.iter().map(|verb| {
+                    let path = &route.path;
+                    let kind = route_kind(&route.kind);
+                    let cfg_attr = cfg_attribute(&method.cfg);
+                    quote! { #cfg_attr ::qubit_web::mvc::RouteMetadata::new(#verb, #path, #kind) }
+                })
             })
         })
-    });
-    let route_count = methods
+        .collect();
+    let mut state_impls = Vec::new();
+    let all_state_conditions: Vec<_> = controller_states
         .iter()
-        .map(|method| method.routes.iter().map(|route| route.methods.len()).sum::<usize>())
-        .sum::<usize>();
-    let (impl_generics, state_type) = if let Some(state) = controller_state {
-        (quote! {}, quote! { #state })
-    } else {
-        (quote! { <__QubitControllerState> }, quote! { __QubitControllerState })
-    };
-    let state_type_ref = &state_type;
+        .flat_map(|(_, conditions)| conditions.clone())
+        .collect();
+    let generic_cfg = cfg_attribute(&[quote! { not(any(#(#all_state_conditions),*)) }]);
+    let mut impl_specs = vec![(
+        generic_cfg,
+        quote! { <__QubitControllerState> },
+        quote! { __QubitControllerState },
+    )];
+    for (index, (state, conditions)) in controller_states.iter().enumerate() {
+        let other_conditions: Vec<_> = controller_states
+            .iter()
+            .enumerate()
+            .filter(|(other_index, _)| *other_index != index)
+            .flat_map(|(_, (_, conditions))| conditions.clone())
+            .collect();
+        let cfg_attr = cfg_attribute(&[quote! {
+            all(any(#(#conditions),*), not(any(#(#other_conditions),*)))
+        }]);
+        impl_specs.push((cfg_attr, quote! {}, quote! { #state }));
+    }
+    for left in 0..controller_states.len() {
+        for right in (left + 1)..controller_states.len() {
+            let (_, left_conditions) = &controller_states[left];
+            let (_, right_conditions) = &controller_states[right];
+            let overlap = quote! { all(any(#(#left_conditions),*), any(#(#right_conditions),*)) };
+            conditional_errors.push((
+                vec![overlap],
+                "all State extractors in one Controller must use the same state type".to_owned(),
+            ));
+        }
+    }
     let instance_name_ref = &instance_name;
-    let registrations = methods.iter().flat_map(|method| {
-        let handler = &method.handler;
-        method.routes.iter().map(move |route| {
-            let path = &route.path;
-            let strategy_layers = if route.kind == "short" {
-                quote! {
-                    let route = route
-                        .layer(::qubit_web::RequestLimitLayer::from_state(limit_state.clone()))
-                        .layer(::qubit_web::diagnostic::DiagnosticLayer::new());
+    for (cfg_attr, impl_generics, state_type) in impl_specs {
+        let state_type_ref = &state_type;
+        let registrations = methods
+            .iter()
+            .flat_map(|method| {
+                let handler = &method.handler;
+                method.routes.iter().map(move |route| {
+                    let path = &route.path;
+                    let strategy_layers = if route.kind == "short" {
+                        quote! {
+                            let route = route
+                                .layer(::qubit_web::RequestLimitLayer::from_state(limit_state.clone()))
+                                .layer(::qubit_web::diagnostic::DiagnosticLayer::new());
+                        }
+                    } else {
+                        quote! {
+                            let route = route
+                                .layer(::qubit_web::StreamAdmissionLayer::from_state(stream_state.clone()))
+                                .layer(::qubit_web::diagnostic::DiagnosticLayer::new());
+                        }
+                    };
+                    let filters = route.methods.iter().map(|verb| method_filter(verb));
+                    let mut filters = filters.collect::<Vec<_>>().into_iter();
+                    let first = filters.next().expect("route has methods");
+                    let filter = filters.fold(first, |combined, next| quote! { #combined.or(#next) });
+                    let method_cfg = cfg_attribute(&method.cfg);
+                    quote! {
+                        #method_cfg
+                        {
+                            let route = ::axum::Router::<#state_type_ref>::new()
+                                .route(#path, ::axum::routing::on(#filter, #handler))
+                                .layer(::axum::Extension(#instance_name_ref(self.clone())));
+                            #strategy_layers
+                            router = router.merge(route);
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        state_impls.push(quote! {
+            #cfg_attr
+            impl #impl_generics ::qubit_web::mvc::ControllerDefinition<#state_type> for #self_ty
+            where
+                #state_type: Clone + Send + Sync + 'static,
+            {
+                fn route_metadata() -> &'static [::qubit_web::mvc::RouteMetadata] {
+                    static __QUBIT_ROUTES: &[::qubit_web::mvc::RouteMetadata] = &[#(#metadata),*];
+                    __QUBIT_ROUTES
                 }
-            } else {
-                quote! {
-                    let route = route
-                        .layer(::qubit_web::StreamAdmissionLayer::from_state(stream_state.clone()))
-                        .layer(::qubit_web::diagnostic::DiagnosticLayer::new());
-                }
-            };
-            let filters = route.methods.iter().map(|verb| method_filter(verb));
-            let mut filters = filters.collect::<Vec<_>>().into_iter();
-            let first = filters.next().expect("route has methods");
-            let filter = filters.fold(first, |combined, next| quote! { #combined.or(#next) });
-            quote! {
-                {
-                    let route = ::axum::Router::<#state_type_ref>::new()
-                        .route(#path, ::axum::routing::on(#filter, #handler))
-                        .layer(::axum::Extension(#instance_name_ref(self.clone())));
-                    #strategy_layers
-                    router = router.merge(route);
+
+                fn register(
+                    self: ::std::sync::Arc<Self>,
+                    mut router: ::axum::Router<#state_type>,
+                    limit_state: ::qubit_web::limit::LimitState,
+                    stream_state: ::qubit_web::limit::StreamAdmissionState,
+                ) -> ::axum::Router<#state_type> {
+                    #(#registrations)*
+                    router
                 }
             }
-        })
+        });
+    }
+    let conditional_errors = conditional_errors.into_iter().map(|(conditions, message)| {
+        let cfg_attr = cfg_attribute(&conditions);
+        quote! { #cfg_attr compile_error!(#message); }
     });
     let item_impl = implementation;
     Ok(quote! {
@@ -216,25 +302,8 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
 
             #(#declarations)*
 
-            impl #impl_generics ::qubit_web::mvc::ControllerDefinition<#state_type> for #self_ty
-            where
-                #state_type: Clone + Send + Sync + 'static,
-            {
-                fn route_metadata() -> &'static [::qubit_web::mvc::RouteMetadata] {
-                    static __QUBIT_ROUTES: [::qubit_web::mvc::RouteMetadata; #route_count] = [#(#metadata),*];
-                    &__QUBIT_ROUTES
-                }
-
-                fn register(
-                    self: ::std::sync::Arc<Self>,
-                    mut router: ::axum::Router<#state_type>,
-                    limit_state: ::qubit_web::limit::LimitState,
-                    stream_state: ::qubit_web::limit::StreamAdmissionState,
-                ) -> ::axum::Router<#state_type> {
-                    #(#registrations)*
-                    router
-                }
-            }
+            #(#conditional_errors)*
+            #(#state_impls)*
         };
     })
 }
@@ -253,6 +322,103 @@ fn state_extractor_type(ty: &Type) -> Option<Type> {
         GenericArgument::Type(state) => Some(state.clone()),
         _ => None,
     })
+}
+
+/// Collects the predicates that determine whether a mapped method exists.
+fn effective_cfg(attrs: &[Attribute]) -> syn::Result<Vec<TokenStream>> {
+    let mut predicates = Vec::new();
+    for attr in attrs {
+        if attr.path().is_ident("cfg") {
+            let predicate: Meta = attr.parse_args()?;
+            predicates.push(quote! { #predicate });
+        } else if attr.path().is_ident("cfg_attr") {
+            let args = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
+            let mut args = args.into_iter();
+            let condition = args
+                .next()
+                .ok_or_else(|| syn::Error::new_spanned(attr, "cfg_attr requires a condition"))?;
+            collect_cfg_attr_predicates(quote! { #condition }, args.collect(), &mut predicates)?;
+        }
+    }
+    Ok(predicates)
+}
+
+/// Converts nested cfg attributes under cfg_attr into equivalent implications.
+fn collect_cfg_attr_predicates(
+    condition: TokenStream,
+    nested_attrs: Vec<Meta>,
+    predicates: &mut Vec<TokenStream>,
+) -> syn::Result<()> {
+    for nested in nested_attrs {
+        if nested.path().is_ident("cfg") {
+            let predicate = nested.require_list()?.tokens.clone();
+            predicates.push(quote! { any(not(#condition), #predicate) });
+        } else if nested.path().is_ident("cfg_attr") {
+            let args = nested
+                .require_list()?
+                .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
+            let mut args = args.into_iter();
+            let child_condition = args
+                .next()
+                .ok_or_else(|| syn::Error::new_spanned(&nested, "cfg_attr requires a condition"))?;
+            let combined = quote! { all(#condition, #child_condition) };
+            collect_cfg_attr_predicates(combined, args.collect(), predicates)?;
+        }
+    }
+    Ok(())
+}
+
+/// Builds a cfg attribute from the conjunction of effective method predicates.
+fn cfg_attribute(predicates: &[TokenStream]) -> TokenStream {
+    if predicates.is_empty() {
+        TokenStream::new()
+    } else {
+        quote! { #[cfg(all(#(#predicates),*))] }
+    }
+}
+
+/// Returns a single predicate equivalent to the method's effective cfg set.
+fn cfg_condition(predicates: &[TokenStream]) -> TokenStream {
+    quote! { all(#(#predicates),*) }
+}
+
+/// Combines the conditions under which two route declarations overlap.
+fn combine_conditions(left: &[TokenStream], right: &[TokenStream]) -> Vec<TokenStream> {
+    vec![cfg_condition(left), cfg_condition(right)]
+}
+
+/// Detects route-mapping attributes nested inside `cfg_attr` declarations.
+fn cfg_attr_contains_mapping(attr: &Attribute) -> syn::Result<bool> {
+    let args = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
+    for meta in args.into_iter().skip(1) {
+        if meta_contains_mapping(&meta)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Checks one nested attribute for a route mapping, including nested cfg_attr.
+fn meta_contains_mapping(meta: &Meta) -> syn::Result<bool> {
+    let mapped = meta
+        .path()
+        .segments
+        .last()
+        .is_some_and(|segment| marker_verb(&segment.ident.to_string()).is_some() || segment.ident == "route");
+    if mapped {
+        return Ok(true);
+    }
+    if meta.path().is_ident("cfg_attr") {
+        let nested = meta
+            .require_list()?
+            .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
+        for nested_meta in nested.into_iter().skip(1) {
+            if meta_contains_mapping(&nested_meta)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Maps a supported verb-mapping attribute name to its HTTP method.

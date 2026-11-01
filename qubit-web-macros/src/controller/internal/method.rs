@@ -13,4 +13,6 @@ pub(in crate::controller) struct Method {
     pub(in crate::controller) routes: Vec<Route>,
     /// Generated function name used by the router.
     pub(in crate::controller) handler: syn::Ident,
+    /// Effective cfg predicates that gate this method and its generated routes.
+    pub(in crate::controller) cfg: Vec<proc_macro2::TokenStream>,
 }
