@@ -67,7 +67,8 @@ pub(in crate::ws) fn server_shutting_down_response() -> Response {
         .into_response()
 }
 
-/// Sends a close frame through a sink and waits for the reader's peer-acknowledgement signal.
+/// Sends a close frame through a sink and waits for the reader's
+/// peer-acknowledgement signal.
 ///
 /// # Parameters
 ///

@@ -280,24 +280,11 @@ impl WebServer {
                                 ) => result,
                             };
                             let Ok(Ok(stream)) = accepted else { return };
-                            serve_connection(
-                                stream,
-                                app,
-                                watcher,
-                                request_header_timeout,
-                                transport_idle_timeout,
-                            )
-                            .await;
+                            serve_connection(stream, app, watcher, request_header_timeout, transport_idle_timeout)
+                                .await;
                             return;
                         }
-                        serve_connection(
-                            stream,
-                            app,
-                            watcher,
-                            request_header_timeout,
-                            transport_idle_timeout,
-                        )
-                        .await;
+                        serve_connection(stream, app, watcher, request_header_timeout, transport_idle_timeout).await;
                     });
                 }
                 ServerEvent::Joined => {}

@@ -142,7 +142,8 @@ impl WsSession {
     }
 }
 
-/// Waits for one session task without losing its handle if the caller is cancelled.
+/// Waits for one session task without losing its handle if the caller is
+/// cancelled.
 async fn wait_task(slot: &mut Option<JoinHandle<()>>) {
     if let Some(task) = slot.as_mut() {
         let _ = task.await;

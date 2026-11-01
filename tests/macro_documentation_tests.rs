@@ -115,7 +115,8 @@ fn test_macro_crate_documentation_example_compiles() {
 #[tokio::test]
 async fn conditional_routes_match_metadata_and_registration() {
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::Request;
+    use axum::http::StatusCode;
     use tower::ServiceExt;
 
     let metadata = <Conditional as ControllerDefinition<()>>::route_metadata();
