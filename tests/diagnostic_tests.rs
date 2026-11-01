@@ -16,6 +16,7 @@ use axum::body::Body;
 use axum::http::HeaderValue;
 use axum::http::Method;
 use axum::http::Request;
+use axum::http::StatusCode;
 use axum::http::header;
 use axum::routing::post;
 use qubit_web::diagnostic::DiagnosticLayer;
@@ -104,6 +105,63 @@ fn request_logs_at_info_and_trace_keep_only_allowlisted_fields() {
             assert!(output.contains(field), "{level} log omitted {field}: {output}");
         }
     }
+}
+
+#[test]
+fn unmatched_and_fallback_request_logs_use_safe_marker() {
+    const QUERY_SECRET: &str = "unmatched-query-secret-sentinel";
+    const AUTH_SECRET: &str = "unmatched-authorization-secret-sentinel";
+    const COOKIE_SECRET: &str = "unmatched-cookie-secret-sentinel";
+
+    for custom_fallback in [false, true] {
+        for level in [Level::INFO, Level::TRACE] {
+            let output = capture_unmatched_request_log(level, custom_fallback);
+            for secret in [QUERY_SECRET, AUTH_SECRET, COOKIE_SECRET] {
+                assert!(!output.contains(secret), "{level} log leaked {secret}: {output}");
+            }
+            for field in ["diagnostic=", "route=<unmatched>", "status=404"] {
+                assert!(output.contains(field), "{level} log omitted {field}: {output}");
+            }
+        }
+    }
+}
+
+fn capture_unmatched_request_log(level: Level, custom_fallback: bool) -> String {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = SharedWriter(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(level)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let router = if custom_fallback {
+                Router::new().fallback(|| async { StatusCode::NOT_FOUND })
+            } else {
+                Router::new()
+            };
+            let app = router.layer(DiagnosticLayer::new());
+            let request = Request::builder()
+                .uri("/missing?token=unmatched-query-secret-sentinel")
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_static("Bearer unmatched-authorization-secret-sentinel"),
+                )
+                .header(
+                    header::COOKIE,
+                    HeaderValue::from_static("session=unmatched-cookie-secret-sentinel"),
+                )
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        });
+    });
+    String::from_utf8(output.lock().unwrap().clone()).unwrap()
 }
 
 fn capture_request_log(level: Level) -> String {

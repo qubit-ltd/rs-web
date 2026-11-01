@@ -55,7 +55,8 @@ impl RequestDiagnostic {
     /// # Parameters
     ///
     /// - `method`: HTTP method observed on the request.
-    /// - `route_template`: normalized route template, without query/fragment.
+    /// - `route_template`: normalized route template, without query/fragment,
+    ///   or the fixed `<unmatched>` marker for a request with no matched route.
     /// - `status`: HTTP response status in the range 100 through 599.
     /// - `elapsed`: time spent handling the request.
     /// - `connection_id`: correlation identifier without control characters.
@@ -67,8 +68,9 @@ impl RequestDiagnostic {
     ///
     /// # Errors
     ///
-    /// Returns a static reason if the route is not normalized, the connection
-    /// ID contains control characters, or the status is outside the HTTP range.
+    /// Returns a static reason if the route is neither a normalized template
+    /// nor `<unmatched>`, the connection ID contains control characters, or
+    /// the status is outside the HTTP range.
     pub fn new(
         method: Method,
         route_template: impl Into<String>,
@@ -78,12 +80,13 @@ impl RequestDiagnostic {
         bytes: Option<u64>,
     ) -> Result<Self, &'static str> {
         let route_template = route_template.into();
-        if !route_template.starts_with('/')
-            || route_template.contains('?')
-            || route_template.contains('#')
-            || route_template.contains("://")
-            || route_template.contains("..")
-            || route_template.chars().any(char::is_control)
+        if route_template != "<unmatched>"
+            && (!route_template.starts_with('/')
+                || route_template.contains('?')
+                || route_template.contains('#')
+                || route_template.contains("://")
+                || route_template.contains("..")
+                || route_template.chars().any(char::is_control))
         {
             return Err("route must be a normalized template");
         }
