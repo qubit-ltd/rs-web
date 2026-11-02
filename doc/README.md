@@ -18,5 +18,5 @@ The historical records above preserve past decisions and may describe superseded
 
 ## Current review implementation record
 
-- [Implementation plan (2026-11-02)](implementation-plan-20261102T005715648Z-02a9a0af.md): accepted scope, implementation tasks, and verification criteria.
-- [Design (2026-11-02)](design-20261102T005715648Z-02a9a0af.md): accepted behavior and compatibility decisions.
+- [本轮改进设计（2026-11-02）](design-20261102T034418480Z-742a2e19.md)：本轮评审采纳的行为与兼容性决策。
+- [待实施计划（2026-11-02）](implementation-plan-20261102T034418480Z-742a2e19.md)：拟实施任务与验收标准；计划状态不代表已完成或已验收。

@@ -10,6 +10,8 @@
 
 `WebServer` 持有已绑定的 TCP listener、每个服务实例的传输策略和共享的 `ServerContext`。它接收并限制传输连接，可选执行 TLS 握手，再将连接适配为支持 upgrade 的 Hyper 连接。Hyper 将请求交给应用的 Axum `Router<()>`。
 
+accept 遇到可重试的 socket I/O 错误时，最多连续重试 8 次，等待间隔依次为 10、20、40、80、160、320、640 和 1,000 毫秒，累计 2.27 秒。第 9 次连续错误会终止服务；成功 accept 会清零计数。`InvalidInput`、`PermissionDenied`、`Unsupported` 和 `NotConnected` 会立即终止。停服或连接任务结束可以中断等待；重建 accept future 时会保留原来的绝对重试截止时间。终止失败时会关闭 listener、取消受管会话，并在优雅停服期限内等待连接任务；期限后 abort 并回收剩余任务。`WebServerError::ServeFailed` 会保留最后一次 I/O 错误作为 source。
+
 应用可以直接构造 router，也可以使用 `ControllerRoutes` 和 controller 宏。末段名称相同但实际类型不同的 Controller，也可以在同一模块分别使用 `rest_controller` 并装配到一起。`ControllerRoutes::add` 会增量复用路由 matcher 来检查完整路由模板，并在注册前对重复 method/path、无效路径和匹配模板冲突返回 `ControllerRouteError`。这只改变装配成本；错误分类、注册前完整预检和路由行为保持不变。`finish()` 直接返回 Axum `Router`。之后与原生 Axum Router 合并仍遵循 Axum 自身的冲突行为。Controller 的 `short` 路由默认使用 builder 的短请求预算，`sse`/`ws` 路由则使用独立的流式接纳状态；原生 Axum 路由需由应用显式安装相应 layer。`WebServer` 按原样服务 Router，不会向整个 Router 添加路由限额。诊断中间件记录允许列表中的请求元数据：method、匹配的路由模板、响应状态码、耗时、连接 ID，以及可选的声明请求体长度。
 
 主要模块职责如下：

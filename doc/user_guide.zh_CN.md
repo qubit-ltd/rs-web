@@ -91,6 +91,86 @@ let app = Router::new()
 
 `ControllerRoutes::add` 会在注册前检查当前 Controller 的全部路由声明。重复的 method/path、无效路径或匹配模板冲突（例如参数别名和重叠通配符）会返回 `ControllerRouteError`。不同 method 可以共用同一模板，`finish()` 直接返回 `Router`。路径捕获请使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧式 `/:id`、`/*rest` 会被拒绝。检查范围是 builder 收集的声明；之后与原生 Axum Router 合并仍遵循 Axum 自身行为。`rest_controller` 也支持在同一模块中装配末段名称相同、但实际类型不同的 Controller。
 
+### Controller 使用单一根状态
+
+Controller handler 直接提取 `State<AppState>`。同一 Controller 中所有启用且使用 `State` 的方法，状态类型必须一致；宏按源码中写出的类型判断，不会解析类型别名或重命名导入，也不会通过 `FromRef` 把多个子状态拼成推断出的根状态。把 Controller 所需数据放在一个可克隆的根状态里，再从字段或方法读取：
+
+```rust,ignore
+use std::sync::Arc;
+use axum::extract::State;
+use qubit_web::{ControllerRoutes, get_mapping, rest_controller};
+
+#[derive(Clone)]
+struct AppState { service_name: Arc<str> }
+struct Health;
+
+#[rest_controller("/health")]
+impl Health {
+    #[get_mapping("")]
+    async fn check(&self, State(state): State<AppState>) -> String {
+        format!("{}: ok", state.service_name)
+    }
+}
+
+let state = AppState { service_name: Arc::from("catalog") };
+let router = ControllerRoutes::<AppState>::new()
+    .add(Arc::new(Health))?
+    .finish()
+    .with_state(state);
+```
+
+这样得到可交给 `WebServer::serve` 的 `Router<()>`。handler 若需要某个子组件，应从 `AppState` 的字段或方法取得；不能依赖 `FromRef<Child>` 来推断 Controller 状态类型。已有 conditional-state UI 测试覆盖了混用状态类型时的编译失败合同。
+
+### 原生提取器与请求体预算要分别配置
+
+原生 Axum `Bytes`、`String` 和 `Json` 提取器可能同时受 Axum `DefaultBodyLimit` 与 rs-web 的 `RequestLimitLayer` 或 `StreamAdmissionLayer` 限制。这些预算彼此独立，rs-web setter 不会替你安装或关闭 Axum 的限制。只有所有适用限制都允许，请求体才会到达 handler。比如要让原生提取器接收 3 MiB 请求体，Axum 路由限制和 rs-web layer 预算都要设到至少该大小：
+
+```rust,ignore
+use axum::{Router, body::Bytes, extract::DefaultBodyLimit, routing::post};
+use qubit_web::{HttpLimits, RequestLimitLayer};
+
+const BODY_LIMIT: usize = 4 * 1024 * 1024;
+let limits = HttpLimits::default().with_max_body_bytes(BODY_LIMIT)?;
+let app = Router::new()
+    .route("/upload", post(|body: Bytes| async move { body.len().to_string() }))
+    .layer(DefaultBodyLimit::max(BODY_LIMIT))
+    .layer(RequestLimitLayer::new(limits));
+```
+
+若保留 Axum 默认值，原生提取器可能在 handler 执行前拒绝超过其默认上限的请求，即使 rs-web 预算更大。提高 Axum 限制后，rs-web 预算仍会检查请求；关闭 Axum 限制也不会关闭 rs-web 的 body 预算。SSE/WS 分支上的 `StreamAdmissionLayer` 遵循同样的独立预算规则。`BoundedJson` 则使用自己的 `JsonLimits` 读取请求体，不受 Axum 原生 JSON 提取器默认值约束。layer Rustdoc 和测试覆盖了 Router 装配方式及 3/4/5 MiB 边界。
+
+### 按 JSON 拒绝类别决定响应
+
+启用 `json` feature 后，handler 可接收 `Result<BoundedJson<T>, JsonRejection>`，针对每类失败返回应用自己的响应。公共类型路径为 `qubit_web::json::JsonRejection`。默认响应仍是：JSON 无效或请求体读取失败返回 `400`，JSON 预算超限返回 `413`，媒体类型不支持返回 `415`。这段 handler 只处理 `BoundedJson` 的拒绝；请求限额等中间件生成的响应不会自动改写成应用格式。
+
+```rust,ignore
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use qubit_web::json::{BoundedJson, JsonRejection};
+
+#[derive(serde::Deserialize)]
+struct NewPrompt { prompt: String }
+
+async fn submit(
+    input: Result<BoundedJson<NewPrompt>, JsonRejection>,
+) -> Response {
+    match input {
+        Ok(BoundedJson(prompt)) => (StatusCode::OK, prompt.prompt).into_response(),
+        Err(error) => {
+            let (status, message) = match error {
+                JsonRejection::InvalidJson => (StatusCode::BAD_REQUEST, "Invalid JSON"),
+                JsonRejection::BodyReadFailed => (StatusCode::BAD_REQUEST, "Could not read request body"),
+                JsonRejection::BudgetExceeded => (StatusCode::PAYLOAD_TOO_LARGE, "JSON budget exceeded"),
+                JsonRejection::UnsupportedMediaType => (StatusCode::UNSUPPORTED_MEDIA_TYPE, "Use a JSON content type"),
+            };
+            (status, message).into_response()
+        }
+    }
+}
+```
+
+响应正文和日志策略由应用决定。若 handler 直接返回拒绝值，`JsonRejection` 现有 `IntoResponse` 实现会保留稳定的问题码和状态码。
+
 ### 为原生 SSE 和 WebSocket 请求安装接纳层
 
 `WebServer` 不会修改调用方提供的 Router。原生 SSE/WS 分支需显式安装 `StreamAdmissionLayer`。需要多个分支共用接纳容量时，先创建一个 `StreamAdmissionState`，再克隆使用：
@@ -276,6 +356,8 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 传输连接与长连接要分别预算。例如 transport 上限设为 256，SSE 策略再允许 80 个会话、WebSocket 策略允许 80 个会话；这些策略上限彼此独立，部署时还要结合文件描述符、内存、TLS CPU 和业务处理能力评估。transport 上限按 `WebServer` 实例计算，不是进程级总额度。SSE 仍是 HTTP transport future，会持续占用 transport 额度；WebSocket 完成 HTTP upgrade 后释放这项额度。
 
 transport 许可用满后，accept loop 会在 accept 新 socket 前等待。客户端可能留在操作系统 listen backlog 中，也可能连接失败；尚未 accept 的连接没有 HTTP handler，因此不能保证返回 503。backlog 行为取决于部署平台，不应当作应用响应。
+
+accept 遇到 socket I/O 错误时，`InvalidInput`、`PermissionDenied`、`Unsupported` 和 `NotConnected` 会立即终止服务。其他错误最多连续重试 8 次，等待间隔依次为 10、20、40、80、160、320、640 和 1,000 毫秒，累计最多等待 2.27 秒；第 9 次连续错误会终止服务。成功 accept 会清零连续错误计数。停服信号或连接任务结束可以取消当前等待；如果任务结束后重建 accept future，重试仍使用原来的绝对截止时间，不会重新开始完整等待。最终错误会关闭 listener、取消受管会话，并在关闭期限内等待连接任务；超时后会 abort 并回收剩余任务。返回的 `WebServerError::ServeFailed` 保留最后一次 socket 错误，可通过 `std::error::Error::source()` 检查。
 
 `request_header_timeout` 默认 10 秒，用于限制 HTTP/1 请求头；零值或 Tokio 无法通过 `Instant::checked_add` 表示的期限（包括 `Duration::MAX`）会以 `WebServerError::InvalidConfig` 拒绝。SSE keep-alive interval 也必须是正数且可表示。未匹配请求的诊断日志只使用固定标记 `<unmatched>`，不会记录 URI、查询参数或秘密信息。HTTPS TLS 握手也沿用该期限。`transport_idle_timeout` 默认 30 秒，在 handler 和响应体都不活跃时回收空闲 HTTP/1/2 连接。活跃请求停滞不会由空闲期限中断；此类情况应使用路由限额或部署层策略处理。`HttpLimits::with_request_timeout` 与传输空闲期限不同：Controller `short` 路由默认使用该请求期限，原生 Axum 路由则只有显式安装 `RequestLimitLayer` 后才使用。
 

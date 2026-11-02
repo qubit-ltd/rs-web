@@ -119,7 +119,16 @@ See the [English user guide](doc/user_guide.md) or [Chinese user guide](doc/user
 
 ## Testing
 
-Run the crate WebSocket contract check:
+Run the current crate checks with:
+
+```sh
+cargo test
+cargo test --all-features
+./.infra/bin/ci-check.sh
+./.infra/bin/coverage.sh
+```
+
+For a focused WebSocket contract check, run:
 
 ```sh
 cargo test -p qubit-web --no-default-features --features ws --test websocket_tests --locked
@@ -131,7 +140,7 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the f
 
 ## Contributing
 
-Contributions are welcome. The manual WebSocket workflow checks this crate only; it does not check downstream crates. Before submitting a pull request, run the repository checks for this crate with `./.infra/bin/ci-check.sh`. Please open an [issue](https://github.com/qubit-ltd/rs-web/issues) to discuss a change or submit a [pull request](https://github.com/qubit-ltd/rs-web/pulls).
+Contributions are welcome. Run `./.infra/bin/style-check.sh` for style checks and `./.infra/bin/ci-check.sh` for the crate's full acceptance checks before submitting a pull request. The manual WebSocket workflow checks this crate only; it does not check downstream crates. Please open an [issue](https://github.com/qubit-ltd/rs-web/issues) to discuss a change or submit a [pull request](https://github.com/qubit-ltd/rs-web/pulls).
 
 ## Author
 

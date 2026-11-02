@@ -77,6 +77,86 @@ The example fragments assume application handlers `submit`, `progress`, and `web
 
 `ControllerRoutes::add` checks the complete set of Controller route declarations before registering them. It returns `ControllerRouteError` for duplicate method/path pairs, invalid paths, or matching-template conflicts such as parameter aliases and overlapping wildcards. Different methods can share one template, and `finish()` returns the `Router` directly. Use Axum capture syntax such as `/{id}` and `/{*rest}`; legacy `/:id` and `/*rest` segments are rejected. This check covers declarations collected by the builder; later merges with native Axum routers retain Axum's own behavior. `rest_controller` also supports distinct Controller types with the same terminal type name in one module.
 
+### Give Controllers one root state type
+
+Controller methods extract state directly as `State<AppState>`. Every enabled method on a Controller that uses `State` must use the same state type, and the macro compares the written types without resolving aliases or renamed imports. It does not combine several child states into an inferred root state through `FromRef`. Keep the values the Controller needs on one cloneable root state and read them from its fields:
+
+```rust,ignore
+use std::sync::Arc;
+use axum::extract::State;
+use qubit_web::{ControllerRoutes, get_mapping, rest_controller};
+
+#[derive(Clone)]
+struct AppState { service_name: Arc<str> }
+struct Health;
+
+#[rest_controller("/health")]
+impl Health {
+    #[get_mapping("")]
+    async fn check(&self, State(state): State<AppState>) -> String {
+        format!("{}: ok", state.service_name)
+    }
+}
+
+let state = AppState { service_name: Arc::from("catalog") };
+let router = ControllerRoutes::<AppState>::new()
+    .add(Arc::new(Health))?
+    .finish()
+    .with_state(state);
+```
+
+This assembles a `Router<()>` ready for `WebServer::serve`. If a handler needs a child component, access it through a field or method on `AppState`; do not rely on `FromRef<Child>` to infer the Controller state. The compile-fail contract for mixed state types is covered by the existing conditional-state UI test.
+
+### Combine Axum extractor limits with request budgets
+
+For native Axum `Bytes`, `String`, and `Json` extractors, Axum's `DefaultBodyLimit` and the `RequestLimitLayer` or `StreamAdmissionLayer` budget are independent. Neither rs-web setter installs or disables Axum's setting. A body is accepted only when every applicable limit admits it. To accept a 3 MiB native extractor body, for example, set the Axum route limit to at least that size and configure the rs-web layer budget accordingly:
+
+```rust,ignore
+use axum::{Router, body::Bytes, extract::DefaultBodyLimit, routing::post};
+use qubit_web::{HttpLimits, RequestLimitLayer};
+
+const BODY_LIMIT: usize = 4 * 1024 * 1024;
+let limits = HttpLimits::default().with_max_body_bytes(BODY_LIMIT)?;
+let app = Router::new()
+    .route("/upload", post(|body: Bytes| async move { body.len().to_string() }))
+    .layer(DefaultBodyLimit::max(BODY_LIMIT))
+    .layer(RequestLimitLayer::new(limits));
+```
+
+With Axum's default, a native extractor may reject a body above its default before the handler runs, even when the rs-web budget is larger. Raising Axum's limit lets the rs-web limit govern the request; disabling Axum's limit still leaves the rs-web body budget in force. `StreamAdmissionLayer` follows the same independent-budget rule on SSE/WS branches. `BoundedJson` is different: it reads through its own `JsonLimits` budget and is not governed by Axum's native JSON extractor default. The router assembly and 3/4/5 MiB boundaries are covered by the layer documentation and tests.
+
+### Handle bounded JSON rejection categories
+
+With the `json` feature, a handler can accept `Result<BoundedJson<T>, JsonRejection>` and choose its own response for each failure category. `JsonRejection` is available at `qubit_web::json::JsonRejection`; its default response remains `400` for invalid JSON and body-read failure, `413` for an exceeded JSON budget, and `415` for an unsupported media type. This application response only handles `BoundedJson` rejections; middleware-generated responses, such as request-limit rejection, are not automatically replaced.
+
+```rust,ignore
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use qubit_web::json::{BoundedJson, JsonRejection};
+
+#[derive(serde::Deserialize)]
+struct NewPrompt { prompt: String }
+
+async fn submit(
+    input: Result<BoundedJson<NewPrompt>, JsonRejection>,
+) -> Response {
+    match input {
+        Ok(BoundedJson(prompt)) => (StatusCode::OK, prompt.prompt).into_response(),
+        Err(error) => {
+            let (status, message) = match error {
+                JsonRejection::InvalidJson => (StatusCode::BAD_REQUEST, "Invalid JSON"),
+                JsonRejection::BodyReadFailed => (StatusCode::BAD_REQUEST, "Could not read request body"),
+                JsonRejection::BudgetExceeded => (StatusCode::PAYLOAD_TOO_LARGE, "JSON budget exceeded"),
+                JsonRejection::UnsupportedMediaType => (StatusCode::UNSUPPORTED_MEDIA_TYPE, "Use a JSON content type"),
+            };
+            (status, message).into_response()
+        }
+    }
+}
+```
+
+Choose the application's response body and logging policy for these errors. If the handler returns the rejection unchanged, `JsonRejection`'s existing `IntoResponse` behavior supplies the stable problem codes and statuses.
+
 ### Admit native SSE and WebSocket requests
 
 `WebServer` does not add middleware to a supplied router. Install one `StreamAdmissionLayer` on each native SSE or WebSocket branch. Reuse a `StreamAdmissionState` when branches should share capacity:
@@ -300,6 +380,8 @@ The endpoint responds 202 when it triggers shutdown and 410 if it was already us
 
 Budget transport connections separately from long-lived sessions. For example, with a transport cap of 256, a service may also allow 80 SSE sessions and 80 WebSocket sessions; these session policy capacities are separate limits and should be sized against file descriptors, memory, TLS CPU, and application work. The transport cap is per server instance, not a process-wide cap. SSE remains an HTTP transport future and occupies transport capacity while active; an upgraded WebSocket releases transport capacity when the HTTP upgrade future ends.
 
+When `accept` encounters a socket I/O error, `InvalidInput`, `PermissionDenied`, `Unsupported`, and `NotConnected` are terminal. Other errors get at most eight consecutive retries, delayed by 10, 20, 40, 80, 160, 320, 640, and 1,000 ms, for a maximum cumulative wait of 2.27 seconds; the ninth consecutive error terminates serving. A successful accept resets the consecutive-error count. Shutdown or a completed connection task can cancel the current wait; if the accept future is rebuilt after a task completes, it retains the original absolute retry deadline instead of restarting the delay. A terminal error closes the listener, cancels managed sessions, and waits for connection tasks against the shutdown deadline; remaining tasks are aborted and reaped after the deadline. `WebServerError::ServeFailed` preserves the last socket error, available through `std::error::Error::source()`.
+
 When all transport permits are occupied, the accept loop waits before accepting another socket. A client may remain in the OS listen backlog or fail to connect. There is no HTTP handler to return a guaranteed 503 for a socket that has not been accepted. Tune the cap and the operating system backlog as deployment-specific settings; do not treat backlog behavior as an application response.
 
 `request_header_timeout` defaults to 10 seconds; zero or a duration Tokio cannot represent with `Instant::checked_add` (including `Duration::MAX`) is rejected as `WebServerError::InvalidConfig`. The SSE keep-alive interval has the same positive, representable-duration requirement. Unmatched requests use the fixed `<unmatched>` marker in diagnostics; their URI, query, and secrets are not logged. This timeout bounds HTTP/1 request headers and is also used for the HTTPS TLS handshake. `transport_idle_timeout` defaults to 30 seconds and closes idle HTTP/1 and HTTP/2 transports when no handler or response body is active. It does not time out a stalled active request; use route limits or deployment-level policies for that case. This is separate from `HttpLimits::with_request_timeout`, which applies on Controller `short` routes by default and on native Axum routes only after `RequestLimitLayer` is installed.
@@ -319,6 +401,7 @@ assert!(WsUpgradePolicy::new()
 | Symptom | Check |
 | --- | --- |
 | Client waits or connection fails during overload | Check per-instance transport capacity and OS backlog. Do not expect a 503 before accept. |
+| The accept loop stops after a socket error | `InvalidInput`, `PermissionDenied`, `Unsupported`, and `NotConnected` are terminal. Other I/O errors get at most eight consecutive retries with delays of 10, 20, 40, 80, 160, 320, 640, and 1,000 ms (2.27 seconds total); the ninth consecutive error terminates serving. A successful accept resets the retry count. Inspect the returned `WebServerError::ServeFailed` source for the underlying socket error. |
 | A request exceeds the body cap but succeeds | For a Controller `short` route, confirm its handler/extractor consumes the body and check whether `with_http_limits` replaced the default with a larger budget. For a native Axum route, install `RequestLimitLayer` on that branch and confirm the body is consumed. |
 | A slow client does not immediately observe a short-response timeout | After response headers are sent, expiry releases the application body and short-request permit but can only report a body error when the transport polls again. It does not change the response status or close the connection; transport connections use their separate policy. |
 | SSE closes at the ordinary request deadline | Remove `RequestLimitLayer` from that streaming branch and use `SseConnectionPolicy` limits. |
