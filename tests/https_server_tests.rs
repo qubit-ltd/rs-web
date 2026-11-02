@@ -7,6 +7,7 @@
 // =============================================================================
 #![cfg(feature = "tls")]
 
+#[cfg(all(feature = "tls", feature = "ws"))]
 use std::future::pending;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -22,7 +23,9 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+#[cfg(all(feature = "tls", feature = "ws"))]
 use std::sync::mpsc::Receiver;
+#[cfg(all(feature = "tls", feature = "ws"))]
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
@@ -145,6 +148,131 @@ async fn test_slow_tls_handshake_holds_transport_capacity_until_handshake_aborts
 
     let _ = shutdown_tx.send(());
     assert!(serving.await.unwrap().unwrap().graceful);
+}
+
+#[tokio_test]
+async fn test_tls_handshake_timeout_releases_transport_capacity() {
+    let client_hello = capture_tls_client_hello().await;
+    let tls = TlsConfig::from_pem_files(fixture("cert.pem"), fixture("key.pem"))
+        .await
+        .expect("valid test certificate and key");
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_max_transport_connections(1)
+        .unwrap()
+        .with_request_header_timeout(Duration::from_millis(500))
+        .with_transport_idle_timeout(Duration::from_secs(30));
+    let server = WebServer::bind_https(options, tls).await.expect("HTTPS listener binds");
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = spawn(server.serve(
+        Router::new().route("/health", get(|| async { "tls-timeout-ok" })),
+        async {
+            let _ = shutdown_rx.await;
+        },
+    ));
+
+    let mut slow_handshake = TokioTcpStream::connect(address).await.unwrap();
+    slow_handshake.write_all(&client_hello).await.unwrap();
+    read_server_hello(&mut slow_handshake).await;
+
+    let (response_tx, mut response_rx) = oneshot::channel();
+    spawn_blocking(move || {
+        let _ = response_tx.send(https_get(address));
+    });
+    let mut remaining_tls_records = Vec::new();
+    time::timeout(
+        Duration::from_secs(5),
+        slow_handshake.read_to_end(&mut remaining_tls_records),
+    )
+    .await
+    .expect("stalled handshake should close within the configured deadline")
+    .expect("reading the stalled TLS connection should finish at EOF");
+    let response = time::timeout(Duration::from_secs(5), &mut response_rx)
+        .await
+        .expect("second HTTPS request should acquire the released transport permit")
+        .expect("HTTPS client task should send its response");
+    assert!(response.starts_with("HTTP/1.1 200"), "unexpected response: {response}");
+    assert!(response.ends_with("tls-timeout-ok"), "unexpected response: {response}");
+
+    let _ = shutdown_tx.send(());
+    assert!(serving.await.unwrap().unwrap().graceful);
+}
+
+#[tokio_test]
+async fn test_shutdown_cancels_pending_tls_handshake() {
+    let client_hello = capture_tls_client_hello().await;
+    let tls = TlsConfig::from_pem_files(fixture("cert.pem"), fixture("key.pem"))
+        .await
+        .expect("valid test certificate and key");
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_max_transport_connections(1)
+        .unwrap()
+        .with_request_header_timeout(Duration::from_secs(30))
+        .with_shutdown_timeout(Duration::from_secs(1));
+    let server = WebServer::bind_https(options, tls).await.expect("HTTPS listener binds");
+    let address = server.local_addr();
+    let handled = Arc::new(AtomicUsize::new(0));
+    let handled_route = handled.clone();
+    let app = Router::new().route(
+        "/health",
+        get(move || {
+            let handled = handled_route.clone();
+            async move {
+                handled.fetch_add(1, Ordering::SeqCst);
+                "must-not-handle"
+            }
+        }),
+    );
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = spawn(server.serve(app, async {
+        let _ = shutdown_rx.await;
+    }));
+
+    let mut pending_handshake = TokioTcpStream::connect(address).await.unwrap();
+    pending_handshake.write_all(&client_hello).await.unwrap();
+    read_server_hello(&mut pending_handshake).await;
+    let _ = shutdown_tx.send(());
+
+    let report = time::timeout(Duration::from_secs(3), serving)
+        .await
+        .expect("server shutdown should finish within its one-second deadline")
+        .unwrap()
+        .expect("HTTPS server shutdown should be reported");
+    let mut remaining_tls_records = Vec::new();
+    time::timeout(
+        Duration::from_secs(1),
+        pending_handshake.read_to_end(&mut remaining_tls_records),
+    )
+    .await
+    .expect("shutdown should close the pending TLS socket")
+    .expect("reading the pending TLS socket should finish at EOF");
+    assert!(
+        report.graceful,
+        "pending TLS handshake should cancel within the shutdown deadline"
+    );
+    assert_eq!(report.forced_connections, None);
+    assert_eq!(report.unfinished_managed_sessions, 0);
+    assert_eq!(
+        handled.load(Ordering::SeqCst),
+        0,
+        "TLS handshake must not reach HTTP handler"
+    );
+}
+
+async fn read_server_hello(stream: &mut TokioTcpStream) {
+    let mut record_header = [0; 5];
+    time::timeout(Duration::from_secs(2), stream.read_exact(&mut record_header))
+        .await
+        .expect("TLS server should respond to the ClientHello")
+        .expect("TLS server should send a record header");
+    assert_eq!(record_header[0], 22, "server should begin a TLS handshake response");
+    let record_length = u16::from_be_bytes([record_header[3], record_header[4]]) as usize;
+    let mut server_hello = vec![0; record_length];
+    time::timeout(Duration::from_secs(2), stream.read_exact(&mut server_hello))
+        .await
+        .expect("TLS ServerHello record should arrive")
+        .expect("TLS ServerHello record should be complete");
+    assert_eq!(server_hello.first(), Some(&2), "server should send ServerHello first");
 }
 
 async fn capture_tls_client_hello() -> Vec<u8> {
