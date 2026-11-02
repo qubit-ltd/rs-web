@@ -36,6 +36,7 @@ use internal::Method;
 use internal::Route;
 use internal::RouteArgs;
 use internal::resolve_runtime_path;
+use internal::resolve_self_type;
 
 /// Expands a controller attribute into its implementation and route definition.
 ///
@@ -136,7 +137,8 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
             let FnArg::Typed(argument) = input else {
                 continue;
             };
-            let Some(state) = state_extractor_type(&argument.ty) else {
+            let resolved_ty = resolve_self_type(&argument.ty, &self_ty);
+            let Some(state) = state_extractor_type(&resolved_ty) else {
                 continue;
             };
             if let Some((_, conditions)) = controller_states
@@ -652,7 +654,7 @@ fn make_handler(
     for (index, input) in method.sig.inputs.iter().skip(1).enumerate() {
         let FnArg::Typed(arg) = input else { continue };
         let ident = format_ident!("__arg_{index}");
-        let ty = &arg.ty;
+        let ty = resolve_self_type(&arg.ty, self_ty);
         params.push(quote! { #ident: #ty });
         args.push(ident);
     }
@@ -660,8 +662,10 @@ fn make_handler(
         async fn #handler(
             #axum::Extension(__instance): #axum::Extension<#instance<#self_ty>>,
             #(#params),*
-        ) -> impl #axum::response::IntoResponse + use<> {
-            __instance.0.#method_name(#(#args),*).await
+        ) -> #axum::response::Response {
+            #axum::response::IntoResponse::into_response(
+                __instance.0.#method_name(#(#args),*).await
+            )
         }
     }
 }

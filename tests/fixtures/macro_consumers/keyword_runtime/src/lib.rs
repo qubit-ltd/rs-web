@@ -19,6 +19,20 @@ impl Health {
         "ok"
     }
 
+    #[get_mapping("/opaque")]
+    async fn opaque(&self) -> impl axum::response::IntoResponse {
+        "ok"
+    }
+
+    #[get_mapping("/self")]
+    async fn self_extractor(
+        &self,
+        axum::extract::Extension(value): axum::extract::Extension<Arc<Self>>,
+    ) -> String {
+        let _ = value;
+        "ok".to_owned()
+    }
+
     #[route("/events", method = "GET", kind = "sse")]
     async fn events(&self) -> &'static str {
         "events"

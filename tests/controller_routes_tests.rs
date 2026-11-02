@@ -69,6 +69,156 @@ struct Users {
     prefix: String,
 }
 
+struct ResponseController {
+    name: String,
+}
+
+trait ResponseAssoc {
+    type Value;
+}
+
+impl ResponseAssoc for ResponseController {
+    type Value = String;
+}
+
+struct QualifiedController;
+
+impl ResponseAssoc for QualifiedController {
+    type Value = String;
+}
+
+#[rest_controller("/qualified")]
+impl QualifiedController {
+    #[get_mapping("")]
+    async fn associated_state(&self, State(value): State<<Self as ResponseAssoc>::Value>) -> String {
+        value
+    }
+}
+
+#[rest_controller("/responses")]
+impl ResponseController {
+    #[get_mapping("/opaque")]
+    async fn opaque(&self) -> impl axum::response::IntoResponse {
+        self.name.clone()
+    }
+
+    #[get_mapping("/self")]
+    async fn self_arg(&self, Extension(value): Extension<Arc<Self>>) -> String {
+        value.name.clone()
+    }
+
+    #[get_mapping("/state-self")]
+    async fn state_self(&self, State(value): State<Arc<Self>>) -> String {
+        value.name.clone()
+    }
+
+    #[get_mapping("/state-concrete")]
+    async fn state_concrete(&self, State(value): State<Arc<ResponseController>>) -> String {
+        value.name.clone()
+    }
+
+    #[get_mapping("/result")]
+    async fn result(&self) -> Result<impl axum::response::IntoResponse, StatusCode> {
+        Ok(self.name.clone())
+    }
+
+    #[get_mapping("/result-error")]
+    async fn result_error(&self) -> Result<impl axum::response::IntoResponse, StatusCode> {
+        if self.name.is_empty() {
+            Ok(String::new())
+        } else {
+            Err(StatusCode::BAD_REQUEST)
+        }
+    }
+
+    #[get_mapping("/headers")]
+    async fn headers(&self) -> Response {
+        Response::builder()
+            .header("x-controller", self.name.as_str())
+            .body(Body::from("header-body"))
+            .unwrap()
+    }
+
+    #[get_mapping("/stream")]
+    async fn stream(&self) -> Response {
+        let chunks = futures_util::stream::iter([Ok::<_, Infallible>(Bytes::from_static(b"stream-body"))]);
+        Response::new(Body::from_stream(chunks))
+    }
+}
+
+#[tokio::test]
+async fn controller_handler_supports_opaque_response_and_self_extractor() {
+    let controller = Arc::new(ResponseController {
+        name: "controller-name".to_owned(),
+    });
+    let app = ControllerRoutes::<Arc<ResponseController>>::new()
+        .add(Arc::clone(&controller))
+        .unwrap()
+        .finish()
+        .layer(Extension(Arc::clone(&controller)))
+        .with_state(Arc::clone(&controller));
+
+    for path in [
+        "/responses/opaque",
+        "/responses/self",
+        "/responses/state-self",
+        "/responses/state-concrete",
+        "/responses/result",
+        "/responses/stream",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let expected_body = if path == "/responses/stream" {
+            "stream-body"
+        } else {
+            "controller-name"
+        };
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 64).await.unwrap(),
+            expected_body
+        );
+    }
+
+    let error = app
+        .clone()
+        .oneshot(Request::get("/responses/result-error").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+
+    let headers = app
+        .oneshot(Request::get("/responses/headers").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(headers.headers()["x-controller"], "controller-name");
+    assert_eq!(
+        axum::body::to_bytes(headers.into_body(), 64).await.unwrap(),
+        "header-body"
+    );
+}
+
+#[tokio::test]
+async fn controller_handler_resolves_qualified_self_associated_state() {
+    let app = ControllerRoutes::<String>::new()
+        .add(Arc::new(QualifiedController))
+        .unwrap()
+        .finish()
+        .with_state("associated-state".to_owned());
+    let response = app
+        .oneshot(Request::get("/qualified").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 64).await.unwrap(),
+        "associated-state"
+    );
+}
+
 #[rest_controller("/users")]
 impl Users {
     #[get_mapping("/{id}")]
