@@ -31,6 +31,7 @@ mod session_lifecycle;
 mod writer;
 
 pub(in crate::ws) use close::server_shutting_down_response;
+pub(in crate::ws) use reader::ReaderContext;
 pub(in crate::ws) use reader::reader_loop;
 pub(in crate::ws) use session_lifecycle::SessionLifecycle;
 pub(in crate::ws) use writer::writer_loop;

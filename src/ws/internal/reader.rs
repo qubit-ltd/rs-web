@@ -31,6 +31,21 @@ use super::close::get_close_deadline;
 use crate::ws::internal::CloseQueueOnDrop;
 use crate::ws::ws_send_queue::WsSendQueue;
 
+/// Reader-owned state and the shared resources retained for its task lifetime.
+pub(in crate::ws) struct ReaderContext {
+    inbound_state: Arc<InboundState>,
+    _resources: Arc<SessionResources>,
+}
+
+impl ReaderContext {
+    pub(in crate::ws) fn new(inbound_state: Arc<InboundState>, resources: Arc<SessionResources>) -> Self {
+        Self {
+            inbound_state,
+            _resources: resources,
+        }
+    }
+}
+
 /// Receives frames, applies idle/shutdown deadlines, and forwards input to the
 /// session.
 ///
@@ -51,9 +66,12 @@ pub(in crate::ws) async fn reader_loop(
     lifecycle: SessionLifecycle,
     close_ack: oneshot::Sender<()>,
     idle_timeout: Duration,
-    inbound_state: Arc<InboundState>,
-    _resources: Arc<SessionResources>,
+    context: ReaderContext,
 ) {
+    let ReaderContext {
+        inbound_state,
+        _resources,
+    } = context;
     let _close_queue_on_drop = CloseQueueOnDrop::new(queue.clone());
     let mut close_ack = Some(close_ack);
     let mut deadline = None;

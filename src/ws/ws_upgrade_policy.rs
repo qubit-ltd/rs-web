@@ -510,8 +510,7 @@ impl WsUpgradePolicy {
                         reader_lifecycle,
                         close_ack_sender,
                         idle_timeout,
-                        reader_inbound_state,
-                        reader_resources,
+                        super::internal::ReaderContext::new(reader_inbound_state, reader_resources),
                     )
                     .await;
                 });
