@@ -57,12 +57,19 @@ fn is_json_media_type(media_type: &str) -> bool {
             .filter(|prefix| prefix.eq_ignore_ascii_case("application/"))
             .and_then(|_| media_type.get(12..))
             .is_some_and(|subtype| {
-                subtype
-                    .len()
-                    .checked_sub(5)
-                    .and_then(|name_end| subtype.get(name_end..).map(|suffix| (name_end, suffix)))
-                    .is_some_and(|(name_end, suffix)| name_end > 0 && suffix.eq_ignore_ascii_case("+json"))
+                subtype.bytes().all(is_http_tchar)
+                    && subtype
+                        .len()
+                        .checked_sub(5)
+                        .and_then(|name_end| subtype.get(name_end..).map(|suffix| (name_end, suffix)))
+                        .is_some_and(|(name_end, suffix)| name_end > 0 && suffix.eq_ignore_ascii_case("+json"))
             })
+}
+
+/// Checks whether a byte is permitted in an HTTP token.
+#[inline]
+fn is_http_tchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 /// Checks a single media type parameter against the supported UTF-8 charset.

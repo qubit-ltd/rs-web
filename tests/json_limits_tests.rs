@@ -85,6 +85,12 @@ async fn test_accepts_json_and_vendor_json_media_types() {
             .status(),
         StatusCode::OK
     );
+    assert_eq!(
+        send("/number", " application/vnd.example+json ; charset = utf-8 ", "42")
+            .await
+            .status(),
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]
@@ -95,6 +101,21 @@ async fn test_rejects_non_utf8_duplicate_and_malformed_content_type_parameters()
         "application/json; charset=utf-8; charset=utf-8",
         "application/json; charset=\"utf-8",
         "application/json; charset=utf-8;",
+    ] {
+        assert_eq!(
+            send("/number", content_type, "42").await.status(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unexpectedly accepted {content_type}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rejects_json_subtypes_with_non_tchar_bytes() {
+    for content_type in [
+        "application/vnd.example name+json",
+        "application/vnd.example?name+json",
+        "application/vnd.example/name+json",
     ] {
         assert_eq!(
             send("/number", content_type, "42").await.status(),
