@@ -64,3 +64,16 @@ pub(super) fn accept_retry_delay(retry_number: u32) -> Duration {
     debug_assert!((1..=8).contains(&retry_number));
     Duration::from_millis((10_u64 << (retry_number - 1)).min(1000))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::accept_retry_delay;
+
+    #[test]
+    fn test_accept_backoff_is_exponential_and_capped() {
+        let delays: Vec<_> = (1..=8).map(accept_retry_delay).collect();
+        assert_eq!(delays, [10, 20, 40, 80, 160, 320, 640, 1000].map(Duration::from_millis));
+    }
+}
