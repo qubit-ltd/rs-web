@@ -96,6 +96,7 @@ futures-util = "^0.3"
 trybuild = "^1.0"
 tracing-subscriber = { version = "^0.3", features = ["fmt"] }
 hyper-util = { version = "^0.1", features = ["client", "client-legacy", "http2"] }
+tokio = { version = "^1.54", features = ["process", "io-util"] }
 
 [workspace]
 members = ["qubit-web-macros"]

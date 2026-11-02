@@ -7,6 +7,7 @@
 // =============================================================================
 use std::future::pending;
 use std::io;
+use std::io::ErrorKind;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -67,7 +68,9 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::task::yield_now;
 use tokio::test as tokio_test;
+use tokio::time::Instant;
 use tokio::time::timeout;
+use tokio::time::timeout_at;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing::instrument::WithSubscriber;
@@ -221,13 +224,32 @@ async fn handshake(addr: SocketAddr, origin: Option<&str>) -> (TcpStream, Status
 }
 
 async fn handshake_path(addr: SocketAddr, path: &str, origin: Option<&str>) -> (TcpStream, StatusCode) {
-    let mut stream = start_handshake(addr, path, origin).await;
-    let status = read_response_status(&mut stream).await;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut stream = start_handshake_until(addr, path, origin, deadline)
+        .await
+        .unwrap_or_else(|error| panic!("WebSocket handshake {} failed: {error}", error.kind()));
+    let status = read_response_status_until(&mut stream, deadline)
+        .await
+        .unwrap_or_else(|error| panic!("WebSocket handshake response headers failed: {error}"));
     (stream, status)
 }
 
 async fn start_handshake(addr: SocketAddr, path: &str, origin: Option<&str>) -> TcpStream {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
+    start_handshake_until(addr, path, origin, Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap_or_else(|error| panic!("WebSocket handshake {} failed: {error}", error.kind()))
+}
+
+async fn start_handshake_until(
+    addr: SocketAddr,
+    path: &str,
+    origin: Option<&str>,
+    deadline: Instant,
+) -> io::Result<TcpStream> {
+    let mut stream = timeout_at(deadline, TcpStream::connect(addr))
+        .await
+        .map_err(|_| io::Error::new(ErrorKind::TimedOut, "connect deadline elapsed"))?
+        .map_err(|error| io::Error::new(error.kind(), format!("connect failed: {error}")))?;
     let mut request = format!(
         "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
     );
@@ -235,29 +257,75 @@ async fn start_handshake(addr: SocketAddr, path: &str, origin: Option<&str>) -> 
         request.push_str(&format!("Origin: {origin}\r\n"));
     }
     request.push_str("\r\n");
-    stream.write_all(request.as_bytes()).await.unwrap();
-    stream
+    timeout_at(deadline, stream.write_all(request.as_bytes()))
+        .await
+        .map_err(|_| io::Error::new(ErrorKind::TimedOut, "write deadline elapsed"))?
+        .map_err(|error| io::Error::new(error.kind(), format!("write failed: {error}")))?;
+    Ok(stream)
 }
 
 async fn start_handshake_without_version(addr: SocketAddr) -> TcpStream {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut stream = timeout_at(deadline, TcpStream::connect(addr))
+        .await
+        .unwrap_or_else(|_| panic!("WebSocket handshake connect timed out"))
+        .unwrap_or_else(|error| panic!("WebSocket handshake connect failed: {error}"));
     let request = format!(
         "GET /ws HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
     );
-    stream.write_all(request.as_bytes()).await.unwrap();
+    timeout_at(deadline, stream.write_all(request.as_bytes()))
+        .await
+        .unwrap_or_else(|_| panic!("WebSocket handshake write timed out"))
+        .unwrap_or_else(|error| panic!("WebSocket handshake write failed: {error}"));
     stream
 }
 
 async fn read_response_status(stream: &mut TcpStream) -> StatusCode {
-    let mut response = Vec::new();
-    let mut buf = [0; 1];
-    while !response.ends_with(b"\r\n\r\n") {
-        stream.read_exact(&mut buf).await.unwrap();
-        response.push(buf[0]);
-    }
+    read_response_status_until(stream, Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap_or_else(|error| panic!("WebSocket response headers failed: {error}"))
+}
+
+async fn read_response_status_until(stream: &mut TcpStream, deadline: Instant) -> io::Result<StatusCode> {
+    let response = timeout_at(deadline, async {
+        let mut response = Vec::new();
+        let mut buf = [0; 1];
+        while !response.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut buf).await?;
+            response.push(buf[0]);
+        }
+        io::Result::Ok(response)
+    })
+    .await
+    .map_err(|_| io::Error::new(ErrorKind::TimedOut, "response headers deadline elapsed"))??;
     let first_line = String::from_utf8_lossy(&response);
-    let status = first_line.split_whitespace().nth(1).unwrap().parse::<u16>().unwrap();
-    StatusCode::from_u16(status).unwrap()
+    let status = first_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "missing response status"))?
+        .parse::<u16>()
+        .map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid response status"))?;
+    StatusCode::from_u16(status).map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid HTTP status"))
+}
+
+#[tokio::test]
+async fn test_handshake_headers_timeout() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let accepted = Arc::new(tokio::sync::Notify::new());
+    let accepted_signal = accepted.clone();
+    let peer = spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        accepted_signal.notify_one();
+        let _stream = stream;
+        std::future::pending::<()>().await;
+    });
+    let mut stream = start_handshake(address, "/silent", None).await;
+    timeout(Duration::from_secs(1), accepted.notified()).await.unwrap();
+    let result = read_response_status_until(&mut stream, Instant::now() + Duration::from_millis(100)).await;
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::TimedOut);
+    peer.abort();
+    let _ = peer.await;
 }
 
 async fn send_masked_text(stream: &mut TcpStream, text: &[u8]) {
@@ -476,6 +544,71 @@ async fn test_queue_rejects_message_count_and_byte_overflow() {
     byte_limited.try_send(Message::text("123")).unwrap();
     assert_eq!(
         byte_limited.try_send(Message::text("x")),
+        Err(WsSendError::Backpressure)
+    );
+}
+
+#[test]
+fn test_ws_errors_implement_standard_error() {
+    fn invalid_policy() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        WsUpgradePolicy::new().max_connections(0).validate()?;
+        Ok(())
+    }
+
+    fn full_queue() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let queue = qubit_web::WsSendQueue::new(0, 1);
+        queue.try_send(Message::text("private-payload"))?;
+        Ok(())
+    }
+
+    let policy_error = invalid_policy().unwrap_err();
+    assert_eq!(policy_error.to_string(), "WebSocket policy limits must be positive");
+    assert!(!policy_error.to_string().contains("private-payload"));
+    assert!(std::error::Error::source(policy_error.as_ref()).is_none());
+    assert_eq!(
+        policy_error.downcast_ref::<WsPolicyError>(),
+        Some(&WsPolicyError::ZeroLimit)
+    );
+
+    let send_error = full_queue().unwrap_err();
+    assert_eq!(send_error.to_string(), "WebSocket send queue capacity exceeded");
+    assert!(!send_error.to_string().contains("private-payload"));
+    assert!(std::error::Error::source(send_error.as_ref()).is_none());
+    assert_eq!(
+        send_error.downcast_ref::<WsSendError>(),
+        Some(&WsSendError::Backpressure)
+    );
+    assert_eq!(
+        WsPolicyError::ConnectionLimitTooLarge.to_string(),
+        "WebSocket connection limit exceeds the supported maximum"
+    );
+    assert_eq!(
+        WsPolicyError::InboundQueueLimitTooLarge.to_string(),
+        "WebSocket inbound queue limit exceeds the supported maximum"
+    );
+    assert_eq!(WsSendError::Closed.to_string(), "WebSocket send queue is closed");
+}
+
+#[test]
+fn test_zero_byte_queue_payload_boundaries() {
+    let empty_messages = [
+        Message::text(""),
+        Message::Binary(Vec::new().into()),
+        Message::Ping(Vec::new().into()),
+        Message::Pong(Vec::new().into()),
+        Message::Close(None),
+    ];
+    for message in empty_messages {
+        let queue = qubit_web::WsSendQueue::new(1, 0);
+        assert_eq!(queue.try_send(message), Ok(()));
+        assert_eq!(queue.len(), 1);
+    }
+    assert_eq!(
+        qubit_web::WsSendQueue::new(1, 0).try_send(Message::text("x")),
+        Err(WsSendError::Backpressure)
+    );
+    assert_eq!(
+        qubit_web::WsSendQueue::new(0, 0).try_send(Message::text("")),
         Err(WsSendError::Backpressure)
     );
 }

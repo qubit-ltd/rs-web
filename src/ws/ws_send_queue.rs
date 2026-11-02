@@ -53,7 +53,9 @@ impl WsSendQueue {
     ///
     /// * `max_messages` - Maximum message capacity, including in-flight sends;
     ///   zero prevents every send.
-    /// * `max_bytes` - Maximum total byte capacity; zero prevents every send.
+    /// * `max_bytes` - Maximum total payload byte capacity. Zero permits
+    ///   zero-byte messages, which still consume message capacity; set
+    ///   `max_messages` to zero to prevent every send.
     ///
     /// # Returns
     ///
