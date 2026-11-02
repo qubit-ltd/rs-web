@@ -85,7 +85,7 @@ impl RequestDiagnostic {
                 || route_template.contains('?')
                 || route_template.contains('#')
                 || route_template.contains("://")
-                || route_template.contains("..")
+                || route_template.split('/').any(|segment| matches!(segment, "." | ".."))
                 || route_template.chars().any(char::is_control))
         {
             return Err("route must be a normalized template");

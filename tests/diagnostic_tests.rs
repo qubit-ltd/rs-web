@@ -67,6 +67,37 @@ fn diagnostic_never_accepts_a_full_url_as_the_route_template() {
 }
 
 #[test]
+fn test_diagnostic_accepts_dots_inside_segments() {
+    for route in ["/releases/v1..v2", "/files/file...json"] {
+        assert!(
+            RequestDiagnostic::new(Method::GET, route, 200, Duration::ZERO, "c1", None,).is_ok(),
+            "expected ordinary dots inside a path segment to be accepted: {route}"
+        );
+    }
+}
+
+#[test]
+fn diagnostic_rejects_standalone_dot_segments() {
+    for route in ["/a/../b", "/./health"] {
+        assert!(
+            RequestDiagnostic::new(Method::GET, route, 200, Duration::ZERO, "c1", None,).is_err(),
+            "expected standalone dot segment to be rejected: {route}"
+        );
+    }
+    assert!(RequestDiagnostic::new(Method::GET, "<unmatched>", 404, Duration::ZERO, "c1", None,).is_ok());
+}
+
+#[test]
+fn diagnostic_rejects_query_fragment_and_control_characters_in_routes() {
+    for route in ["/users?token=secret", "/users#fragment", "/users/\n"] {
+        assert!(
+            RequestDiagnostic::new(Method::GET, route, 200, Duration::ZERO, "c1", None,).is_err(),
+            "expected unsafe route template to be rejected: {route:?}"
+        );
+    }
+}
+
+#[test]
 fn diagnostic_rejects_log_control_characters() {
     assert!(
         RequestDiagnostic::new(
@@ -104,6 +135,14 @@ fn request_logs_at_info_and_trace_keep_only_allowlisted_fields() {
         ] {
             assert!(output.contains(field), "{level} log omitted {field}: {output}");
         }
+    }
+}
+
+#[test]
+fn diagnostic_layer_logs_route_templates_with_dots_inside_segments() {
+    let output = capture_dotted_route_log();
+    for field in ["route=/releases/v1..v2", "status=200"] {
+        assert!(output.contains(field), "log omitted {field}: {output}");
     }
 }
 
@@ -198,6 +237,34 @@ fn capture_request_log(level: Level) -> String {
                 .unwrap();
             let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), 200);
+        });
+    });
+    String::from_utf8(output.lock().unwrap().clone()).unwrap()
+}
+
+fn capture_dotted_route_log() -> String {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = SharedWriter(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::INFO)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let app = Router::new()
+                .route("/releases/v1..v2", post(|| async { "ok" }))
+                .layer(DiagnosticLayer::new());
+            let request = Request::builder()
+                .method("POST")
+                .uri("/releases/v1..v2")
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
         });
     });
     String::from_utf8(output.lock().unwrap().clone()).unwrap()
