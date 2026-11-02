@@ -121,6 +121,8 @@ let router = ControllerRoutes::<AppState>::new()
 
 这样得到可交给 `WebServer::serve` 的 `Router<()>`。handler 若需要某个子组件，应从 `AppState` 的字段或方法取得；不能依赖 `FromRef<Child>` 来推断 Controller 状态类型。已有 conditional-state UI 测试覆盖了混用状态类型时的编译失败合同。
 
+Controller 方法也可以用 `impl IntoResponse` 返回不透明响应类型，并在 extractor 类型中使用 `Self`。例如，参数可写为 `Extension<Arc<Self>>`，返回值可为 `impl IntoResponse` 或 `Result<impl IntoResponse, StatusCode>`。生成的路由会在 Controller 实例仍存活时把结果转换为 Axum 的具体 `Response`，无需改写方法的返回签名。
+
 ### 原生提取器与请求体预算要分别配置
 
 原生 Axum `Bytes`、`String` 和 `Json` 提取器可能同时受 Axum `DefaultBodyLimit` 与 rs-web 的 `RequestLimitLayer` 或 `StreamAdmissionLayer` 限制。这些预算彼此独立，rs-web setter 不会替你安装或关闭 Axum 的限制。只有所有适用限制都允许，请求体才会到达 handler。比如要让原生提取器接收 3 MiB 请求体，Axum 路由限制和 rs-web layer 预算都要设到至少该大小：
@@ -365,7 +367,19 @@ accept 遇到 socket I/O 错误时，`InvalidInput`、`PermissionDenied`、`Unsu
 
 `request_header_timeout` 默认 10 秒，用于限制 HTTP/1 请求头；零值或 Tokio 无法通过 `Instant::checked_add` 表示的期限（包括 `Duration::MAX`）会以 `WebServerError::InvalidConfig` 拒绝。SSE keep-alive interval 也必须是正数且可表示。未匹配请求的诊断日志只使用固定标记 `<unmatched>`，不会记录 URI、查询参数或秘密信息。HTTPS TLS 握手也沿用该期限。`transport_idle_timeout` 默认 30 秒，在 handler 和响应体都不活跃时回收空闲 HTTP/1/2 连接。活跃请求停滞不会由空闲期限中断；此类情况应使用路由限额或部署层策略处理。`HttpLimits::with_request_timeout` 与传输空闲期限不同：Controller `short` 路由默认使用该请求期限，原生 Axum 路由则只有显式安装 `RequestLimitLayer` 后才使用。
 
-WebSocket 的 `queue_limits` 配置出站队列；`inbound_queue_limits(messages, bytes)` 单独配置入站队列及每连接累计 payload 字节预算，默认是 64 条排队消息和 1 MiB。reader 等待通道空位时最多另持有一条消息，该 payload 也计入相同字节预算。通道满时最多等待至 `idle_timeout`，然后以关闭码 `1013`（原因 `inbound backpressure`）关闭；若剩余字节预算不足以容纳消息，则立即以 `1013` 关闭。默认 128 个连接对应约 128 MiB 排队/待交付 payload，此外每连接最多还可能有一条 1 MiB 协议重组消息、分配开销和应用自有内存。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应定期读取消息，再将较长处理交给应用任务。传输读取错误通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；显式 `close()` 会清除待交付错误，此后 `recv()` 返回 `None`。宿主停服可能直接取消 handler，不保证交付该错误。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达；对端或会话关闭后，它会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。
+WebSocket 的 `queue_limits` 配置出站队列；`inbound_queue_limits(messages, bytes)` 单独配置入站队列及每连接累计 payload 字节预算，默认是 64 条排队消息和 1 MiB。reader 等待通道空位时最多另持有一条消息，该 payload 也计入相同字节预算。通道满时最多等待至 `idle_timeout`，然后以关闭码 `1013`（原因 `inbound backpressure`）关闭；若剩余字节预算不足以容纳消息，则立即以 `1013` 关闭。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，每个活跃连接还最多有一条 1 MiB 协议重组消息。该估算不含分配开销和应用自有内存，也不限制 I/O 结束后仍被 handler 或 session 保留的内存。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应定期读取消息，再将较长处理交给应用任务。传输读取错误通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；显式 `close()` 会清除待交付错误，此后 `recv()` 返回 `None`。宿主停服可能直接取消 handler，不保证交付该错误。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达；对端或会话关闭后，它会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。
+
+如果要在 WebSocket I/O 结束后停止可取消的业务操作，可等待 `WsSession::closed()`。它返回 owned future，因此不借用 session，可以和应用操作一起 select：
+
+```rust,ignore
+let ended = session.closed();
+tokio::select! {
+    _ = ended => session.close().await,
+    result = process_next_item() => apply_result(result),
+}
+```
+
+`process_next_item` 和 `apply_result` 由应用实现。`ended` 就绪后调用 `close()` 会清理尚未读取的入站消息。该通知只表示两个 I/O 任务已释放资源，不表示 Close 帧已送达、handler 或业务工作已完成，也不会停止应用另行启动的任务。必须继续的工作应先接管所需输入，再由应用独立管理。
 
 `WsUpgradePolicy::validate()` 按最终配置字段值校验；同一 setter 后续设置的值会覆盖此前的值。`max_connections` 和 `inbound_queue_limits` 的消息条数范围都是 `1..=tokio::sync::Semaphore::MAX_PERMITS`：零值返回 `WsPolicyError::ZeroLimit`；连接数超过上限返回 `WsPolicyError::ConnectionLimitTooLarge`，入站条数超过上限返回 `WsPolicyError::InboundQueueLimitTooLarge`。入站字节预算也必须为正。穷尽匹配 `WsPolicyError` 的调用方应增加 `InboundQueueLimitTooLarge` 分支。无效策略会使 `on_upgrade` 返回 HTTP 500，不能完成升级。例如，先设为零、再修正为 1 后，校验通过：
 
