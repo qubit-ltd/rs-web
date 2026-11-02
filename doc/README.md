@@ -15,8 +15,3 @@
 - [rs-web detailed design record (2026-10-08)](2026-10-08-rs-web-design.md): technical decisions and implementation notes, preserving the original decision history.
 
 The historical records above preserve past decisions and may describe superseded proposals. Current behavior is documented in the architecture overview, lifecycle summaries, and user guides above. The manual WebSocket workflow at [downstream-interop.yml](../.github/workflows/downstream-interop.yml) checks only this crate; it does not check out or gate downstream crates. The repository CI contract remains scoped to the current crate.
-
-## Current review implementation record
-
-- [本轮改进设计（2026-11-02）](design-20261102T034418480Z-742a2e19.md)：本轮评审采纳的行为与兼容性决策。
-- [待实施计划（2026-11-02）](implementation-plan-20261102T034418480Z-742a2e19.md)：拟实施任务与验收标准；计划状态不代表已完成或已验收。
