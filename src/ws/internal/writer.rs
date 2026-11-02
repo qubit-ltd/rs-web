@@ -75,14 +75,24 @@ pub(in crate::ws) async fn writer_loop<S>(
                     return;
                 }
                 _ = notify.notified() => {
-                    match flush_until(&mut sink, &shutdown, None).await {
-                        FlushOutcome::Flushed => {}
-                        FlushOutcome::Cancelled => {
+                    let outcome = select! {
+                        biased;
+                        _ = &mut close_ack => ControlFlushOutcome::PeerCloseAcknowledged,
+                        result = flush_until(&mut sink, &shutdown, None) => ControlFlushOutcome::Flushed(result),
+                    };
+                    match outcome {
+                        ControlFlushOutcome::PeerCloseAcknowledged => {
+                            let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
+                            let _ = flush_until(&mut sink, &shutdown, Some(deadline)).await;
+                            return;
+                        }
+                        ControlFlushOutcome::Flushed(FlushOutcome::Flushed) => {}
+                        ControlFlushOutcome::Flushed(FlushOutcome::Cancelled) => {
                             let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
                             send_close_and_wait(&mut sink, &mut close_ack, close_code.load(Ordering::Acquire), deadline).await;
                             return;
                         }
-                        FlushOutcome::Failed | FlushOutcome::TimedOut => {
+                        ControlFlushOutcome::Flushed(FlushOutcome::Failed | FlushOutcome::TimedOut) => {
                             shutdown.cancel();
                             return;
                         }
@@ -144,6 +154,12 @@ enum FlushOutcome {
     Cancelled,
     Failed,
     TimedOut,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ControlFlushOutcome {
+    PeerCloseAcknowledged,
+    Flushed(FlushOutcome),
 }
 
 async fn flush_until<S>(sink: &mut S, shutdown: &CancellationToken, deadline: Option<Instant>) -> FlushOutcome
@@ -556,6 +572,98 @@ mod tests {
         drop(state);
         assert_eq!(context.active_sessions(), 0, "session guard should be released");
         assert_eq!(permits.available_permits(), 1, "connection permit should be released");
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn test_writer_notify_flush_peer_close_releases_resources() {
+        assert_notify_flush_peer_close(None, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn writer_notify_flush_close_ack_sender_drop_releases_resources() {
+        assert_notify_flush_peer_close(None, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn writer_notify_flush_close_ack_uses_expired_server_deadline() {
+        assert_notify_flush_peer_close(Some(tokio::time::Instant::now()), false, false).await;
+    }
+
+    #[tokio::test]
+    async fn writer_notify_flush_close_ack_and_cancellation_simultaneously_ready() {
+        assert_notify_flush_peer_close(None, false, true).await;
+    }
+
+    async fn assert_notify_flush_peer_close(
+        server_deadline: Option<tokio::time::Instant>,
+        drop_ack_sender: bool,
+        cancel_simultaneously: bool,
+    ) {
+        let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .expect("test server should bind");
+        let context = server.context();
+        let session = context.try_register_session().expect("session should register");
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        let queue = WsSendQueue::new(2, 1024);
+        let polled = Arc::new(Notify::new());
+        let sink = PendingFlush { polled: polled.clone() };
+        let shutdown = CancellationToken::new();
+        let lifecycle = SessionLifecycle {
+            shutdown: shutdown.clone(),
+            close_code: Arc::new(std::sync::atomic::AtomicU16::new(1000)),
+            close_deadline: Arc::new(std::sync::Mutex::new(None)),
+            server_deadline: server_deadline.map(|deadline| Arc::new(std::sync::Mutex::new(Some(deadline)))),
+            shutdown_timeout: Duration::from_millis(100),
+        };
+        let notify = queue.notify.clone();
+        let wake_writer = notify.clone();
+        let resources = Arc::new(SessionResources::new(permit, session));
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let writer = tokio::spawn(async move {
+            writer_loop(sink, queue.clone(), notify, lifecycle, ack_rx, resources).await;
+            queue
+        });
+        wake_writer.notify_one();
+        timeout(Duration::from_secs(1), polled.notified())
+            .await
+            .expect("writer should start a notify-triggered flush");
+        assert!(!writer.is_finished(), "pending flush should keep writer alive");
+        if cancel_simultaneously {
+            shutdown.cancel();
+        }
+        if drop_ack_sender {
+            drop(ack_tx);
+        } else {
+            ack_tx.send(()).expect("ack receiver should still be alive");
+        }
+
+        let queue = timeout(Duration::from_millis(250), writer)
+            .await
+            .expect("writer should exit after peer close acknowledgement")
+            .expect("writer should not panic");
+        assert_eq!(
+            shutdown.is_cancelled(),
+            cancel_simultaneously,
+            "writer must not add cancellation"
+        );
+        assert!(queue.is_empty(), "queue budgets should be returned");
+        assert_eq!(queue.try_send(Message::text("closed")), Err(WsSendError::Closed));
+        let state = queue.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(state.queued_bytes, 0, "queued byte budget should be returned");
+        assert_eq!(
+            state.in_flight_messages, 0,
+            "in-flight message budget should be returned"
+        );
+        drop(state);
+        assert_eq!(permits.available_permits(), 1, "policy permit should be returned");
+        assert_eq!(context.active_sessions(), 0, "session guard should be released");
         drop(server);
     }
 

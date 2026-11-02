@@ -38,7 +38,16 @@ use super::ws_send_queue::WsSendQueue;
 ///     }
 /// }
 ///
+/// async fn stop_cancellable_work(mut session: WsSession) {
+///     let ended = session.closed();
+///     tokio::select! {
+///         _ = ended => session.close().await,
+///         _ = std::future::pending::<()>() => {},
+///     }
+/// }
+///
 /// let _handler = consume_messages;
+/// let _stop_work = stop_cancellable_work;
 /// ```
 pub struct WsSession {
     /// Channel carrying inbound frames from the reader task.
@@ -51,6 +60,8 @@ pub struct WsSession {
     pub(super) queue: WsSendQueue,
     /// Cancellation token shared by the application and both tasks.
     pub(super) shutdown: CancellationToken,
+    /// Completes after both I/O tasks release their managed resources.
+    pub(super) closed: CancellationToken,
     /// Maximum interval without an inbound application message.
     pub(super) idle_timeout: Duration,
     /// Maximum time allowed for close acknowledgement during shutdown.
@@ -62,6 +73,25 @@ pub struct WsSession {
 }
 
 impl WsSession {
+    /// Returns an owned future that completes after the reader and writer have
+    /// both released this session's managed resources.
+    ///
+    /// The future can be created before or after completion, cloned through
+    /// multiple calls, and safely cancelled without affecting either I/O task.
+    /// Completion means the connection permit and server session registration
+    /// have been released. It does not mean a Close frame reached the peer,
+    /// application work or the handler finished, or queued inbound messages
+    /// were consumed. This notification does not cancel an existing handler.
+    ///
+    /// # Returns
+    ///
+    /// A `Send + 'static` future that can be selected alongside other work
+    /// without borrowing this session.
+    pub fn closed(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let closed = self.closed.clone();
+        async move { closed.cancelled().await }
+    }
+
     /// Receives the next application message.
     ///
     /// A peer close frame may be returned as `Some(Ok(Message::Close(...)))`
@@ -209,6 +239,7 @@ mod tests {
             explicitly_closed: false,
             queue: WsSendQueue::new(1, 1024),
             shutdown: CancellationToken::new(),
+            closed: CancellationToken::new(),
             idle_timeout: Duration::from_secs(1),
             shutdown_timeout: Duration::from_millis(20),
             writer: Some(writer),

@@ -5,11 +5,13 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::future::Future;
 use std::future::pending;
 use std::io;
 use std::io::ErrorKind;
 use std::io::Write;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -55,6 +57,19 @@ type WriterFailureTestState = (
     Arc<Mutex<Option<oneshot::Sender<(usize, usize)>>>>,
     Arc<Mutex<Option<oneshot::Sender<bool>>>>,
 );
+type ClosedFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+type PeerClosedWaiterTestState = (
+    WsUpgradePolicy,
+    ServerContext,
+    Arc<Mutex<Option<oneshot::Sender<ClosedFuture>>>>,
+    Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+);
+type ClosedWaiterTestState = (
+    WsUpgradePolicy,
+    ServerContext,
+    Arc<Mutex<Option<oneshot::Sender<ClosedFuture>>>>,
+);
+type CloseNotificationTestState = (WsUpgradePolicy, ServerContext, Arc<Mutex<Option<oneshot::Sender<()>>>>);
 use qubit_web::diagnostic::DiagnosticLayer;
 use qubit_web::ws::WsPolicyError;
 use qubit_web::ws::WsSendError;
@@ -1078,6 +1093,209 @@ async fn test_peer_close_closes_send_queue_before_handler_resumes() {
     })
     .await
     .expect("handler exit should release its managed session");
+    serving.abort();
+}
+
+#[tokio_test]
+async fn test_peer_close_notifies_owned_waiter_and_releases_single_capacity() {
+    async fn upgrade(
+        State((policy, context, waiter_tx, release_rx)): State<PeerClosedWaiterTestState>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        let waiter_tx = waiter_tx.clone();
+        let release = release_rx.lock().unwrap().take();
+        policy.on_upgrade(ws, &headers, context, move |mut session| async move {
+            let waiter_tx = { waiter_tx.lock().unwrap().take() };
+            if let Some(waiter_tx) = waiter_tx {
+                assert!(waiter_tx.send(Box::pin(session.closed())).is_ok());
+            }
+            if let Some(release) = release {
+                let _ = release.await;
+                session.close().await;
+            } else {
+                pending::<()>().await;
+            }
+        })
+    }
+
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new().max_connections(1);
+    let (waiter_tx, waiter_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let app = Router::new().route("/ws", get(upgrade)).with_state((
+        policy.clone(),
+        context.clone(),
+        Arc::new(Mutex::new(Some(waiter_tx))),
+        Arc::new(Mutex::new(Some(release_rx))),
+    ));
+    let serving = spawn(
+        server
+            .serve(app, pending::<()>())
+            .with_subscriber(tracing::dispatcher::get_default(Clone::clone)),
+    );
+
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    let ended = timeout(Duration::from_secs(1), waiter_rx)
+        .await
+        .expect("handler should publish an owned waiter")
+        .unwrap();
+    send_masked_text(&mut client, b"queued payload").await;
+    send_masked_close(&mut client).await;
+    timeout(Duration::from_secs(1), ended)
+        .await
+        .expect("peer Close should release both I/O resources");
+    assert_eq!(policy.active_connections(), 0);
+    assert_eq!(context.active_sessions(), 0);
+
+    let (_second_client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    release_tx.send(()).unwrap();
+    serving.abort();
+}
+
+#[tokio_test]
+async fn test_idle_timeout_notifies_closed_waiter() {
+    async fn upgrade(
+        State((policy, context, notify)): State<CloseNotificationTestState>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, move |mut session| async move {
+            while session.recv().await.is_some() {}
+            session.closed().await;
+            if let Some(notify) = notify.lock().unwrap().take() {
+                let _ = notify.send(());
+            }
+        })
+    }
+
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let policy = WsUpgradePolicy::new().idle_timeout(Duration::from_millis(40));
+    let (notify_tx, notify_rx) = oneshot::channel();
+    let app = Router::new().route("/ws", get(upgrade)).with_state((
+        policy,
+        server.context(),
+        Arc::new(Mutex::new(Some(notify_tx))),
+    ));
+    let serving = spawn(
+        server
+            .serve(app, pending::<()>())
+            .with_subscriber(tracing::dispatcher::get_default(Clone::clone)),
+    );
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    let (opcode, _) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
+        .await
+        .expect("idle timeout should send a Close frame");
+    assert_eq!(opcode, 8);
+    send_masked_close(&mut client).await;
+    timeout(Duration::from_secs(1), notify_rx)
+        .await
+        .expect("idle I/O termination should notify the handler")
+        .unwrap();
+    serving.abort();
+}
+
+#[tokio_test]
+async fn test_server_shutdown_notifies_owned_closed_waiter() {
+    async fn upgrade(
+        State((policy, context, waiter_tx)): State<ClosedWaiterTestState>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, move |session| async move {
+            let waiter_tx = { waiter_tx.lock().unwrap().take() };
+            if let Some(waiter_tx) = waiter_tx {
+                let _ = waiter_tx.send(Box::pin(session.closed()));
+            }
+            pending::<()>().await;
+        })
+    }
+
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(100)),
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let context = server.context();
+    let shutdown = CancellationToken::new();
+    let (waiter_tx, waiter_rx) = oneshot::channel();
+    let app = Router::new().route("/ws", get(upgrade)).with_state((
+        WsUpgradePolicy::new().max_connections(1),
+        context,
+        Arc::new(Mutex::new(Some(waiter_tx))),
+    ));
+    let serving = spawn(
+        server
+            .serve(app, shutdown.clone().cancelled_owned())
+            .with_subscriber(tracing::dispatcher::get_default(Clone::clone)),
+    );
+    let (mut client, status) = handshake(addr, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    let ended = timeout(Duration::from_secs(1), waiter_rx)
+        .await
+        .expect("handler should publish an owned waiter")
+        .unwrap();
+    shutdown.cancel();
+    let _ = timeout(Duration::from_secs(1), read_server_frame(&mut client)).await;
+    timeout(Duration::from_secs(1), ended)
+        .await
+        .expect("server shutdown should release both I/O resources");
+    let _report = timeout(Duration::from_secs(1), serving)
+        .await
+        .expect("server shutdown should finish")
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio_test]
+async fn test_peer_transport_error_notifies_closed_waiter() {
+    async fn upgrade(
+        State((policy, context, notify)): State<CloseNotificationTestState>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, move |session| async move {
+            session.closed().await;
+            let notify = { notify.lock().unwrap().take() };
+            if let Some(notify) = notify {
+                let _ = notify.send(());
+            }
+        })
+    }
+
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let addr = server.local_addr();
+    let (notify_tx, notify_rx) = oneshot::channel();
+    let app = Router::new().route("/ws", get(upgrade)).with_state((
+        WsUpgradePolicy::new().idle_timeout(Duration::from_secs(30)),
+        server.context(),
+        Arc::new(Mutex::new(Some(notify_tx))),
+    ));
+    let serving = spawn(
+        server
+            .serve(app, pending::<()>())
+            .with_subscriber(tracing::dispatcher::get_default(Clone::clone)),
+    );
+    let (client, status) = handshake(addr, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    drop(client);
+    timeout(Duration::from_secs(1), notify_rx)
+        .await
+        .expect("peer transport failure should release both I/O resources")
+        .unwrap();
     serving.abort();
 }
 

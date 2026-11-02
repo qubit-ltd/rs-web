@@ -477,6 +477,7 @@ impl WsUpgradePolicy {
                 let (close_ack_sender, close_ack_receiver) = oneshot::channel();
                 let (sink, stream) = socket.split();
                 let resources = Arc::new(super::internal::SessionResources::new(permit, session_guard));
+                let closed = resources.closed_token();
                 let writer_resources = resources.clone();
                 let writer = spawn(async move {
                     writer_loop(
@@ -521,6 +522,7 @@ impl WsUpgradePolicy {
                     explicitly_closed: false,
                     queue,
                     shutdown: session_shutdown,
+                    closed,
                     idle_timeout: policy.inner.idle_timeout,
                     shutdown_timeout,
                     writer: Some(writer),
