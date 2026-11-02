@@ -26,15 +26,28 @@ pub type DiagnosticFuture = Pin<Box<dyn Future<Output = Response> + Send>>;
 #[doc(hidden)]
 pub type DiagnosticMiddleware = fn(Request<axum::body::Body>, Next) -> DiagnosticFuture;
 
-/// Creates default tracing diagnostics for an explicitly selected router
-/// branch.
+/// Creates default tracing diagnostics for an Axum router branch.
 ///
 /// # Examples
 ///
 /// ```
+/// use axum::body::Body;
+/// use axum::http::Request;
+/// use axum::routing::get;
+/// use axum::Router;
 /// use qubit_web::diagnostic::DiagnosticLayer;
+/// use tower::ServiceExt;
 ///
-/// let _layer = DiagnosticLayer::new::<()>();
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let app: Router = Router::new()
+///     .route("/", get(|| async { "ok" }))
+///     .layer(DiagnosticLayer::new());
+/// let response = app
+///     .oneshot(Request::get("/").body(Body::empty())?)
+///     .await?;
+/// assert_eq!(response.status(), axum::http::StatusCode::OK);
+/// # Ok(())
+/// # }
 /// ```
 #[must_use]
 #[derive(Clone, Copy, Debug, Default)]
@@ -44,16 +57,12 @@ impl DiagnosticLayer {
     /// Creates a layer that emits only method, matched route template, status,
     /// elapsed time, connection ID, and declared request size.
     ///
-    /// # Type Parameters
-    ///
-    /// - `S`: router state type required by Axum's middleware layer.
-    ///
     /// # Returns
     ///
     /// An Axum layer that records safe request metadata after the handler runs.
     #[allow(clippy::new_ret_no_self)]
-    pub fn new<S>() -> middleware::FromFnLayer<DiagnosticMiddleware, (), S> {
-        middleware::from_fn::<_, S>(record_request as DiagnosticMiddleware)
+    pub fn new() -> middleware::FromFnLayer<DiagnosticMiddleware, (), (Request<axum::body::Body>,)> {
+        middleware::from_fn(record_request as DiagnosticMiddleware)
     }
 }
 

@@ -13,11 +13,13 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
+use axum::extract::State;
 use axum::http::HeaderValue;
 use axum::http::Method;
 use axum::http::Request;
 use axum::http::StatusCode;
 use axum::http::header;
+use axum::routing::get;
 use axum::routing::post;
 use qubit_web::diagnostic::DiagnosticLayer;
 use qubit_web::diagnostic::RequestDiagnostic;
@@ -25,6 +27,43 @@ use tokio::runtime::Builder;
 use tower::ServiceExt;
 use tracing::Level;
 use tracing_subscriber::fmt::MakeWriter;
+
+#[tokio::test]
+async fn diagnostic_layer_installs_on_stateless_router() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::INFO)
+        .with_writer(std::io::sink)
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let app: Router = Router::new()
+        .route("/", get(|| async { "ok" }))
+        .layer(DiagnosticLayer::new());
+    let response = app
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn diagnostic_layer_installs_before_router_state() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::INFO)
+        .with_writer(std::io::sink)
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let app: Router = Router::new()
+        .route("/", get(|State(value): State<&'static str>| async move { value }))
+        .layer(DiagnosticLayer::new())
+        .with_state("ok");
+    let response = app
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
 
 #[test]
 fn diagnostic_formats_only_allowlisted_request_metadata() {

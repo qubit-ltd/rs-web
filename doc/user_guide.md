@@ -315,6 +315,8 @@ Use a certificate trusted by clients, or terminate TLS at a trusted edge and con
 
 ## Run, observe, and stop the service
 
+Install request diagnostics with `DiagnosticLayer::new()` on the router branch you want to observe. The constructor no longer takes a type parameter: remove any `::<...>` turbofish from existing calls. This does not change the router's `AppState` or require changes to its state type.
+
 Clone `ServerContext` before moving the server into its serving task. Context-aware SSE and WebSocket policy calls register active sessions. For example, an application can expose its own protected diagnostic route:
 
 ```rust,ignore
@@ -336,7 +338,7 @@ assert!(report.graceful);
 
 If a running `serve` future is dropped or its task is aborted, the server synchronously closes managed-session admission and notifies active sessions. This drop path cannot wait for asynchronous draining or return a `ShutdownReport`, and cleanup still needs the Tokio runtime to run. For graceful shutdown and its report, resolve the shutdown future and await `serve` as shown above. This guarantee applies after `serve` has been polled; dropping a never-started future does not start shutdown.
 
-On shutdown, the server atomically closes admission for new managed SSE and WebSocket sessions, stops accepting new connections, and notifies active sessions. It waits for HTTP connections and registered sessions against the same configured deadline, set by `ServerOptions` and shared with WebSocket sessions through `ServerContext`; `WsUpgradePolicy` has no separate shutdown timeout. Unrepresentable shutdown deadlines are rejected as `WebServerError::InvalidConfig`; an extreme runtime failure cancels sessions and drains connection tasks before returning an error. `graceful` is true only if both finish before that deadline. Otherwise `unfinished_managed_sessions` records the managed session count at the deadline; the report does not claim that arbitrary application background tasks have stopped. `forced_connections` is `None` because Axum does not expose a reliable count.
+On shutdown, the server atomically closes admission for new managed SSE and WebSocket sessions, stops accepting new connections, and notifies active sessions. It waits for HTTP connections and registered sessions against the same configured deadline, set by `ServerOptions` and shared with WebSocket sessions through `ServerContext`; `WsUpgradePolicy` has no separate shutdown timeout. Unrepresentable shutdown deadlines are rejected as `WebServerError::InvalidConfig`; an extreme runtime failure cancels sessions and drains connection tasks before returning an error. `graceful` is true only if both groups actually finish at or before the deadline. Session accounting uses its deadline snapshot, and transport tasks record when they release their connection resources. A delayed report can therefore have an `elapsed` value greater than the configured timeout while still reporting graceful shutdown if the work finished on time; conversely, a wait that returns `Ok` after scheduler delay does not make late work graceful. Otherwise `unfinished_managed_sessions` records the managed session count at the deadline; the report does not claim that arbitrary application background tasks have stopped. `forced_connections` is `None` because Axum does not expose a reliable count.
 
 Run the demonstration service with:
 
