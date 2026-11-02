@@ -35,7 +35,7 @@
 | 已接收的传输连接 | 每个 `WebServer` 1,024 个 | 配置值必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。包含 TLS 握手和 HTTP connection future。达到上限时 accept 循环暂停接收；客户端可能等待操作系统 backlog，也可能连接失败；不会生成 HTTP 503。 |
 | Controller 短请求 | 每个 `ControllerRoutes` builder 同时 256 个 | 配置值必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。`ControllerRoutes::new()` 默认采用 `HttpLimits::default()`：每个请求体 1 MiB，handler/响应体期限 30 秒。期限到达时会主动释放应用响应体和短请求许可，无需等待再次轮询。响应头发出后，超时只能在传输再次轮询时通过 body error 体现，不会关闭连接。`with_http_limits` 替换这些默认值，应在添加 Controller 前调用。每个 builder 的路由共享自己的状态。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 不安装路由限额。容量耗尽时返回容量拒绝。 |
 | SSE 连接 | 每个 `SseConnectionPolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。容量耗尽与停服拒绝分别报告。 |
-| WebSocket 连接 | 每个 `WsUpgradePolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。策略按最终字段值校验；`max_connections` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`，零值对应 `WsPolicyError::ZeroLimit`，超上限对应 `WsPolicyError::ConnectionLimitTooLarge`。接纳失败会在会话纳入管理前拒绝。 |
+| WebSocket 连接 | 每个 `WsUpgradePolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。策略按最终字段值校验；`max_connections` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`，零值对应 `WsPolicyError::ZeroLimit`，超上限对应 `ConnectionLimitTooLarge`。`inbound_queue_limits` 的消息条数接受 `1..=Semaphore::MAX_PERMITS`，字节数必须为正；条数超上限返回 `WsPolicyError::InboundQueueLimitTooLarge`。穷尽匹配该枚举的调用方需增加此分支。接纳失败会在会话纳入管理前拒绝。 |
 | 服务受管会话 | 没有单独的数值上限 | `ServerContext` 追踪已接纳的 SSE 和 WebSocket 会话，以便停服统计。它不是全局连接上限，也不统计普通请求、原生 Axum upgrade 或应用后台任务。 |
 
 若要让多条路由共用 SSE 或 WebSocket 容量，应在应用启动时创建一个策略并放入应用状态，再向 handler 传递该策略的克隆。分别创建多个策略会叠加总体可接纳容量。短请求分支也应按同样原则显式规划和共享预期的分支状态。
@@ -50,7 +50,7 @@ Controller 的 `sse`/`ws` 长连接路由使用独立于短请求 `LimitState` �
 
 输入阶段中，`BoundedJson` 会通过 `JsonRejection::BudgetExceeded`（`413`）拒绝超限请求体或解码预算；格式错误的 JSON 和不支持的媒体类型分别产生不同的 extractor 拒绝结果。输出阶段中，`json_response` 会先完成整个响应的编码，再返回响应；输出预算或序列化失败通过 `JsonResponseError` 返回（错误码为 `json_output_budget_exceeded` 或 `json_encode_failed`）。应用负责处理 extractor 拒绝和响应编码错误；库不会替应用选择特定的降级响应。
 
-SSE 和 WebSocket 都是长连接路由，不应套用短请求并发/期限中间件。SSE keep-alive 与 WebSocket frame、message、队列限制由各自策略模块管理。WebSocket 的应用入站通道容量为 64 条消息。会话停服、队列关闭、入站背压和 Origin 行为见[生命周期摘要](2026-10-09-rs-web-lifecycle-design.zh_CN.md)。
+SSE 和 WebSocket 都是长连接路由，不应套用短请求并发/期限中间件。SSE keep-alive 与 WebSocket frame、message、队列限制由各自策略模块管理。WebSocket 入站默认每连接最多排队 64 条消息和累计 1 MiB payload，通过 `inbound_queue_limits` 配置；出站 `queue_limits` 独立生效。reader 等待时最多另持有一条消息，且也计入该字节预算。默认 128 个连接对应约 128 MiB 排队/待交付 payload，此外每连接最多一条 1 MiB 协议重组消息、分配开销和应用自有内存。会话停服、队列关闭、入站背压和 Origin 行为见[生命周期摘要](2026-10-09-rs-web-lifecycle-design.zh_CN.md)。
 
 ## 超时、停服与配置
 

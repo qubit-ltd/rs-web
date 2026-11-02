@@ -81,26 +81,37 @@ pub mod route_kind;
 pub mod server;
 pub mod sse;
 
+/// Configuration-file integration; requires the `config` feature.
 #[cfg(feature = "config")]
 pub mod config;
+/// Bounded JSON extraction and response support; requires the `json` feature.
 #[cfg(feature = "json")]
 pub mod json;
+/// TLS configuration and HTTPS support; requires the `tls` feature.
 #[cfg(feature = "tls")]
 pub mod tls;
+/// Managed WebSocket sessions; requires the `ws` feature.
 #[cfg(feature = "ws")]
 pub mod ws;
 
+/// Configuration validation error; requires the `config` feature.
 #[cfg(feature = "config")]
 pub use config::ConfigOptionsError;
+/// A web server configured from a configuration file; requires the `config`
+/// feature.
 #[cfg(feature = "config")]
 pub use config::ConfiguredWeb;
 pub use error::WebServerError;
+/// JSON request extractor; requires the `json` feature.
 #[cfg(feature = "json")]
 pub use json::BoundedJson;
+/// JSON input and output budgets; requires the `json` feature.
 #[cfg(feature = "json")]
 pub use json::JsonLimits;
+/// JSON response encoding error; requires the `json` feature.
 #[cfg(feature = "json")]
 pub use json::JsonResponseError;
+/// Encodes a bounded JSON response; requires the `json` feature.
 #[cfg(feature = "json")]
 pub use json::json_response;
 pub use limit::HttpLimits;
@@ -133,15 +144,21 @@ pub use server::ShutdownReport;
 pub use server::WebServer;
 pub use sse::SseCapacityExceeded;
 pub use sse::SseConnectionPolicy;
+/// TLS server configuration; requires the `tls` feature.
 #[cfg(feature = "tls")]
 pub use tls::TlsConfig;
+/// WebSocket policy validation error; requires the `ws` feature.
 #[cfg(feature = "ws")]
 pub use ws::WsPolicyError;
+/// WebSocket send error; requires the `ws` feature.
 #[cfg(feature = "ws")]
 pub use ws::WsSendError;
+/// Bounded WebSocket outgoing message queue; requires the `ws` feature.
 #[cfg(feature = "ws")]
 pub use ws::WsSendQueue;
+/// Managed WebSocket session; requires the `ws` feature.
 #[cfg(feature = "ws")]
 pub use ws::WsSession;
+/// WebSocket upgrade and resource policy; requires the `ws` feature.
 #[cfg(feature = "ws")]
 pub use ws::WsUpgradePolicy;

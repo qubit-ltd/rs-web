@@ -31,7 +31,7 @@ cargo run --example prompt_stream --features "json ws"
 curl -i -H 'content-type: application/json' -d '{"prompt":"demo"}' http://127.0.0.1:3001/prompt
 ```
 
-预期为 HTTP 200，响应 JSON 含 `job_id: "demo-1"` 和提交的 prompt。完整响应式流与关闭检查见后文“运行、观察和关闭”；完成这一步后，再按下文将 handler、state 和连接策略接入自己的 Router。
+预期为 HTTP 200，响应 JSON 含 `job_id: "demo-1"` 和提交的 prompt。启用 `json` feature 后，`BoundedJson` 接受 `application/json` 和符合 token 语法的 `application/*+json` subtype；畸形 subtype 会在 handler 执行前返回 HTTP 415。完整响应式流与关闭检查见后文“运行、观察和关闭”；完成这一步后，再按下文将 handler、state 和连接策略接入自己的 Router。
 
 连接额度按每个服务实例分别计算。默认上限是 1024；文件描述符、TLS 握手成本或内存预算较紧时，可以调小，但必须大于零：
 
@@ -89,7 +89,7 @@ let app = Router::new()
 
 片段中的 `submit`、`progress` 和 `websocket` 是应用自己的 handler；完整组合可参考 [`examples/prompt_stream.rs`](../examples/prompt_stream.rs)。Controller 短路由已有默认限额；调用 `ControllerRoutes::with_http_limits` 可替换默认策略。Controller 的 `sse` 和 `ws` 路由使用独立的流式接纳 layer；`with_http_limits` 只改变短路由策略。原生 SSE/WS 分支不要套用 `RequestLimitLayer`：它的期限还会覆盖响应流。宏把 `kind` 作为限额策略分类，`ws` 只允许 `GET`，但不会验证 handler 是否真正实现了对应协议。
 
-`ControllerRoutes::add` 会在注册前检查当前 Controller 的全部路由声明。重复的 method/path、无效路径或匹配模板冲突（例如参数别名和重叠通配符）会返回 `ControllerRouteError`。不同 method 可以共用同一模板，`finish()` 直接返回 `Router`。检查范围是 builder 收集的声明；之后与原生 Axum Router 合并仍遵循 Axum 自身行为。`rest_controller` 也支持在同一模块中装配末段名称相同、但实际类型不同的 Controller。
+`ControllerRoutes::add` 会在注册前检查当前 Controller 的全部路由声明。重复的 method/path、无效路径或匹配模板冲突（例如参数别名和重叠通配符）会返回 `ControllerRouteError`。不同 method 可以共用同一模板，`finish()` 直接返回 `Router`。路径捕获请使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧式 `/:id`、`/*rest` 会被拒绝。检查范围是 builder 收集的声明；之后与原生 Axum Router 合并仍遵循 Axum 自身行为。`rest_controller` 也支持在同一模块中装配末段名称相同、但实际类型不同的 Controller。
 
 ### 为原生 SSE 和 WebSocket 请求安装接纳层
 
@@ -279,9 +279,9 @@ transport 许可用满后，accept loop 会在 accept 新 socket 前等待。客
 
 `request_header_timeout` 默认 10 秒，用于限制 HTTP/1 请求头；零值或 Tokio 无法通过 `Instant::checked_add` 表示的期限（包括 `Duration::MAX`）会以 `WebServerError::InvalidConfig` 拒绝。SSE keep-alive interval 也必须是正数且可表示。未匹配请求的诊断日志只使用固定标记 `<unmatched>`，不会记录 URI、查询参数或秘密信息。HTTPS TLS 握手也沿用该期限。`transport_idle_timeout` 默认 30 秒，在 handler 和响应体都不活跃时回收空闲 HTTP/1/2 连接。活跃请求停滞不会由空闲期限中断；此类情况应使用路由限额或部署层策略处理。`HttpLimits::with_request_timeout` 与传输空闲期限不同：Controller `short` 路由默认使用该请求期限，原生 Axum 路由则只有显式安装 `RequestLimitLayer` 后才使用。
 
-对 WebSocket，`WsUpgradePolicy::idle_timeout` 也限制入站消息交付给应用时无进展的最长时间。若应用没有调用 `WsSession::recv()`，导致容量为 64 条消息的入站通道满载，期限到达后会话会以关闭码 `1013`（原因 `inbound backpressure`）关闭。应定期排空消息，并在接收后再转交较长的业务处理。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达；对端或会话关闭后，它会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。关闭后 `recv()` 返回 `None`。
+WebSocket 的 `queue_limits` 配置出站队列；`inbound_queue_limits(messages, bytes)` 单独配置入站队列及每连接累计 payload 字节预算，默认是 64 条排队消息和 1 MiB。reader 等待通道空位时最多另持有一条消息，该 payload 也计入相同字节预算。通道满时最多等待至 `idle_timeout`，然后以关闭码 `1013`（原因 `inbound backpressure`）关闭；若剩余字节预算不足以容纳消息，则立即以 `1013` 关闭。默认 128 个连接对应约 128 MiB 排队/待交付 payload，此外每连接最多还可能有一条 1 MiB 协议重组消息、分配开销和应用自有内存。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应定期读取消息，再将较长处理交给应用任务。传输读取错误通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；显式 `close()` 会清除待交付错误，此后 `recv()` 返回 `None`。宿主停服可能直接取消 handler，不保证交付该错误。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达；对端或会话关闭后，它会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。
 
-`WsUpgradePolicy::validate()` 按最终配置字段值校验；同一 setter 后续设置的值会覆盖此前的值。`max_connections` 的合法范围是 `1..=tokio::sync::Semaphore::MAX_PERMITS`：零值返回 `WsPolicyError::ZeroLimit`，超过上限返回 `WsPolicyError::ConnectionLimitTooLarge`。无效策略会使 `on_upgrade` 返回 HTTP 500，不能完成升级。例如，先设为零、再修正为 1 后，校验通过：
+`WsUpgradePolicy::validate()` 按最终配置字段值校验；同一 setter 后续设置的值会覆盖此前的值。`max_connections` 和 `inbound_queue_limits` 的消息条数范围都是 `1..=tokio::sync::Semaphore::MAX_PERMITS`：零值返回 `WsPolicyError::ZeroLimit`；连接数超过上限返回 `WsPolicyError::ConnectionLimitTooLarge`，入站条数超过上限返回 `WsPolicyError::InboundQueueLimitTooLarge`。入站字节预算也必须为正。穷尽匹配 `WsPolicyError` 的调用方应增加 `InboundQueueLimitTooLarge` 分支。无效策略会使 `on_upgrade` 返回 HTTP 500，不能完成升级。例如，先设为零、再修正为 1 后，校验通过：
 
 ```rust,ignore
 assert!(WsUpgradePolicy::new()
@@ -298,8 +298,8 @@ assert!(WsUpgradePolicy::new()
 | SSE 在普通请求期限到达时关闭 | 从该流式分支移除 `RequestLimitLayer`，改用 `SseConnectionPolicy` 的连接策略。 |
 | 慢客户端没有立即观察到短响应超时 | 响应头发出后，期限会释放应用响应体和短请求许可；只有传输再次轮询时才能报告 body error。它不会更改响应状态或关闭连接；传输连接由独立策略管理。 |
 | WS 建立后 `active_sessions()` 仍为 0 | 调用 `WsUpgradePolicy::on_upgrade` 并传入服务的 `ServerContext`；原生 Axum upgrade 不属于受管会话统计。 |
-| `WsUpgradePolicy::validate()` 报告连接上限无效 | 检查最终的 `max_connections`：零值对应 `WsPolicyError::ZeroLimit`；超过 `tokio::sync::Semaphore::MAX_PERMITS` 对应 `WsPolicyError::ConnectionLimitTooLarge`。修正设置后重新校验；无效策略不能升级。 |
-| 入站负载下 WebSocket 以 `1013` 关闭 | 应用可能没有及时调用 `WsSession::recv()`。入站通道容量为 64 条消息；若通道持续满载且 `idle_timeout` 内交付没有进展，会话就会关闭。应持续读取消息，或先接收再交给应用管理的任务处理；根据预期处理间隔设置合适的 `idle_timeout`。 |
+| `WsUpgradePolicy::validate()` 报告连接数或入站队列配置无效 | 检查最终的 `max_connections` 和 `inbound_queue_limits`：零值对应 `WsPolicyError::ZeroLimit`；连接数超上限对应 `ConnectionLimitTooLarge`；入站条数超 `tokio::sync::Semaphore::MAX_PERMITS` 对应 `InboundQueueLimitTooLarge`；入站字节预算必须为正。修正设置后重新校验；无效策略不能升级。 |
+| 入站负载下 WebSocket 以 `1013` 关闭 | 应用可能没有及时调用 `WsSession::recv()`，也可能已用尽累计入站 payload 预算。默认每连接最多排队 64 条消息和 1 MiB；通道满时等待至 `idle_timeout`，字节预算不足时立即关闭。使用 `inbound_queue_limits` 调整字节预算，持续读取消息，并在接收后将较长处理交给应用任务。 |
 | 配置解析失败 | 查看 `ConfigOptionsError::field()`，检查地址、正数限额/期限、处于 `1..=tokio::sync::Semaphore::MAX_PERMITS` 的并发容量和整数类型。容量错误会指向 `http.max_concurrent_requests` 或 `transport.max_connections`，错误文本不会包含配置值。 |
 | HTTPS/WSS 无法连接 | 检查证书链、私钥匹配和客户端信任；TLS 阶段失败时请求还没进入 HTTP 路由。 |
 | 关闭时间超过预期 | 检查 shutdown timeout，并确认 handler/流生产者会响应取消。 |

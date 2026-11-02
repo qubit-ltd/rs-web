@@ -18,5 +18,5 @@ The historical records above preserve past decisions and may describe superseded
 
 ## Current review implementation record
 
-- [Implementation plan (2026-11-01)](implementation-plan-20261101T225639100Z-cf58538d.md): task scope, focused verification evidence, and integration gate.
-- [Design (2026-11-01)](design-20261101T225639100Z-cf58538d.md): accepted behavior and compatibility decisions.
+- [Implementation plan (2026-11-02)](implementation-plan-20261102T005715648Z-02a9a0af.md): accepted scope, implementation tasks, and verification criteria.
+- [Design (2026-11-02)](design-20261102T005715648Z-02a9a0af.md): accepted behavior and compatibility decisions.

@@ -21,6 +21,8 @@ use super::json_rejection::JsonRejection;
 
 /// A request JSON value decoded under the selected [`JsonLimits`].
 ///
+/// This extractor is available with the `json` feature.
+///
 /// # Type Parameters
 ///
 /// - `T`: deserialized value type expected by the request handler.
@@ -28,10 +30,36 @@ use super::json_rejection::JsonRejection;
 /// # Examples
 ///
 /// ```
-/// use qubit_web::BoundedJson;
+/// use axum::body::Body;
+/// use axum::extract::FromRequest;
+/// use axum::http::Request;
+/// use axum::http::StatusCode;
+/// use axum::response::IntoResponse;
+/// use qubit_web::{BoundedJson, JsonLimits};
 ///
-/// let BoundedJson(value) = BoundedJson(42_u32);
-/// assert_eq!(value, 42);
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let mut request = Request::post("/")
+///         .header("content-type", "application/json")
+///         .body(Body::from("42"))?;
+///     request.extensions_mut().insert(JsonLimits::default());
+///     let BoundedJson(value) = BoundedJson::<u64>::from_request(request, &())
+///         .await
+///         .expect("valid JSON within limits");
+///     assert_eq!(value, 42);
+///
+///     let mut request = Request::post("/")
+///         .header("content-type", "application/json")
+///         .body(Body::from("42"))?;
+///     request
+///         .extensions_mut()
+///         .insert(JsonLimits::default().with_max_input_bytes(1)?);
+///     let rejection = BoundedJson::<u64>::from_request(request, &())
+///         .await
+///         .expect_err("two input bytes exceed the one-byte limit");
+///     assert_eq!(rejection.into_response().status(), StatusCode::PAYLOAD_TOO_LARGE);
+///     Ok(())
+/// }
 /// ```
 #[must_use]
 #[derive(Clone, Debug, Eq, PartialEq)]

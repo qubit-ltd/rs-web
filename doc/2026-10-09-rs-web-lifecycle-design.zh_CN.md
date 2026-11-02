@@ -22,13 +22,13 @@ SSE 与 WebSocket 容量限制属于彼此独立的策略域，不是整个服�
 
 ## WebSocket 队列与入站交付
 
-WebSocket 发送队列的所有克隆共享关闭状态。对端或会话关闭后，`try_send` 会返回 `Closed`；成功入队不保证消息已通过网络送达。入站通道容量为 64 条消息。`WsUpgradePolicy::idle_timeout` 表示读取入站消息或向应用交付消息时无进展的最长时间。若应用不调用 `WsSession::recv()` 且交付在该期限内持续受阻，会话会以关闭码 `1013`、原因 `inbound backpressure` 关闭。应用应持续接收消息，并在收到后再转交较长的业务处理。
+WebSocket 发送队列的所有克隆共享关闭状态。对端或会话关闭后，`try_send` 会返回 `Closed`；成功入队不保证消息已通过网络送达。出站 `queue_limits` 与入站 `inbound_queue_limits(messages, bytes)` 分开配置。入站默认每连接最多排队 64 条消息、累计 1 MiB payload；reader 等待通道空位时最多另持有一条消息，且同样计入字节预算。默认 128 个连接对应约 128 MiB 排队/待交付 payload，另需计算每连接最多一条 1 MiB 协议重组消息、分配器开销和应用自有内存。字节预算不足以容纳新消息时，消息会被丢弃并立即以关闭码 `1013` 关闭；仅通道槽满时，`WsUpgradePolicy::idle_timeout` 限制无进展等待时间，到期后以 `1013`、原因 `inbound backpressure` 关闭。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应用应持续接收消息，并在收到后再转交较长的业务处理。
 
 服务取消时，普通写入会停止等待刷新完成。对端发送 Close 后，writer 的最终刷新受服务器共享的关闭截止时间约束。发生背压时，Close 帧可能无法送达。writer 退出时会释放其连接策略许可，并解除受管会话登记。
 
 ## 会话关闭与时间配置边界
 
-`WsSession::close()` 可幂等调用。如果等待期间取消了 close future，可以再次调用重试；关闭后 `recv()` 返回 `None`。writer 退出时会归还队列字节预算、策略许可和受管会话登记，包括 sink shutdown 一直处于 Pending 的情况。HTTP 请求头期限和 SSE keep-alive interval 若为零，或无法由 `Tokio Instant::checked_add` 表示（包括 `Duration::MAX`），会以 `WebServerError::InvalidConfig` 拒绝。
+`WsSession::close()` 可幂等调用。如果等待期间取消 close future，可以再次调用重试；显式关闭后 `recv()` 返回 `None`，并丢弃尚未交付的读错误。传输读取错误保存在有界通道之外；取消清理完成后，可通过一次 `Some(Err(_))` 交付，之后读取返回 `None`。如果 `recv()` 在清理等待期间被取消，错误仍保留，可由后续调用取得。宿主停服可能直接取消 handler，不保证交付该错误。清空通道时会 drop 尚未交付的入站消息封装并归还其字节预算。writer 退出时会归还出站队列字节预算、策略许可和受管会话登记，包括 sink shutdown 一直处于 Pending 的情况。HTTP 请求头期限和 SSE keep-alive interval 若为零，或无法由 `Tokio Instant::checked_add` 表示（包括 `Duration::MAX`），会以 `WebServerError::InvalidConfig` 拒绝。
 
 ## Origin 与应用认证
 

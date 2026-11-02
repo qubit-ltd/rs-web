@@ -105,11 +105,14 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 
 ## 限额与运行边界
 
-`WsSession::close()` 可重复调用；如果等待期间取消了 close future，可以再次调用完成关闭。关闭后，`recv()` 返回 `None`。未匹配请求的诊断日志只使用固定标记 `<unmatched>`，不会记录请求 URI 或秘密信息。`request_header_timeout` 和 SSE keep-alive interval 若为零或无法表示为 Tokio 截止时间，会以 `WebServerError::InvalidConfig` 拒绝。
+Controller 路径捕获使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧式 `/:id`、`/*rest` 路径段会在注册前被拒绝。JSON 提取器接受 `application/json` 和符合 token 语法的 `application/*+json` subtype；畸形 subtype 返回 `415 Unsupported Media Type`。
+
+`WsSession::close()` 可重复调用；如果等待期间取消了 close future，可以再次调用完成关闭。显式关闭后，`recv()` 返回 `None`。传输读取错误可通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；宿主停服可能直接取消 handler，不保证交付该错误。未匹配请求的诊断日志只使用固定标记 `<unmatched>`，不会记录请求 URI 或秘密信息。`request_header_timeout` 和 SSE keep-alive interval 若为零或无法表示为 Tokio 截止时间，会以 `WebServerError::InvalidConfig` 拒绝。
 
 - Controller 的 `short` 路由默认使用 `HttpLimits::default()`；原生 Axum 路由必须在需要限额的短请求分支上显式安装 `RequestLimitLayer`。`WebServer` 不会替传入的 Router 自动添加路由限额。
 - Controller 的 `sse`/`ws` 路由共用 builder 的 `StreamAdmissionState`；添加路由前可用 `with_stream_admission_limits` 替换预算。原生 Axum 分支必须显式安装 `StreamAdmissionLayer`：`new` 创建独立预算，`from_state` 可共享预算。默认每个状态域最多缓冲 1 MiB/请求、接纳 256 个请求，并在响应头产生前限时 10 秒；请求体缓冲理论上限为每个状态域 256 MiB，另有请求和运行时开销。`RequestLimitLayer` 仍是独立的短请求策略。传输连接数和 SSE/WS 会话额度另行计算；SSE 也占用 HTTP 连接。
 - 认证、授权、业务状态，以及流式数据的保存和重放由应用负责。WebSocket 升级前必须先完成认证；Origin 检查只限制浏览器来源。示例 token 和无认证停服入口仅供 loopback 演示。
+- WebSocket 的 `queue_limits` 配置出站队列；`inbound_queue_limits` 单独配置入站预算，默认每连接最多排队 64 条消息和累计 1 MiB payload。通道满时最多等待至 `idle_timeout`，字节预算不足则立即以 `1013` 关闭。默认 128 个连接对应约 128 MiB 排队/待交付 payload；还需另计每连接最多一条 1 MiB 协议重组消息及应用自有内存。
 - 启用 HTTPS 需要 `tls` 与有效证书，也可由部署方配置可信反向代理。停服由应用发起，并遵守服务端配置的截止时间。
 
 限额细节、TLS 配置、生命周期行为和排障方法见[中文用户指南](doc/user_guide.zh_CN.md)或[英文用户指南](doc/user_guide.md)。更多背景可查阅 [API 文档](https://docs.rs/qubit-web)、[历史中文设计记录](doc/2026-10-08-rs-web-design.md)和[生命周期设计摘要](doc/2026-10-09-rs-web-lifecycle-design.en.md)。
