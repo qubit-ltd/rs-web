@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 /// Tracks consecutive accept failures and retains a terminal failure.
+#[derive(Default)]
 pub(super) struct AcceptRetry {
     failures: u32,
     terminal_error: Option<io::Error>,
@@ -46,16 +47,6 @@ impl AcceptRetry {
 
     pub(super) fn take_terminal_error(&mut self) -> Option<io::Error> {
         self.terminal_error.take()
-    }
-}
-
-impl Default for AcceptRetry {
-    fn default() -> Self {
-        Self {
-            failures: 0,
-            terminal_error: None,
-            retry_at: None,
-        }
     }
 }
 
