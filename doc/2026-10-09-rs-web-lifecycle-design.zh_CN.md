@@ -12,7 +12,7 @@ Controller 的 `sse`/`ws` 路由和原生 Axum 长连接路由，应在启动流
 
 SSE 与 WebSocket 容量限制属于彼此独立的策略域，不是整个服务统一的会话上限。每次调用 `SseConnectionPolicy::new`/`default` 或 `WsUpgradePolicy::new`/`default` 都会创建独立容量域；同一策略的克隆共享该域。两类策略各自的默认容量都是每个策略实例 128 个连接。`WsUpgradePolicy` 按最终字段值校验：`max_connections` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`；零值返回 `WsPolicyError::ZeroLimit`，超过上限返回 `WsPolicyError::ConnectionLimitTooLarge`。无效策略不能升级。因此，为不同路由分别创建策略会累加可接纳容量。若要让多条路由共用一个上限，应在应用启动时创建一个策略并放入应用状态，再使用从该状态取得的克隆。`ServerContext::active_sessions()` 用于停服统计，不是额外的数值接纳上限。
 
-停服时服务停止接收连接、关闭会话登记入口并通知现有会话。HTTP 连接任务与受管会话共用一个绝对截止时间。只有两者都在期限内结束，`ShutdownReport::graceful` 才为 `true`；`unfinished_managed_sessions` 记录截止时仍未结束的受管会话数。报告不表示任意应用工作都已停止。由于 Axum 无法提供可证明的强制关闭连接数量，`forced_connections` 保持为 `None`。
+停服时服务停止接收连接、关闭会话登记入口并通知现有会话。HTTP 连接任务与受管会话共用一个绝对截止时间。只有两者实际在截止时刻或之前结束，`ShutdownReport::graceful` 才为 `true`。服务在连接任务释放连接资源时记录完成时刻，并使用会话 tracker 的截止快照；调度迟滞或报告任务晚恢复不会把按时完成误判为超时，而等待返回 `Ok` 也不会使逾期完成变成优雅停服。`unfinished_managed_sessions` 记录截止时仍未结束的受管会话数。报告不表示任意应用工作都已停止。由于 Axum 无法提供可证明的强制关闭连接数量，`forced_connections` 保持为 `None`。
 
 停服时长仅通过 `ServerOptions` 配置，并由 `ServerContext` 统一提供；`WsUpgradePolicy` 不再设置独立的停服期限。WebSocket reader 和 writer 的停服使用服务器共享的绝对截止时间。
 

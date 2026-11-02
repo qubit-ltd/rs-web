@@ -27,8 +27,10 @@ use std::time::Duration;
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[must_use]
 pub struct ShutdownReport {
-    /// Whether all HTTP connections and managed sessions finished before the
-    /// shared shutdown deadline.
+    /// Whether all HTTP connections and managed sessions actually finished
+    /// at or before the shared shutdown deadline. A task that is only
+    /// observed as finished after scheduler delay is judged by its recorded
+    /// completion time, not by when the report task resumes.
     pub graceful: bool,
     /// Number of forcibly closed connections, when the transport can prove it.
     /// This implementation returns `None` because Axum does not expose this

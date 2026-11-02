@@ -33,6 +33,12 @@ use tower::ServiceExt;
 mod accept_retry;
 #[path = "internal/connection_activity.rs"]
 mod connection_activity;
+#[path = "internal/connection_completion.rs"]
+mod connection_completion;
+#[path = "internal/connection_completion_guard.rs"]
+mod connection_completion_guard;
+#[path = "internal/connection_completion_state.rs"]
+mod connection_completion_state;
 #[path = "internal/serve_cancellation_guard.rs"]
 mod serve_cancellation_guard;
 #[path = "server_context.rs"]
@@ -47,6 +53,7 @@ mod session_tracker;
 mod shutdown_report;
 use accept_retry::AcceptRetry;
 use connection_activity::ConnectionActivity;
+use connection_completion::ConnectionCompletion;
 use serve_cancellation_guard::ServeCancellationGuard;
 pub use server_context::ServerContext;
 pub use session_guard::SessionGuard;
@@ -256,12 +263,14 @@ impl WebServer {
         let transport_idle_timeout = options.transport_idle_timeout;
         let connection_limit = Arc::new(Semaphore::new(options.max_transport_connections.get()));
         let graceful = GracefulShutdown::new();
+        let completion = ConnectionCompletion::new();
         let listener = Arc::new(listener);
         let mut retry = AcceptRetry::default();
         tokio::pin!(shutdown);
 
         let accept_listener = Arc::clone(&listener);
         let accept_limit = connection_limit.clone();
+        let accept_completion = completion.clone();
         let (accept_error, connections) = run_accept_loop(
             JoinSet::new(),
             shutdown,
@@ -280,11 +289,14 @@ impl WebServer {
             |(stream, _), permit, connections| {
                 let app = app.clone();
                 let watcher = graceful.watcher();
+                let completion = accept_completion.clone();
                 #[cfg(feature = "tls")]
                 let tls_acceptor = tls_acceptor.clone();
                 #[cfg(feature = "tls")]
                 let cancellation = context.cancellation_token();
+                let completion_guard = completion.register();
                 connections.spawn(async move {
+                    let _completion_guard = completion_guard;
                     let _permit = permit;
                     #[cfg(feature = "tls")]
                     if let Some(acceptor) = tls_acceptor {
@@ -306,7 +318,7 @@ impl WebServer {
         )
         .await;
 
-        let result = finish_serve(listener, context, graceful, connections, accept_error).await;
+        let result = finish_serve(listener, context, graceful, completion, connections, accept_error).await;
         cancellation_guard.disarm();
         result
     }
@@ -367,6 +379,7 @@ async fn finish_serve(
     listener: Arc<TcpListener>,
     context: ServerContext,
     graceful: GracefulShutdown,
+    completion: ConnectionCompletion,
     mut connections: JoinSet<()>,
     accept_error: Option<io::Error>,
 ) -> Result<ShutdownReport, WebServerError> {
@@ -380,31 +393,22 @@ async fn finish_serve(
             return Err(error);
         }
     };
-    let report = match tokio::time::timeout_at(shutdown_deadline, async {
+    let _wait_result = tokio::time::timeout_at(shutdown_deadline, async {
         tokio::join!(graceful.shutdown(), context.wait_for_sessions())
     })
-    .await
-    {
-        Ok(((), ())) => {
-            while connections.join_next().await.is_some() {}
-            ShutdownReport {
-                graceful: true,
-                forced_connections: None,
-                unfinished_managed_sessions: 0,
-                elapsed: started.elapsed(),
-            }
-        }
-        Err(_) => {
-            let unfinished_managed_sessions = context.active_sessions_at(shutdown_deadline);
-            connections.abort_all();
-            while connections.join_next().await.is_some() {}
-            ShutdownReport {
-                graceful: false,
-                forced_connections: None,
-                unfinished_managed_sessions,
-                elapsed: started.elapsed(),
-            }
-        }
+    .await;
+    let unfinished_managed_sessions = context.active_sessions_at(shutdown_deadline);
+    let transport_completed_by_deadline = completion.completed_by(shutdown_deadline);
+    let graceful = unfinished_managed_sessions == 0 && transport_completed_by_deadline;
+    if !graceful {
+        connections.abort_all();
+    }
+    while connections.join_next().await.is_some() {}
+    let report = ShutdownReport {
+        graceful,
+        forced_connections: None,
+        unfinished_managed_sessions,
+        elapsed: started.elapsed(),
     };
     if let Some(source) = accept_error {
         Err(serve_error(source))
@@ -645,10 +649,60 @@ mod accept_retry_tests {
 
     use super::AcceptResult;
     use super::accept_retry::AcceptRetry;
+    use super::connection_completion::ConnectionCompletion;
     use super::finish_serve;
     use super::handle_accept_result;
     use super::run_accept_loop;
     use super::server_context::ServerContext;
+
+    #[tokio::test]
+    async fn test_finish_serve_reports_late_transport_completion_as_not_graceful() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let context = ServerContext::new(Duration::from_millis(20));
+        let deadline = context.begin_shutdown().expect("shutdown deadline is representable");
+        let completion = ConnectionCompletion::new();
+        let late_completion = deadline + Duration::from_millis(1);
+        completion.record_completion(late_completion);
+        tokio::time::sleep_until(late_completion).await;
+
+        let report = finish_serve(
+            Arc::new(listener),
+            context,
+            GracefulShutdown::new(),
+            completion,
+            JoinSet::new(),
+            None,
+        )
+        .await
+        .expect("no accept error should be returned");
+
+        assert!(!report.graceful);
+        assert_eq!(report.unfinished_managed_sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn test_finish_serve_keeps_on_time_transport_graceful_when_observed_late() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let context = ServerContext::new(Duration::from_millis(20));
+        let deadline = context.begin_shutdown().expect("shutdown deadline is representable");
+        let completion = ConnectionCompletion::new();
+        completion.record_completion(deadline - Duration::from_millis(1));
+        tokio::time::sleep_until(deadline + Duration::from_millis(1)).await;
+
+        let report = finish_serve(
+            Arc::new(listener),
+            context,
+            GracefulShutdown::new(),
+            completion,
+            JoinSet::new(),
+            None,
+        )
+        .await
+        .expect("no accept error should be returned");
+
+        assert!(report.graceful);
+        assert_eq!(report.unfinished_managed_sessions, 0);
+    }
 
     #[test]
     fn test_accept_transient_error_then_success_keeps_server_running() {
@@ -1094,7 +1148,15 @@ mod accept_retry_tests {
         let accept_error = accept_error.expect("ninth transient failure terminates the accept loop");
         assert_eq!(accept_error.to_string(), "ninth accept sentinel");
 
-        let result = finish_serve(Arc::new(listener), context, watcher, connections, Some(accept_error)).await;
+        let result = finish_serve(
+            Arc::new(listener),
+            context,
+            watcher,
+            ConnectionCompletion::new(),
+            connections,
+            Some(accept_error),
+        )
+        .await;
 
         let error = result.expect_err("terminal accept error is returned after cleanup");
         assert!(matches!(&error, crate::WebServerError::ServeFailed { .. }));

@@ -326,6 +326,88 @@ async fn test_shutdown_deadline_drops_a_request_that_does_not_finish() {
 }
 
 #[tokio_test]
+async fn test_late_session_release_after_scheduler_delay_is_not_graceful() {
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(120)),
+    )
+    .await
+    .unwrap();
+    let context = server.context();
+    let session = context.try_register_session().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let serving = spawn(server.serve(Router::new(), async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    shutdown_tx.send(()).unwrap();
+    timeout(Duration::from_secs(1), context.cancellation_token().cancelled())
+        .await
+        .expect("shutdown should establish its deadline");
+    let deadline = context.shutdown_deadline().expect("shutdown deadline is recorded");
+    let delay = deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(20);
+    std::thread::sleep(delay);
+    drop(session);
+    let released_at = Instant::now();
+    assert!(released_at > deadline);
+
+    let report = timeout(Duration::from_secs(1), serving)
+        .await
+        .expect("shutdown should finish after the session releases")
+        .unwrap()
+        .unwrap();
+    assert!(!report.graceful);
+    assert_eq!(report.unfinished_managed_sessions, 1);
+}
+
+#[tokio_test]
+async fn test_transport_active_past_deadline_is_not_graceful() {
+    let entered = Arc::new(Notify::new());
+    let entered_handler = entered.clone();
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(100)),
+    )
+    .await
+    .unwrap();
+    let context = server.context();
+    let app = Router::new().route(
+        "/hold",
+        get(move || {
+            let entered = entered_handler.clone();
+            async move {
+                entered.notify_one();
+                pending::<&'static str>().await
+            }
+        }),
+    );
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let serving = spawn(server.serve(app, async move {
+        let _ = shutdown_rx.await;
+    }));
+    let mut client = TcpStream::connect(address).await.unwrap();
+    client
+        .write_all(b"GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    entered.notified().await;
+
+    shutdown_tx.send(()).unwrap();
+    timeout(Duration::from_secs(1), context.cancellation_token().cancelled())
+        .await
+        .expect("shutdown should establish its deadline");
+    let deadline = context.shutdown_deadline().expect("shutdown deadline is recorded");
+    assert!(deadline > Instant::now());
+    let report = timeout(Duration::from_secs(1), serving)
+        .await
+        .expect("active transport should be aborted at the deadline")
+        .unwrap()
+        .unwrap();
+    assert!(!report.graceful);
+    assert_eq!(report.unfinished_managed_sessions, 0);
+    drop(client);
+}
+
+#[tokio_test]
 async fn test_http_and_sse_share_one_shutdown_deadline() {
     let entered = Arc::new(Notify::new());
     let entered_handler = entered.clone();
