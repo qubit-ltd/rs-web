@@ -1,6 +1,10 @@
-name: Current-crate WebSocket checks
+name: Downstream WebSocket interoperability
 
 on:
+  pull_request:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -11,8 +15,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: upstream/rs-web
       - uses: dtolnay/rust-toolchain@1.94.0
-      - name: Prepare local path dependencies
+      - name: Prepare upstream local path dependencies
+        working-directory: upstream/rs-web
         run: ./.infra/bin/prepare-local-path-dependencies.sh
       - name: Test current crate WebSocket contracts
+        working-directory: upstream/rs-web
         run: cargo test -p qubit-web --no-default-features --features ws --test websocket_tests --locked
+
+  downstream-interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: upstream/rs-web
+      - uses: actions/checkout@v4
+        with:
+          repository: qubit-ltd/rs-websocket
+          ref: c9c61dbd69ec4ce48853e662f4d8fe309aae7093
+          path: downstream/rs-websocket
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Test downstream manifest preparation
+        working-directory: upstream/rs-web
+        run: python3 -m unittest scripts.test_prepare_downstream_interop
+      - name: Match disposable consumer requirement to current upstream version
+        run: python3 upstream/rs-web/scripts/prepare_downstream_interop.py --upstream "$GITHUB_WORKSPACE/upstream/rs-web" --downstream "$GITHUB_WORKSPACE/downstream/rs-websocket"
+      - name: Prepare upstream local path dependencies
+        working-directory: upstream/rs-web
+        run: ./.infra/bin/prepare-local-path-dependencies.sh
+      - name: Prepare downstream local path dependencies
+        working-directory: downstream/rs-websocket
+        run: ./.infra/bin/prepare-local-path-dependencies.sh
+      - name: Stage current upstream source in the consumer dependency group
+        run: cp -a upstream/rs-web downstream/rs-web
+      - name: Test downstream interoperability against current source
+        run: python3 upstream/rs-web/scripts/check-downstream-interop.py --upstream "$GITHUB_WORKSPACE/downstream/rs-web" --downstream "$GITHUB_WORKSPACE/downstream/rs-websocket"
