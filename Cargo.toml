@@ -38,6 +38,7 @@ required-features = ["json"]
 [[example]]
 name = "prompt_stream"
 required-features = ["json", "ws"]
+test = true
 
 [[test]]
 name = "config_options_tests"
