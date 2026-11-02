@@ -1,6 +1,10 @@
-name: Current-crate WebSocket checks
+name: WebSocket interoperability
 
 on:
+  pull_request:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -11,8 +15,45 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: interop/rs-web
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Prepare local path dependencies
+        working-directory: interop/rs-web
         run: ./.infra/bin/prepare-local-path-dependencies.sh
       - name: Test current crate WebSocket contracts
+        working-directory: interop/rs-web
         run: cargo test -p qubit-web --no-default-features --features ws --test websocket_tests --locked
+
+  downstream-interop:
+    runs-on: ubuntu-latest
+    steps:
+      # Both repositories remain separate checkouts. Their ../rs-* path dependencies
+      # must share one checkout each because Cargo cannot lock duplicate path packages.
+      - uses: actions/checkout@v4
+        with:
+          path: interop/rs-web
+      - uses: actions/checkout@v4
+        with:
+          repository: qubit-ltd/rs-websocket
+          ref: 94f9da8c486998efcae693a15c5c021c7cece601
+          path: interop/rs-websocket
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Prepare upstream local path dependencies
+        working-directory: interop/rs-web
+        run: ./.infra/bin/prepare-local-path-dependencies.sh
+      - name: Prepare downstream local path dependencies
+        working-directory: interop/rs-websocket
+        run: ./.infra/bin/prepare-local-path-dependencies.sh
+      - name: Mark downstream checkout disposable
+        env:
+          DOWNSTREAM_PATH: ${{ github.workspace }}/interop/rs-websocket
+          MARKER_PATH: ${{ runner.temp }}/rs-websocket-disposable-checkout.marker
+        run: python3 -c 'import os; from pathlib import Path; Path(os.environ["MARKER_PATH"]).write_text(str(Path(os.environ["DOWNSTREAM_PATH"]).resolve()) + "\n", encoding="utf-8")'
+      - name: Test fixed downstream against current upstream source
+        working-directory: interop/rs-websocket
+        run: >-
+          python3 "$GITHUB_WORKSPACE/interop/rs-web/scripts/check-downstream-interop.py"
+          --upstream "$GITHUB_WORKSPACE/interop/rs-web"
+          --downstream "$GITHUB_WORKSPACE/interop/rs-websocket"
+          --disposable-marker "$RUNNER_TEMP/rs-websocket-disposable-checkout.marker"
