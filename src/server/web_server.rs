@@ -22,12 +22,15 @@ use hyper_util::rt::TokioTimer;
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 #[cfg(feature = "tls")]
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 
+#[path = "internal/accept_retry.rs"]
+mod accept_retry;
 #[path = "internal/connection_activity.rs"]
 mod connection_activity;
 #[path = "server_context.rs"]
@@ -40,6 +43,7 @@ mod session_registration_error;
 mod session_tracker;
 #[path = "shutdown_report.rs"]
 mod shutdown_report;
+use accept_retry::AcceptRetry;
 use connection_activity::ConnectionActivity;
 pub use server_context::ServerContext;
 pub use session_guard::SessionGuard;
@@ -219,9 +223,11 @@ impl WebServer {
     ///
     /// # Errors
     ///
-    /// Returns [`WebServerError::ServeFailed`] when accepting a connection
-    /// fails. The underlying I/O error is retained as its source and is only
-    /// shown when a caller explicitly inspects that source. Returns
+    /// Retries transient accept failures up to eight consecutive times, with
+    /// an interruptible exponential delay; a successful accept resets the
+    /// count. Fatal failures and the ninth consecutive failure end serving
+    /// after shutdown cleanup. The underlying I/O error is retained as the
+    /// source of [`WebServerError::ServeFailed`]. Returns
     /// [`WebServerError::InvalidConfig`] if the shutdown deadline cannot be
     /// represented; the listener is closed and spawned connection tasks are
     /// aborted and reaped before returning.
@@ -241,97 +247,158 @@ impl WebServer {
         let transport_idle_timeout = options.transport_idle_timeout;
         let connection_limit = Arc::new(Semaphore::new(options.max_transport_connections.get()));
         let graceful = GracefulShutdown::new();
-        let mut connections = JoinSet::new();
+        let listener = Arc::new(listener);
+        let mut retry = AcceptRetry::default();
         tokio::pin!(shutdown);
 
-        let accept_error = loop {
-            let event = select_server_event(&mut connections, &mut shutdown, async {
-                let permit = connection_limit.clone().acquire_owned().await.ok()?;
-                let accepted = listener.accept().await;
-                Some((permit, accepted))
-            })
-            .await;
-            match event {
-                ServerEvent::Shutdown => break None,
-                ServerEvent::Accept(accepted) => {
-                    let Some((permit, accepted)) = accepted else {
-                        break None;
-                    };
-                    let (stream, _) = match accepted {
-                        Ok(accepted) => accepted,
-                        Err(source) => break Some(source),
-                    };
-                    let app = app.clone();
-                    let watcher = graceful.watcher();
+        let accept_listener = Arc::clone(&listener);
+        let accept_limit = connection_limit.clone();
+        let (accept_error, connections) = run_accept_loop(
+            JoinSet::new(),
+            shutdown,
+            &mut retry,
+            move |retry_at| {
+                let listener = Arc::clone(&accept_listener);
+                let connection_limit = accept_limit.clone();
+                async move {
+                    if let Some(deadline) = retry_at {
+                        tokio::time::sleep_until(deadline).await;
+                    }
+                    let permit = connection_limit.acquire_owned().await.ok()?;
+                    Some((permit, listener.accept().await))
+                }
+            },
+            |(stream, _), permit, connections| {
+                let app = app.clone();
+                let watcher = graceful.watcher();
+                #[cfg(feature = "tls")]
+                let tls_acceptor = tls_acceptor.clone();
+                #[cfg(feature = "tls")]
+                let cancellation = context.cancellation_token();
+                connections.spawn(async move {
+                    let _permit = permit;
                     #[cfg(feature = "tls")]
-                    let tls_acceptor = tls_acceptor.clone();
-                    #[cfg(feature = "tls")]
-                    let cancellation = context.cancellation_token();
-                    connections.spawn(async move {
-                        let _permit = permit;
-                        #[cfg(feature = "tls")]
-                        if let Some(acceptor) = tls_acceptor {
-                            let accepted = tokio::select! {
-                                biased;
-                                _ = cancellation.cancelled() => return,
-                                result = tokio::time::timeout(
-                                    request_header_timeout,
-                                    acceptor.accept(stream),
-                                ) => result,
-                            };
-                            let Ok(Ok(stream)) = accepted else { return };
-                            serve_connection(stream, app, watcher, request_header_timeout, transport_idle_timeout)
-                                .await;
-                            return;
-                        }
+                    if let Some(acceptor) = tls_acceptor {
+                        let accepted = tokio::select! {
+                            biased;
+                            _ = cancellation.cancelled() => return,
+                            result = tokio::time::timeout(
+                                request_header_timeout,
+                                acceptor.accept(stream),
+                            ) => result,
+                        };
+                        let Ok(Ok(stream)) = accepted else { return };
                         serve_connection(stream, app, watcher, request_header_timeout, transport_idle_timeout).await;
-                    });
-                }
-                ServerEvent::Joined => {}
-            }
-        };
+                        return;
+                    }
+                    serve_connection(stream, app, watcher, request_header_timeout, transport_idle_timeout).await;
+                });
+            },
+        )
+        .await;
 
-        drop(listener);
-        let started = tokio::time::Instant::now();
-        let shutdown_deadline = match context.begin_shutdown() {
-            Ok(deadline) => deadline,
-            Err(error) => {
-                connections.abort_all();
-                while connections.join_next().await.is_some() {}
-                return Err(error);
-            }
-        };
-        let report = match tokio::time::timeout_at(shutdown_deadline, async {
-            tokio::join!(graceful.shutdown(), context.wait_for_sessions())
-        })
-        .await
-        {
-            Ok(((), ())) => {
-                while connections.join_next().await.is_some() {}
-                ShutdownReport {
-                    graceful: true,
-                    forced_connections: None,
-                    unfinished_managed_sessions: 0,
-                    elapsed: started.elapsed(),
+        finish_serve(listener, context, graceful, connections, accept_error).await
+    }
+}
+
+enum AcceptResult<T> {
+    Accepted(T),
+    Retry,
+    Terminal(io::Error),
+}
+
+async fn run_accept_loop<T, MakeAccept, AcceptFuture, OnAccepted, Shutdown>(
+    mut connections: JoinSet<()>,
+    mut shutdown: Shutdown,
+    retry: &mut AcceptRetry,
+    mut make_accept: MakeAccept,
+    mut on_accepted: OnAccepted,
+) -> (Option<io::Error>, JoinSet<()>)
+where
+    MakeAccept: FnMut(Option<tokio::time::Instant>) -> AcceptFuture,
+    AcceptFuture: Future<Output = Option<(OwnedSemaphorePermit, io::Result<T>)>>,
+    OnAccepted: FnMut(T, OwnedSemaphorePermit, &mut JoinSet<()>),
+    Shutdown: Future<Output = ()> + Unpin,
+{
+    let accept_error = loop {
+        let event = select_server_event(&mut connections, &mut shutdown, make_accept(retry.retry_at())).await;
+        match event {
+            ServerEvent::Shutdown => break None,
+            ServerEvent::Joined => {}
+            ServerEvent::Accept(None) => break None,
+            ServerEvent::Accept(Some((permit, result))) => match handle_accept_result(retry, result) {
+                AcceptResult::Accepted(accepted) => on_accepted(accepted, permit, &mut connections),
+                AcceptResult::Retry => drop(permit),
+                AcceptResult::Terminal(source) => {
+                    drop(permit);
+                    break Some(source);
                 }
-            }
-            Err(_) => {
-                let unfinished_managed_sessions = context.active_sessions_at(shutdown_deadline);
-                connections.abort_all();
-                while connections.join_next().await.is_some() {}
-                ShutdownReport {
-                    graceful: false,
-                    forced_connections: None,
-                    unfinished_managed_sessions,
-                    elapsed: started.elapsed(),
-                }
-            }
-        };
-        if let Some(source) = accept_error {
-            Err(serve_error(source))
-        } else {
-            Ok(report)
+            },
         }
+    };
+    (accept_error, connections)
+}
+
+fn handle_accept_result<T>(retry: &mut AcceptRetry, result: io::Result<T>) -> AcceptResult<T> {
+    match result {
+        Ok(accepted) => {
+            retry.record_success();
+            AcceptResult::Accepted(accepted)
+        }
+        Err(source) => match retry.record_error(source) {
+            Some(_) => AcceptResult::Retry,
+            None => AcceptResult::Terminal(retry.take_terminal_error().expect("terminal accept error is retained")),
+        },
+    }
+}
+
+async fn finish_serve(
+    listener: Arc<TcpListener>,
+    context: ServerContext,
+    graceful: GracefulShutdown,
+    mut connections: JoinSet<()>,
+    accept_error: Option<io::Error>,
+) -> Result<ShutdownReport, WebServerError> {
+    drop(listener);
+    let started = tokio::time::Instant::now();
+    let shutdown_deadline = match context.begin_shutdown() {
+        Ok(deadline) => deadline,
+        Err(error) => {
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
+            return Err(error);
+        }
+    };
+    let report = match tokio::time::timeout_at(shutdown_deadline, async {
+        tokio::join!(graceful.shutdown(), context.wait_for_sessions())
+    })
+    .await
+    {
+        Ok(((), ())) => {
+            while connections.join_next().await.is_some() {}
+            ShutdownReport {
+                graceful: true,
+                forced_connections: None,
+                unfinished_managed_sessions: 0,
+                elapsed: started.elapsed(),
+            }
+        }
+        Err(_) => {
+            let unfinished_managed_sessions = context.active_sessions_at(shutdown_deadline);
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
+            ShutdownReport {
+                graceful: false,
+                forced_connections: None,
+                unfinished_managed_sessions,
+                elapsed: started.elapsed(),
+            }
+        }
+    };
+    if let Some(source) = accept_error {
+        Err(serve_error(source))
+    } else {
+        Ok(report)
     }
 }
 
@@ -462,7 +529,7 @@ mod error_tests {
     }
 
     #[test]
-    fn test_preserves_injected_accept_failure_after_shutdown_cleanup() {
+    fn test_accept_terminal_error_preserves_original_source() {
         let injected = io::Error::new(io::ErrorKind::ConnectionAborted, "accept sentinel");
         let error = serve_error(injected);
 
@@ -545,5 +612,497 @@ mod server_event_tests {
         let event = select_server_event(&mut connections, ready(()), ready("accepted")).await;
 
         assert!(matches!(event, ServerEvent::Shutdown));
+    }
+}
+
+#[cfg(test)]
+mod accept_retry_tests {
+    use std::collections::VecDeque;
+    use std::io;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use hyper_util::server::graceful::GracefulShutdown;
+    use tokio::net::TcpListener;
+    use tokio::sync::Semaphore;
+    use tokio::sync::mpsc;
+    use tokio::sync::oneshot;
+    use tokio::task::JoinSet;
+    use tokio::time::Instant;
+
+    use super::AcceptResult;
+    use super::accept_retry::AcceptRetry;
+    use super::finish_serve;
+    use super::handle_accept_result;
+    use super::run_accept_loop;
+    use super::server_context::ServerContext;
+
+    #[test]
+    fn test_accept_transient_error_then_success_keeps_server_running() {
+        let mut retry = AcceptRetry::default();
+        let before = Instant::now();
+        let retry_at =
+            match handle_accept_result::<()>(&mut retry, Err(io::Error::from(io::ErrorKind::ConnectionAborted))) {
+                AcceptResult::Retry => retry.retry_at().expect("retry state retains its deadline"),
+                _ => panic!("transient failure must schedule retry"),
+            };
+        assert!(retry_at.duration_since(before) >= Duration::from_millis(10));
+        assert!(retry_at.duration_since(before) < Duration::from_millis(11));
+        assert!(matches!(
+            handle_accept_result(&mut retry, Ok(())),
+            AcceptResult::Accepted(())
+        ));
+        assert!(retry.retry_at().is_none());
+        let before = Instant::now();
+        let retry_at =
+            match handle_accept_result::<()>(&mut retry, Err(io::Error::from(io::ErrorKind::ConnectionAborted))) {
+                AcceptResult::Retry => retry.retry_at().expect("retry state retains its deadline"),
+                _ => panic!("failure after success starts a new retry series"),
+            };
+        assert!(retry_at.duration_since(before) >= Duration::from_millis(10));
+        assert!(retry_at.duration_since(before) < Duration::from_millis(11));
+    }
+
+    #[tokio::test]
+    async fn test_accept_loop_retries_controlled_error_then_accepts_connection() {
+        let results = Arc::new(std::sync::Mutex::new(VecDeque::from([
+            Err(io::Error::from(io::ErrorKind::ConnectionAborted)),
+            Ok(23),
+        ])));
+        let permits = Arc::new(Semaphore::new(1));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let mut shutdown_tx = Some(shutdown_tx);
+        let mut accepted_tx = Some(accepted_tx);
+        let mut retry = AcceptRetry::default();
+        let shutdown = async move {
+            let _ = shutdown_rx.await;
+        };
+        tokio::pin!(shutdown);
+
+        let (error, connections) = run_accept_loop(
+            JoinSet::new(),
+            shutdown,
+            &mut retry,
+            {
+                let results = results.clone();
+                let permits = permits.clone();
+                move |retry_at| {
+                    let results = results.clone();
+                    let permits = permits.clone();
+                    async move {
+                        if let Some(deadline) = retry_at {
+                            tokio::time::sleep_until(deadline).await;
+                        }
+                        let permit = permits.acquire_owned().await.ok()?;
+                        let result = results
+                            .lock()
+                            .expect("scripted results lock")
+                            .pop_front()
+                            .expect("script contains error and then success");
+                        Some((permit, result))
+                    }
+                }
+            },
+            move |accepted, _permit, _connections| {
+                accepted_tx
+                    .take()
+                    .expect("only one scripted accept succeeds")
+                    .send(accepted)
+                    .expect("acceptance receiver remains open");
+                shutdown_tx
+                    .take()
+                    .expect("shutdown is requested once")
+                    .send(())
+                    .expect("shutdown receiver remains open");
+            },
+        )
+        .await;
+
+        assert!(error.is_none(), "a transient error must not terminate accept loop");
+        assert_eq!(accepted_rx.await.expect("successful accept is delivered"), 23);
+        assert_eq!(retry.consecutive_failures(), 0, "success resets retry count");
+        assert!(connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_accept_loop_fatal_error_stops_after_one_accept_attempt() {
+        let permits = Arc::new(Semaphore::new(1));
+        let accept_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut retry = AcceptRetry::default();
+        let (error, connections) = run_accept_loop(
+            JoinSet::new(),
+            std::future::pending::<()>(),
+            &mut retry,
+            {
+                let permits = permits.clone();
+                let accept_calls = accept_calls.clone();
+                move |_retry_at| {
+                    let permits = permits.clone();
+                    let accept_calls = accept_calls.clone();
+                    async move {
+                        accept_calls.fetch_add(1, Ordering::SeqCst);
+                        let permit = permits.acquire_owned().await.ok()?;
+                        Some((
+                            permit,
+                            Err::<(), io::Error>(io::Error::new(io::ErrorKind::PermissionDenied, "fatal sentinel")),
+                        ))
+                    }
+                }
+            },
+            |_accepted, _permit, _connections| {},
+        )
+        .await;
+
+        assert_eq!(accept_calls.load(Ordering::SeqCst), 1, "fatal error is not retried");
+        assert_eq!(
+            error.expect("fatal accept error terminates loop").to_string(),
+            "fatal sentinel"
+        );
+        assert!(connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_accept_loop_releases_permit_before_retry_backoff() {
+        let permits = Arc::new(Semaphore::new(1));
+        let permit_observer = permits.clone();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (retried_tx, retried_rx) = oneshot::channel();
+        let mut retried_tx = Some(retried_tx);
+        let mut accept_count = 0;
+        let mut accept_loop = tokio::spawn(async move {
+            let shutdown = async move {
+                let _ = shutdown_rx.await;
+            };
+            tokio::pin!(shutdown);
+            let mut retry = AcceptRetry::default();
+            run_accept_loop(
+                JoinSet::new(),
+                shutdown,
+                &mut retry,
+                move |retry_at| {
+                    let permits = permits.clone();
+                    let current_attempt = accept_count;
+                    accept_count += 1;
+                    let retried_tx = if current_attempt == 0 { None } else { retried_tx.take() };
+                    async move {
+                        if let Some(deadline) = retry_at {
+                            tokio::time::sleep_until(deadline).await;
+                        }
+                        let permit = permits.acquire_owned().await.ok()?;
+                        if current_attempt == 0 {
+                            return Some((permit, Err(io::Error::from(io::ErrorKind::ConnectionAborted))));
+                        }
+                        retried_tx
+                            .expect("second accept receives the retry notification")
+                            .send(())
+                            .expect("test observes reacquired permit");
+                        let _permit = permit;
+                        std::future::pending::<Option<(tokio::sync::OwnedSemaphorePermit, io::Result<()>)>>().await
+                    }
+                },
+                |_accepted, _permit, _connections| {},
+            )
+            .await
+        });
+
+        let retry_result = tokio::time::timeout(Duration::from_secs(1), retried_rx).await;
+        if let Err(error) = retry_result {
+            shutdown_tx.send(()).expect("shutdown receiver remains open");
+            accept_loop.abort();
+            let _ = accept_loop.await;
+            panic!("retry must reacquire the only transport permit: {error}");
+        }
+        retry_result
+            .expect("retry notification arrived")
+            .expect("accept loop reacquired the permit");
+        shutdown_tx.send(()).expect("shutdown receiver remains open");
+        let loop_result = tokio::time::timeout(Duration::from_secs(1), &mut accept_loop).await;
+        if let Err(error) = loop_result {
+            accept_loop.abort();
+            let _ = accept_loop.await;
+            panic!("shutdown cancels the pending retry accept: {error}");
+        }
+        let (_error, connections) = loop_result
+            .expect("loop result was checked")
+            .expect("accept loop task completes");
+        assert!(connections.is_empty());
+        assert_eq!(
+            permit_observer.available_permits(),
+            1,
+            "cancelled accept releases its permit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_accept_shutdown_cancels_rebuilt_backoff_future() {
+        let permits = Arc::new(Semaphore::new(1));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (retry_started_tx, retry_started_rx) = oneshot::channel();
+        let mut retry_started_tx = Some(retry_started_tx);
+        let mut accept_count = 0;
+        let mut accept_loop = tokio::spawn(async move {
+            let shutdown = async move {
+                let _ = shutdown_rx.await;
+            };
+            tokio::pin!(shutdown);
+            let mut retry = AcceptRetry::default();
+            run_accept_loop(
+                JoinSet::new(),
+                shutdown,
+                &mut retry,
+                move |retry_at| {
+                    let permits = permits.clone();
+                    let this_accept = accept_count;
+                    accept_count += 1;
+                    let retry_started_tx = if this_accept == 0 {
+                        None
+                    } else {
+                        retry_started_tx.take()
+                    };
+                    async move {
+                        if this_accept == 0 {
+                            let permit = permits.acquire_owned().await.ok()?;
+                            return Some((permit, Err(io::Error::from(io::ErrorKind::ConnectionAborted))));
+                        }
+                        let deadline = retry_at.expect("retry future receives its saved deadline");
+                        retry_started_tx
+                            .expect("retry future is built once")
+                            .send(())
+                            .expect("test observes retry future");
+                        tokio::time::sleep_until(deadline).await;
+                        let permit = permits.acquire_owned().await.ok()?;
+                        let _permit = permit;
+                        std::future::pending::<Option<(tokio::sync::OwnedSemaphorePermit, io::Result<()>)>>().await
+                    }
+                },
+                |_accepted, _permit, _connections| {},
+            )
+            .await
+        });
+
+        retry_started_rx
+            .await
+            .expect("loop rebuilt the accept future during backoff");
+        shutdown_tx.send(()).expect("shutdown receiver remains open");
+        let loop_result = tokio::time::timeout(Duration::from_secs(1), &mut accept_loop).await;
+        if let Err(error) = loop_result {
+            accept_loop.abort();
+            let _ = accept_loop.await;
+            panic!("shutdown must cancel the pending retry future: {error}");
+        }
+        let (_error, connections) = loop_result
+            .expect("loop result was checked")
+            .expect("accept loop task completes");
+        assert!(connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_accept_join_rebuilds_future_without_resetting_backoff_deadline() {
+        let permits = Arc::new(Semaphore::new(1));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (join_tx, join_rx) = oneshot::channel();
+        let (deadlines_tx, mut deadlines_rx) = mpsc::unbounded_channel();
+        let mut accept_count = 0;
+        let mut connections = JoinSet::new();
+        connections.spawn(async move {
+            let _ = join_rx.await;
+        });
+
+        let mut accept_loop = tokio::spawn(async move {
+            let shutdown = async move {
+                let _ = shutdown_rx.await;
+            };
+            tokio::pin!(shutdown);
+            let mut retry = AcceptRetry::default();
+            run_accept_loop(
+                connections,
+                shutdown,
+                &mut retry,
+                move |retry_at| {
+                    let permits = permits.clone();
+                    let deadlines_tx = deadlines_tx.clone();
+                    let this_accept = accept_count;
+                    accept_count += 1;
+                    async move {
+                        if this_accept == 0 {
+                            let permit = permits.acquire_owned().await.ok()?;
+                            return Some((permit, Err(io::Error::from(io::ErrorKind::ConnectionAborted))));
+                        }
+                        let deadline = retry_at.expect("retry future receives its saved deadline");
+                        deadlines_tx.send(deadline).expect("deadline observer remains open");
+                        tokio::time::sleep_until(deadline).await;
+                        let permit = permits.acquire_owned().await.ok()?;
+                        let _permit = permit;
+                        std::future::pending::<Option<(tokio::sync::OwnedSemaphorePermit, io::Result<()>)>>().await
+                    }
+                },
+                |_accepted, _permit, _connections| {},
+            )
+            .await
+        });
+
+        let first_deadline = deadlines_rx.recv().await.expect("first retry future is built");
+        join_tx.send(()).expect("test connection task remains pending");
+        let second_deadline = tokio::time::timeout(Duration::from_secs(1), deadlines_rx.recv())
+            .await
+            .expect("join event rebuilds accept future")
+            .expect("rebuilt future reports its deadline");
+        assert_eq!(first_deadline, second_deadline, "join must not restart backoff");
+        shutdown_tx.send(()).expect("shutdown receiver remains open");
+        let loop_result = tokio::time::timeout(Duration::from_secs(1), &mut accept_loop).await;
+        if let Err(error) = loop_result {
+            accept_loop.abort();
+            let _ = accept_loop.await;
+            panic!("shutdown must interrupt rebuilt retry wait: {error}");
+        }
+        loop_result
+            .expect("loop result was checked")
+            .expect("accept loop task completes");
+    }
+
+    #[test]
+    fn test_accept_success_resets_consecutive_failure_limit() {
+        let mut retry = AcceptRetry::default();
+        for _ in 0..8 {
+            assert!(matches!(
+                handle_accept_result::<()>(&mut retry, Err(io::Error::from(io::ErrorKind::ConnectionAborted))),
+                AcceptResult::Retry
+            ));
+        }
+        assert!(matches!(
+            handle_accept_result(&mut retry, Ok(())),
+            AcceptResult::Accepted(())
+        ));
+        for _ in 0..8 {
+            assert!(matches!(
+                handle_accept_result::<()>(&mut retry, Err(io::Error::from(io::ErrorKind::ConnectionAborted))),
+                AcceptResult::Retry
+            ));
+        }
+        let final_result = handle_accept_result::<()>(
+            &mut retry,
+            Err(io::Error::new(io::ErrorKind::ConnectionAborted, "last source")),
+        );
+        let AcceptResult::Terminal(final_error) = final_result else {
+            panic!("ninth consecutive failure must terminate")
+        };
+        assert_eq!(final_error.to_string(), "last source");
+    }
+
+    #[test]
+    fn test_accept_fatal_error_terminates_without_retry() {
+        let mut retry = AcceptRetry::default();
+        let result = handle_accept_result::<()>(
+            &mut retry,
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "fatal source")),
+        );
+        let AcceptResult::Terminal(error) = result else {
+            panic!("fatal failure must terminate immediately")
+        };
+        assert_eq!(error.to_string(), "fatal source");
+    }
+
+    #[test]
+    fn test_accept_backoff_is_exponential_and_capped() {
+        let delays: Vec<_> = (1..=8).map(super::accept_retry::accept_retry_delay).collect();
+        assert_eq!(delays, [10, 20, 40, 80, 160, 320, 640, 1000].map(Duration::from_millis));
+    }
+
+    #[tokio::test]
+    async fn test_accept_terminal_error_closes_listener_and_reaps_connection_task() {
+        struct DropSignal(Arc<AtomicBool>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let address = listener.local_addr().expect("read test listener address");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let session_cancelled = Arc::new(AtomicBool::new(false));
+        let context = ServerContext::new(Duration::from_millis(50));
+        let cancellation = context.cancellation_token();
+        let session_guard = context
+            .try_register_session()
+            .expect("session registers before shutdown");
+        let mut connections = JoinSet::new();
+        let watcher = GracefulShutdown::new();
+        let task_dropped = dropped.clone();
+        connections.spawn(async move {
+            let _drop_signal = DropSignal(task_dropped);
+            std::future::pending::<()>().await;
+        });
+        let was_cancelled = session_cancelled.clone();
+        connections.spawn(async move {
+            let _session_guard = session_guard;
+            cancellation.cancelled().await;
+            was_cancelled.store(true, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        });
+
+        let mut failures: VecDeque<io::Result<()>> = VecDeque::new();
+        for _ in 0..8 {
+            failures.push_back(Err(io::Error::from(io::ErrorKind::ConnectionAborted)));
+        }
+        failures.push_back(Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "ninth accept sentinel",
+        )));
+        let failures = Arc::new(std::sync::Mutex::new(failures));
+        let permits = Arc::new(Semaphore::new(1));
+        let mut retry = AcceptRetry::default();
+        let (accept_error, connections) = run_accept_loop(
+            connections,
+            std::future::pending::<()>(),
+            &mut retry,
+            {
+                let failures = failures.clone();
+                let permits = permits.clone();
+                move |_retry_at| {
+                    let failures = failures.clone();
+                    let permits = permits.clone();
+                    async move {
+                        let permit = permits.acquire_owned().await.ok()?;
+                        let result = failures
+                            .lock()
+                            .expect("scripted failures lock")
+                            .pop_front()
+                            .expect("script provides nine accept failures");
+                        Some((permit, result))
+                    }
+                }
+            },
+            |_accepted, _permit, _connections| {},
+        )
+        .await;
+        let accept_error = accept_error.expect("ninth transient failure terminates the accept loop");
+        assert_eq!(accept_error.to_string(), "ninth accept sentinel");
+
+        let result = finish_serve(Arc::new(listener), context, watcher, connections, Some(accept_error)).await;
+
+        let error = result.expect_err("terminal accept error is returned after cleanup");
+        assert!(matches!(&error, crate::WebServerError::ServeFailed { .. }));
+        let source = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<io::Error>())
+            .expect("the original accept error remains the source");
+        assert_eq!(source.kind(), io::ErrorKind::ConnectionAborted);
+        assert_eq!(source.to_string(), "ninth accept sentinel");
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "connection task must exit and be reaped"
+        );
+        assert!(
+            session_cancelled.load(Ordering::SeqCst),
+            "terminal accept error initiates managed session cancellation"
+        );
+        assert!(
+            TcpListener::bind(address).await.is_ok(),
+            "terminal accept error closes listener"
+        );
     }
 }

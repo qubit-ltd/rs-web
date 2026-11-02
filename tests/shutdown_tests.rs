@@ -289,7 +289,7 @@ async fn test_http_and_sse_share_one_shutdown_deadline() {
 }
 
 #[tokio_test]
-async fn test_shutdown_while_waiting_for_transport_permit_aborts_and_reaps_connection_task() {
+async fn test_accept_shutdown_while_waiting_for_transport_permit_aborts_and_reaps_connection_task() {
     struct SignalOnDrop(Arc<AtomicBool>);
 
     impl Drop for SignalOnDrop {
