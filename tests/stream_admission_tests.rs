@@ -22,6 +22,7 @@ use axum::http::Request;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::post;
+use futures_core::Stream;
 use hyper::body::Body as HttpBody;
 use qubit_web::StreamAdmissionLayer;
 use qubit_web::StreamAdmissionLimits;
@@ -156,6 +157,16 @@ impl HttpBody for PendingBody {
     }
 }
 
+struct PendingStream;
+
+impl Stream for PendingStream {
+    type Item = Result<Bytes, Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Pending
+    }
+}
+
 #[tokio::test]
 async fn body_read_failure_returns_safe_400_problem() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -213,6 +224,14 @@ async fn blocked(State(gate): State<Gate>) -> &'static str {
     "ok"
 }
 
+async fn blocked_with_pending_response(State(gate): State<Gate>) -> Response {
+    gate.calls.fetch_add(1, Ordering::SeqCst);
+    gate.entered.notify_one();
+    let permit = gate.release.acquire().await.unwrap();
+    permit.forget();
+    Response::new(Body::from_stream(PendingStream))
+}
+
 #[tokio::test]
 async fn admission_permit_is_released_after_response_headers() {
     let gate = Gate {
@@ -224,7 +243,7 @@ async fn admission_permit_is_released_after_response_headers() {
         .with_max_concurrent_admissions(1)
         .unwrap();
     let router = Router::new()
-        .route("/", post(blocked))
+        .route("/", post(blocked_with_pending_response))
         .with_state(gate.clone())
         .layer(StreamAdmissionLayer::new(limits));
     let first = tokio::spawn(router.clone().oneshot(Request::post("/").body(Body::empty()).unwrap()));
@@ -236,13 +255,20 @@ async fn admission_permit_is_released_after_response_headers() {
         .unwrap();
     assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
     gate.release.add_permits(1);
-    assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
+    let first_response = first.await.unwrap().unwrap();
+    assert_eq!(first_response.status(), StatusCode::OK);
+    assert!(!first_response.body().is_end_stream());
     gate.release.add_permits(1);
-    let third = router
-        .oneshot(Request::post("/").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let third = tokio::time::timeout(
+        Duration::from_secs(1),
+        router.oneshot(Request::post("/").body(Body::empty()).unwrap()),
+    )
+    .await
+    .expect("third admission should complete while the first response body is pending")
+    .unwrap();
     assert_eq!(third.status(), StatusCode::OK);
+    drop(first_response);
+    drop(third);
 }
 
 #[tokio::test]
