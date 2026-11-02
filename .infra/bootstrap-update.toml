@@ -1,1 +1,1 @@
-profiles = ["local-path-dependencies-default", "pages-default"]
+profiles = ["pages-default"]

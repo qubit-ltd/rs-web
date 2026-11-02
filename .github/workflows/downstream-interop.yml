@@ -12,5 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Prepare local path dependencies
+        run: ./.infra/bin/prepare-local-path-dependencies.sh
       - name: Test current crate WebSocket contracts
         run: cargo test -p qubit-web --no-default-features --features ws --test websocket_tests --locked
