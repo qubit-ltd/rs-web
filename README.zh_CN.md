@@ -114,6 +114,7 @@ Controller 路径捕获使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧�
 - 认证、授权、业务状态，以及流式数据的保存和重放由应用负责。WebSocket 升级前必须先完成认证；Origin 检查只限制浏览器来源。示例 token 和无认证停服入口仅供 loopback 演示。
 - WebSocket 的 `queue_limits` 配置出站队列；`inbound_queue_limits` 单独配置入站预算，默认每连接最多排队 64 条消息和累计 1 MiB payload。通道满时最多等待至 `idle_timeout`，字节预算不足则立即以 `1013` 关闭。默认 128 个连接对应约 128 MiB 排队/待交付 payload；还需另计每连接最多一条 1 MiB 协议重组消息及应用自有内存。
 - 启用 HTTPS 需要 `tls` 与有效证书，也可由部署方配置可信反向代理。停服由应用发起，并遵守服务端配置的截止时间。
+- `serve` 已开始运行后，丢弃其 future 或 abort 所在任务会关闭受管会话登记并通知现有会话，但无法等待异步排空或生成停服报告；后续清理需要 Tokio runtime 继续运行。优雅停服请完成 shutdown future 并等待 `serve` 返回。
 
 限额细节、TLS 配置、生命周期行为和排障方法见[中文用户指南](doc/user_guide.zh_CN.md)或[英文用户指南](doc/user_guide.md)。更多背景可查阅 [API 文档](https://docs.rs/qubit-web)、[历史中文设计记录](doc/2026-10-08-rs-web-design.md)和[生命周期设计摘要](doc/2026-10-09-rs-web-lifecycle-design.en.md)。
 

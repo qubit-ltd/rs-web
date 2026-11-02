@@ -33,6 +33,8 @@ use tower::ServiceExt;
 mod accept_retry;
 #[path = "internal/connection_activity.rs"]
 mod connection_activity;
+#[path = "internal/serve_cancellation_guard.rs"]
+mod serve_cancellation_guard;
 #[path = "server_context.rs"]
 mod server_context;
 #[path = "session_guard.rs"]
@@ -45,6 +47,7 @@ mod session_tracker;
 mod shutdown_report;
 use accept_retry::AcceptRetry;
 use connection_activity::ConnectionActivity;
+use serve_cancellation_guard::ServeCancellationGuard;
 pub use server_context::ServerContext;
 pub use session_guard::SessionGuard;
 pub use session_registration_error::SessionRegistrationError;
@@ -208,6 +211,11 @@ impl WebServer {
 
     /// Runs the application Router until the host's shutdown future completes.
     ///
+    /// Dropping this future after it has started serving closes managed-session
+    /// admission and notifies active sessions. The drop path cannot wait for
+    /// asynchronous draining or return a [`ShutdownReport`]; hosts should
+    /// resolve the shutdown future and await this method for graceful shutdown.
+    ///
     /// # Type Parameters
     ///
     /// * `F` - Sendable future that resolves when the host requests shutdown.
@@ -243,6 +251,7 @@ impl WebServer {
             tls_acceptor,
             ..
         } = self;
+        let mut cancellation_guard = ServeCancellationGuard::new(context.clone());
         let request_header_timeout = options.request_header_timeout;
         let transport_idle_timeout = options.transport_idle_timeout;
         let connection_limit = Arc::new(Semaphore::new(options.max_transport_connections.get()));
@@ -297,7 +306,9 @@ impl WebServer {
         )
         .await;
 
-        finish_serve(listener, context, graceful, connections, accept_error).await
+        let result = finish_serve(listener, context, graceful, connections, accept_error).await;
+        cancellation_guard.disarm();
+        result
     }
 }
 

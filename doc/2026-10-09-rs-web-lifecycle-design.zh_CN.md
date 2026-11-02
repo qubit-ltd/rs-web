@@ -16,6 +16,8 @@ SSE 与 WebSocket 容量限制属于彼此独立的策略域，不是整个服�
 
 停服时长仅通过 `ServerOptions` 配置，并由 `ServerContext` 统一提供；`WsUpgradePolicy` 不再设置独立的停服期限。WebSocket reader 和 writer 的停服使用服务器共享的绝对截止时间。
 
+`serve` 已被轮询后，其 future 被丢弃或任务被 abort 时，会同步关闭受管会话登记并通知现有会话。Drop 无法等待异步排空或生成 `ShutdownReport`；Tokio 必须继续调度后续清理。需要优雅排空并取得报告的宿主应完成 shutdown future 并等待 `serve` 返回。未轮询的 `serve` future 不在此取消保证范围内。
+
 ## 传输空闲期限
 
 `ServerOptions::transport_idle_timeout` 默认 30 秒，且不能为零。配置键是 `transport.idle_timeout_ms`，缺省值为 `30000`。TCP/TLS 连接在没有活跃 handler 或响应体时达到空闲期限后关闭；这也包括尚未发送首个 HTTP/2 请求的连接。handler 和响应体活跃期间，空闲计时暂停，因此长连接 SSE 不会被误判为空闲。HTTP/2 PING 不会重置请求活动时间。独立的 `request_header_timeout` 仍为 HTTP/1 请求头及 TLS 握手设置 10 秒期限；空闲期限不会中断停滞中的活跃请求。

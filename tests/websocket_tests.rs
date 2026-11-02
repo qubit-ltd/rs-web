@@ -11,6 +11,8 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::Router;
@@ -30,6 +32,12 @@ use qubit_web::mvc::ControllerRoutes;
 use qubit_web::rest_controller;
 
 type RegisteredCheckpoint = Arc<Mutex<Option<oneshot::Sender<usize>>>>;
+type WebSocketTestState = (
+    WsUpgradePolicy,
+    ServerContext,
+    Arc<AtomicBool>,
+    Arc<Mutex<Option<oneshot::Sender<()>>>>,
+);
 type DelayedUpgradeChannels = (
     Arc<Mutex<Option<oneshot::Sender<()>>>>,
     Arc<Mutex<Option<oneshot::Receiver<()>>>>,
@@ -309,6 +317,100 @@ async fn read_server_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
     let mut body = vec![0; len];
     stream.read_exact(&mut body).await.unwrap();
     (header[0] & 0x0f, body)
+}
+
+#[tokio_test]
+async fn test_aborting_serve_releases_managed_websocket() {
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(250)),
+    )
+    .await
+    .unwrap();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let ready = Arc::new(Mutex::new(Some(ready_tx)));
+    async fn upgrade(
+        State((policy, context, dropped, ready)): State<WebSocketTestState>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, move |mut session| async move {
+            struct DropFlag(Arc<AtomicBool>);
+            impl Drop for DropFlag {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::SeqCst);
+                }
+            }
+            let _drop_flag = DropFlag(dropped);
+            if let Some(sender) = ready.lock().unwrap().take() {
+                let _ = sender.send(());
+            }
+            while let Some(Ok(Message::Text(text))) = session.recv().await {
+                if session.try_send(Message::text(text)).is_err() {
+                    break;
+                }
+            }
+        })
+    }
+    let app = Router::new()
+        .route("/ws", get(upgrade))
+        .with_state((policy, context.clone(), dropped.clone(), ready));
+    let address = server.local_addr();
+    let serving = spawn(async move { server.serve(app, pending::<()>()).await.unwrap() });
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    timeout(Duration::from_secs(1), ready_rx)
+        .await
+        .expect("managed WebSocket handler should start")
+        .expect("handler ready signal should be delivered");
+    timeout(Duration::from_secs(1), async {
+        while context.active_sessions() != 1 {
+            yield_now().await;
+        }
+    })
+    .await
+    .expect("upgraded session should be registered");
+    send_masked_text(&mut client, b"before-abort").await;
+    assert_eq!(read_server_text(&mut client).await, b"before-abort");
+
+    serving.abort();
+    let _ = serving.await;
+    let cancelled = context.cancellation_token().is_cancelled();
+    let post_abort_frame = timeout(Duration::from_millis(150), async {
+        send_masked_text(&mut client, b"after-abort").await;
+        read_server_frame(&mut client).await
+    })
+    .await
+    .ok();
+    let business_still_available = post_abort_frame
+        .as_ref()
+        .is_some_and(|(opcode, payload)| *opcode == 1 && payload == b"after-abort");
+    let close_was_read = post_abort_frame.as_ref().is_some_and(|(opcode, _)| *opcode == 8);
+    if !close_was_read {
+        send_masked_close(&mut client).await;
+        let _ = timeout(Duration::from_millis(250), read_server_frame(&mut client)).await;
+    }
+    let cleanup = timeout(Duration::from_secs(1), async {
+        while context.active_sessions() != 0 || !dropped.load(Ordering::SeqCst) {
+            yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    assert!(
+        cancelled,
+        "aborting serve should cancel the server context (business response after abort: {business_still_available}, handler/session cleanup: {cleanup}, close frame: {close_was_read})"
+    );
+    assert!(
+        !business_still_available,
+        "managed WebSocket should stop providing business responses after abort"
+    );
+    assert!(
+        cleanup,
+        "managed WebSocket handler and session registration should be released after abort"
+    );
 }
 
 #[tokio_test]

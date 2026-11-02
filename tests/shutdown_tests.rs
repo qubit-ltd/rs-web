@@ -93,6 +93,118 @@ async fn test_session_registration_is_rejected_after_shutdown_starts() {
 }
 
 #[tokio_test]
+async fn test_aborting_serve_cancels_context_and_closes_admission() {
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let context = server.context();
+    let addr = server.local_addr();
+    let service = spawn(server.serve(Router::new().route("/", get(|| async { "ready" })), pending::<()>()));
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    timeout(Duration::from_secs(1), client.read_to_end(&mut response))
+        .await
+        .expect("health request should complete")
+        .unwrap();
+    assert!(String::from_utf8_lossy(&response).contains("ready"));
+
+    service.abort();
+    let _ = service.await;
+    let cancelled = context.cancellation_token().is_cancelled();
+    let admission_closed = matches!(
+        context.try_register_session(),
+        Err(SessionRegistrationError::ShuttingDown)
+    );
+    assert!(cancelled, "aborting a running serve future should cancel its context");
+    assert!(
+        admission_closed,
+        "aborting a running serve future should close session admission"
+    );
+}
+
+#[tokio_test]
+async fn test_aborting_serve_while_waiting_for_transport_permit_cancels_context() {
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_max_transport_connections(1)
+        .unwrap();
+    let server = WebServer::bind_http(options).await.unwrap();
+    let context = server.context();
+    let entered = Arc::new(Notify::new());
+    let handler_entered = entered.clone();
+    let app = Router::new().route(
+        "/hold",
+        get(move || {
+            let entered = handler_entered.clone();
+            async move {
+                entered.notify_one();
+                pending::<&'static str>().await
+            }
+        }),
+    );
+    let addr = server.local_addr();
+    let serving = spawn(server.serve(app, pending::<()>()));
+    let mut first = TcpStream::connect(addr).await.unwrap();
+    first
+        .write_all(b"GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("first request should hold its transport permit");
+    let second = TcpStream::connect(addr).await.unwrap();
+    tokio::task::yield_now().await;
+
+    serving.abort();
+    let _ = serving.await;
+    drop((first, second));
+    assert!(
+        context.cancellation_token().is_cancelled(),
+        "dropping serve while accept waits for a transport permit should cancel the context"
+    );
+    assert_eq!(
+        context.try_register_session().unwrap_err(),
+        SessionRegistrationError::ShuttingDown
+    );
+}
+
+#[tokio_test]
+async fn test_aborting_serve_during_normal_shutdown_preserves_shutdown_state() {
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_secs(1)),
+    )
+    .await
+    .unwrap();
+    let context = server.context();
+    let session = context.try_register_session().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let serving = spawn(server.serve(Router::new(), async move {
+        let _ = shutdown_rx.await;
+    }));
+    shutdown_tx.send(()).unwrap();
+    timeout(Duration::from_secs(1), context.cancellation_token().cancelled())
+        .await
+        .expect("normal shutdown should start before the serve task is aborted");
+    let shutdown_deadline = context
+        .shutdown_deadline()
+        .expect("shutdown should record its deadline");
+
+    serving.abort();
+    let _ = serving.await;
+    assert!(context.cancellation_token().is_cancelled());
+    assert_eq!(context.shutdown_deadline(), Some(shutdown_deadline));
+    assert_eq!(
+        context.try_register_session().unwrap_err(),
+        SessionRegistrationError::ShuttingDown
+    );
+    drop(session);
+    assert_eq!(context.active_sessions(), 0);
+}
+
+#[tokio_test]
 async fn test_shutdown_waits_for_in_flight_request_and_broadcasts_cancellation() {
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());

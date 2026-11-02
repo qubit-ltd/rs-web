@@ -16,6 +16,8 @@ The server stops accepting connections, closes session admission, and notifies a
 
 The shutdown duration is configured once through `ServerOptions` and carried by `ServerContext`; `WsUpgradePolicy` has no policy-level shutdown timeout. WebSocket reader and writer shutdown use the server's shared absolute deadline.
 
+Dropping or aborting a `serve` future after it has been polled closes managed-session admission and notifies active sessions synchronously. Drop cannot await asynchronous draining or produce a `ShutdownReport`; Tokio must continue scheduling cleanup. Hosts that need graceful draining and a report should resolve the shutdown future and await `serve`. A never-polled `serve` future is outside this cancellation guarantee.
+
 ## Transport idle timeout
 
 `ServerOptions::transport_idle_timeout` defaults to 30 seconds and must be nonzero. Configuration uses `transport.idle_timeout_ms`, also defaulting to `30000`. A TCP/TLS transport with no active request handler or response body is closed after this idle interval, including a connection that never sends its first HTTP/2 request. Active handlers and bodies pause the idle timer, so a long-lived SSE response is not closed as idle. HTTP/2 PING frames do not reset request activity. The separate `request_header_timeout` remains 10 seconds for HTTP/1 headers and TLS handshake; an idle timeout does not bound a stalled active request.
