@@ -24,4 +24,6 @@ pub enum WsPolicyError {
     ZeroLimit,
     /// The configured connection limit exceeds Tokio Semaphore's maximum.
     ConnectionLimitTooLarge,
+    /// The configured inbound message count exceeds Tokio mpsc's maximum.
+    InboundQueueLimitTooLarge,
 }

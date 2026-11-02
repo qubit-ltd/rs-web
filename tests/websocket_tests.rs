@@ -379,6 +379,8 @@ fn test_zero_policy_limits_are_invalid() {
     assert!(WsUpgradePolicy::new().max_message_bytes(0).validate().is_err());
     assert!(WsUpgradePolicy::new().queue_limits(0, 1).validate().is_err());
     assert!(WsUpgradePolicy::new().queue_limits(1, 0).validate().is_err());
+    assert!(WsUpgradePolicy::new().inbound_queue_limits(0, 1).validate().is_err());
+    assert!(WsUpgradePolicy::new().inbound_queue_limits(1, 0).validate().is_err());
     assert!(WsUpgradePolicy::new().idle_timeout(Duration::ZERO).validate().is_err());
 }
 
@@ -409,6 +411,13 @@ fn test_corrected_policy_limits_are_valid() {
     );
     assert_eq!(
         WsUpgradePolicy::new()
+            .inbound_queue_limits(0, 0)
+            .inbound_queue_limits(1, 1)
+            .validate(),
+        Ok(())
+    );
+    assert_eq!(
+        WsUpgradePolicy::new()
             .idle_timeout(Duration::ZERO)
             .idle_timeout(Duration::from_secs(1))
             .validate(),
@@ -428,6 +437,307 @@ fn test_corrected_policy_limits_are_valid() {
     let policy = WsUpgradePolicy::new().max_connections(too_many);
     assert_eq!(policy.validate(), Err(WsPolicyError::ConnectionLimitTooLarge));
     assert_eq!(policy.active_connections(), 0);
+    assert_eq!(
+        WsUpgradePolicy::new()
+            .inbound_queue_limits(tokio::sync::Semaphore::MAX_PERMITS + 1, 1)
+            .validate(),
+        Err(WsPolicyError::InboundQueueLimitTooLarge)
+    );
+    assert_eq!(
+        WsUpgradePolicy::new()
+            .inbound_queue_limits(tokio::sync::Semaphore::MAX_PERMITS, 1)
+            .validate(),
+        Ok(())
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_read_error_is_delivered_once() {
+    type ResultState = Arc<Mutex<Option<oneshot::Sender<(bool, bool, bool)>>>>;
+
+    async fn upgrade(
+        State((policy, context, result_tx)): State<(WsUpgradePolicy, ServerContext, ResultState)>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, |mut session| async move {
+            let first_is_error = matches!(session.recv().await, Some(Err(_)));
+            let second_is_none = session.recv().await.is_none();
+            session.close().await;
+            let after_close_is_none = session.recv().await.is_none();
+            let _ =
+                result_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send((first_is_error, second_is_none, after_close_is_none));
+        })
+    }
+
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let (result_tx, result_rx) = oneshot::channel();
+    let app = Router::new().route("/ws", get(upgrade)).with_state((
+        WsUpgradePolicy::new(),
+        context,
+        Arc::new(Mutex::new(Some(result_tx))),
+    ));
+    let shutdown = CancellationToken::new();
+    let serving = spawn(server.serve(app, shutdown.clone().cancelled_owned()));
+
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    send_masked_text(&mut client, &[0xff]).await;
+    let (opcode, _) = timeout(Duration::from_secs(2), read_server_frame(&mut client))
+        .await
+        .expect("server should close after invalid UTF-8");
+    assert_eq!(opcode, 8);
+    send_masked_close(&mut client).await;
+    let result = timeout(Duration::from_secs(2), result_rx)
+        .await
+        .expect("handler should report read error delivery")
+        .expect("handler result should be sent");
+    assert_eq!(result, (true, true, true));
+    shutdown.cancel();
+    let _report = serving.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_inbound_byte_budget_closes_connection() {
+    async fn upgrade(
+        State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, |session| async move {
+            let _session = session;
+            pending::<()>().await;
+        })
+    }
+
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new().inbound_queue_limits(4, 6);
+    let app = Router::new().route("/ws", get(upgrade)).with_state((policy, context));
+    let shutdown = CancellationToken::new();
+    let serving = spawn(server.serve(app, shutdown.clone().cancelled_owned()));
+
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    send_masked_text(&mut client, b"four").await;
+    send_masked_text(&mut client, b"four").await;
+    let (opcode, payload) = timeout(Duration::from_secs(2), read_server_frame(&mut client))
+        .await
+        .expect("byte budget should close the connection");
+    assert_eq!(opcode, 8);
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1013);
+    send_masked_close(&mut client).await;
+    shutdown.cancel();
+    let _report = serving.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_inbound_utf8_budget_counts_payload_bytes() {
+    async fn upgrade(
+        State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, |session| async move {
+            let _session = session;
+            pending::<()>().await;
+        })
+    }
+
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new().inbound_queue_limits(4, 5);
+    let app = Router::new().route("/ws", get(upgrade)).with_state((policy, context));
+    let shutdown = CancellationToken::new();
+    let serving = spawn(server.serve(app, shutdown.clone().cancelled_owned()));
+
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    send_masked_text(&mut client, "你".as_bytes()).await;
+    send_masked_text(&mut client, "好".as_bytes()).await;
+    let (opcode, payload) = timeout(Duration::from_secs(2), read_server_frame(&mut client))
+        .await
+        .expect("two three-byte characters should exceed a five-byte budget");
+    assert_eq!(opcode, 8);
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1013);
+    send_masked_close(&mut client).await;
+    shutdown.cancel();
+    let _report = serving.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_inbound_utf8_budget_accepts_exact_byte_limit() {
+    let policy = WsUpgradePolicy::new().inbound_queue_limits(4, 6);
+    let (address, serving) = serve(policy).await;
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+
+    send_masked_text(&mut client, "你好".as_bytes()).await;
+    assert_eq!(
+        timeout(Duration::from_secs(2), read_server_text(&mut client))
+            .await
+            .expect("six-byte UTF-8 payload should fit its exact budget"),
+        "你好".as_bytes()
+    );
+
+    client.shutdown().await.unwrap();
+    serving.abort();
+}
+
+#[tokio::test]
+async fn test_inbound_reassembled_message_uses_aggregate_budget() {
+    async fn upgrade(
+        State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, |session| async move {
+            let _session = session;
+            pending::<()>().await;
+        })
+    }
+
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new().max_message_bytes(16).inbound_queue_limits(4, 6);
+    let app = Router::new().route("/ws", get(upgrade)).with_state((policy, context));
+    let shutdown = CancellationToken::new();
+    let serving = spawn(server.serve(app, shutdown.clone().cancelled_owned()));
+
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    send_masked_frame(&mut client, false, 1, b"four").await;
+    send_masked_frame(&mut client, true, 0, b"four").await;
+    let (opcode, payload) = timeout(Duration::from_secs(2), read_server_frame(&mut client))
+        .await
+        .expect("reassembled eight-byte message should exceed the six-byte budget");
+    assert_eq!(opcode, 8);
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1013);
+    send_masked_close(&mut client).await;
+    shutdown.cancel();
+    let _report = serving.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_inbound_budget_is_released_after_receive() {
+    async fn upgrade(
+        State((policy, context, received_tx)): State<(
+            WsUpgradePolicy,
+            ServerContext,
+            tokio::sync::mpsc::UnboundedSender<String>,
+        )>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, |mut session| async move {
+            while let Some(Ok(Message::Text(text))) = session.recv().await {
+                let _ = received_tx.send(text.to_string());
+            }
+        })
+    }
+
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new().inbound_queue_limits(4, 4);
+    let (received_tx, mut received_rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Router::new()
+        .route("/ws", get(upgrade))
+        .with_state((policy, context, received_tx));
+    let shutdown = CancellationToken::new();
+    let serving = spawn(server.serve(app, shutdown.clone().cancelled_owned()));
+
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    send_masked_text(&mut client, b"four").await;
+    assert_eq!(
+        timeout(Duration::from_secs(2), received_rx.recv())
+            .await
+            .expect("handler should receive first message"),
+        Some("four".to_owned())
+    );
+    send_masked_text(&mut client, b"next").await;
+    assert_eq!(
+        timeout(Duration::from_secs(2), received_rx.recv())
+            .await
+            .expect("handler should receive second message after budget release"),
+        Some("next".to_owned())
+    );
+    send_masked_close(&mut client).await;
+    shutdown.cancel();
+    let _report = serving.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_shutdown_releases_binary_inbound_budget_and_capacity() {
+    async fn upgrade(
+        State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, |session| async move {
+            let _session = session;
+            pending::<()>().await;
+        })
+    }
+
+    let policy = WsUpgradePolicy::new().inbound_queue_limits(1, 8);
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(250)),
+    )
+    .await
+    .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let app = Router::new()
+        .route("/ws", get(upgrade))
+        .with_state((policy.clone(), context.clone()));
+    let shutdown = CancellationToken::new();
+    let serving = spawn(server.serve(app, shutdown.clone().cancelled_owned()));
+
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    timeout(Duration::from_secs(1), async {
+        while context.active_sessions() != 1 {
+            yield_now().await;
+        }
+    })
+    .await
+    .expect("upgraded session should register");
+    send_masked_frame(&mut client, true, 2, b"four").await;
+    send_masked_frame(&mut client, true, 2, b"next").await;
+    for _ in 0..8 {
+        yield_now().await;
+    }
+
+    shutdown.cancel();
+    let _report = timeout(Duration::from_secs(2), serving)
+        .await
+        .expect("host shutdown should finish within its bound")
+        .unwrap()
+        .unwrap();
+    assert_eq!(policy.active_connections(), 0);
+    assert_eq!(context.active_sessions(), 0);
 }
 
 #[tokio_test]

@@ -7,6 +7,7 @@
 // =============================================================================
 //! Application-facing WebSocket session handle.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Error;
@@ -18,6 +19,8 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+use super::internal::InboundMessage;
+use super::internal::InboundState;
 use super::ws_send_error::WsSendError;
 use super::ws_send_queue::WsSendQueue;
 
@@ -39,7 +42,11 @@ use super::ws_send_queue::WsSendQueue;
 /// ```
 pub struct WsSession {
     /// Channel carrying inbound frames from the reader task.
-    pub(super) incoming: mpsc::Receiver<Result<Message, Error>>,
+    pub(super) incoming: mpsc::Receiver<InboundMessage>,
+    /// Shared budget and first read failure from the reader task.
+    pub(super) inbound_state: Arc<InboundState>,
+    /// Distinguishes application close from reader-triggered cancellation.
+    pub(super) explicitly_closed: bool,
     /// Shared bounded queue drained by the writer task.
     pub(super) queue: WsSendQueue,
     /// Cancellation token shared by the application and both tasks.
@@ -73,21 +80,30 @@ impl WsSession {
     /// The inner error reports a WebSocket read failure observed by the reader
     /// task.
     pub async fn recv(&mut self) -> Option<Result<Message, Error>> {
-        select! {
+        if self.explicitly_closed {
+            return None;
+        }
+        let message = select! {
             biased;
             _ = self.shutdown.cancelled() => {
-                self.close().await;
                 None
             }
             message = timeout(self.idle_timeout, self.incoming.recv()) => {
                 match message {
-                    Ok(message) => message,
-                    Err(_) => {
-                        self.close().await;
-                        None
-                    }
+                    Ok(message) => message.map(InboundMessage::into_message),
+                    Err(_) => None,
                 }
             }
+        };
+        if message.is_some() {
+            return message.map(Ok);
+        }
+        self.cleanup().await;
+        if self.explicitly_closed {
+            self.inbound_state.clear_read_error();
+            None
+        } else {
+            self.inbound_state.take_read_error().map(Err)
         }
     }
 
@@ -125,8 +141,15 @@ impl WsSession {
     /// During server shutdown, cancellation can also make the writer exit
     /// without the application calling this method.
     pub async fn close(&mut self) {
+        self.explicitly_closed = true;
+        self.inbound_state.clear_read_error();
+        self.cleanup().await;
+    }
+
+    async fn cleanup(&mut self) {
         self.queue.close();
         self.shutdown.cancel();
+        self.incoming.close();
         let wait_for_tasks = async {
             join!(wait_task(&mut self.writer), wait_task(&mut self.reader));
         };
@@ -139,6 +162,7 @@ impl WsSession {
             }
             join!(wait_task(&mut self.writer), wait_task(&mut self.reader));
         }
+        while self.incoming.try_recv().is_ok() {}
     }
 }
 
@@ -162,24 +186,27 @@ impl Drop for WsSession {
 mod tests {
     use std::future::Future;
     use std::future::pending;
+    use std::sync::Arc;
     use std::task::Poll;
     use std::time::Duration;
 
-    use axum::Error;
-    use axum::extract::ws::Message;
     use tokio::sync::mpsc;
     use tokio::sync::oneshot;
     use tokio::task::yield_now;
     use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
 
+    use super::InboundMessage;
+    use super::InboundState;
     use super::WsSession;
     use crate::ws::WsSendQueue;
 
     fn session(writer: tokio::task::JoinHandle<()>, reader: tokio::task::JoinHandle<()>) -> WsSession {
-        let (_incoming_tx, incoming) = mpsc::channel::<Result<Message, Error>>(1);
+        let (_incoming_tx, incoming) = mpsc::channel::<InboundMessage>(1);
         WsSession {
             incoming,
+            inbound_state: Arc::new(InboundState::new(1024)),
+            explicitly_closed: false,
             queue: WsSendQueue::new(1, 1024),
             shutdown: CancellationToken::new(),
             idle_timeout: Duration::from_secs(1),
@@ -246,5 +273,44 @@ mod tests {
         assert!(session.writer.is_none());
         assert!(session.reader.is_none());
         yield_now().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_recv_cleanup_can_be_retried_to_deliver_read_error() {
+        let writer = tokio::spawn(async {});
+        while !writer.is_finished() {
+            yield_now().await;
+        }
+        let (reader_release_tx, reader_release_rx) = oneshot::channel();
+        let reader = tokio::spawn(async move {
+            let _ = reader_release_rx.await;
+        });
+        let mut session = session(writer, reader);
+        session
+            .inbound_state
+            .record_read_error(axum::Error::new(std::io::Error::other("read failed")));
+        session.shutdown.cancel();
+
+        let mut recv = Box::pin(session.recv());
+        std::future::poll_fn(|cx| {
+            assert!(recv.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(recv);
+        assert!(
+            session.reader.is_some(),
+            "unfinished reader handle must remain retryable"
+        );
+
+        reader_release_tx.send(()).unwrap();
+        let result = timeout(Duration::from_secs(1), session.recv())
+            .await
+            .expect("retried recv should finish reader cleanup");
+        assert!(
+            matches!(result, Some(Err(_))),
+            "first read error should survive cancellation"
+        );
+        assert!(session.recv().await.is_none(), "read error should be consumed once");
     }
 }

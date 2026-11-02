@@ -43,6 +43,8 @@ const DEFAULT_FRAME_BYTES: usize = 64 * 1024;
 const DEFAULT_MESSAGE_BYTES: usize = 1024 * 1024;
 const DEFAULT_QUEUE_MESSAGES: usize = 64;
 const DEFAULT_QUEUE_BYTES: usize = 1024 * 1024;
+const DEFAULT_INBOUND_QUEUE_MESSAGES: usize = 64;
+const DEFAULT_INBOUND_QUEUE_BYTES: usize = 1024 * 1024;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Limits and lifecycle policy for WebSocket sessions.
@@ -81,7 +83,8 @@ impl Default for WsUpgradePolicy {
 
 impl WsUpgradePolicy {
     /// Creates a policy with finite defaults: 128 sessions, 64 KiB frames,
-    /// 1 MiB messages, a 64-message/1 MiB queue, and a 60-second idle timeout.
+    /// 1 MiB messages, 64-message/1 MiB inbound and outbound queues, and a
+    /// 60-second idle timeout.
     ///
     /// The returned policy starts an independent connection-capacity domain.
     /// Cloning it shares that domain. Create it once at application startup and
@@ -102,6 +105,8 @@ impl WsUpgradePolicy {
                 max_message_bytes: DEFAULT_MESSAGE_BYTES,
                 queue_messages: DEFAULT_QUEUE_MESSAGES,
                 queue_bytes: DEFAULT_QUEUE_BYTES,
+                inbound_queue_messages: DEFAULT_INBOUND_QUEUE_MESSAGES,
+                inbound_queue_bytes: DEFAULT_INBOUND_QUEUE_BYTES,
                 idle_timeout: DEFAULT_IDLE_TIMEOUT,
                 allowed_origins: None,
             }),
@@ -240,6 +245,24 @@ impl WsUpgradePolicy {
         })
     }
 
+    /// Sets the per-connection inbound queue item and aggregate payload limits.
+    ///
+    /// # Parameters
+    ///
+    /// * `messages` - Positive channel capacity no greater than Tokio's
+    ///   maximum.
+    /// * `bytes` - Positive aggregate payload byte limit for queued messages.
+    ///
+    /// # Returns
+    ///
+    /// The updated policy; invalid values are reported by `validate`.
+    pub fn inbound_queue_limits(self, messages: usize, bytes: usize) -> Self {
+        self.map_inner(|inner| {
+            inner.inbound_queue_messages = messages;
+            inner.inbound_queue_bytes = bytes;
+        })
+    }
+
     /// Sets the maximum interval without inbound progress before closing.
     ///
     /// # Parameters
@@ -266,14 +289,16 @@ impl WsUpgradePolicy {
     /// # Returns
     ///
     /// `Ok(())` for a valid policy, or the first configuration error in this
-    /// order: zero connection limit, oversized connection limit, then any
-    /// other zero limit.
+    /// order: zero connection limit, oversized connection limit, any other
+    /// zero limit, then an oversized inbound message count.
     ///
     /// # Errors
     ///
     /// Returns [`WsPolicyError::ZeroLimit`] for a zero bound, or
     /// [`WsPolicyError::ConnectionLimitTooLarge`] when the connection limit
-    /// exceeds Semaphore's maximum.
+    /// exceeds Semaphore's maximum, or
+    /// [`WsPolicyError::InboundQueueLimitTooLarge`] when the inbound queue
+    /// capacity exceeds Tokio's channel limit.
     pub fn validate(&self) -> Result<(), WsPolicyError> {
         if self.inner.max_connections == 0 {
             return Err(WsPolicyError::ZeroLimit);
@@ -285,9 +310,14 @@ impl WsUpgradePolicy {
             || self.inner.max_message_bytes == 0
             || self.inner.queue_messages == 0
             || self.inner.queue_bytes == 0
+            || self.inner.inbound_queue_messages == 0
+            || self.inner.inbound_queue_bytes == 0
             || self.inner.idle_timeout.is_zero()
         {
             return Err(WsPolicyError::ZeroLimit);
+        }
+        if self.inner.inbound_queue_messages > Semaphore::MAX_PERMITS {
+            return Err(WsPolicyError::InboundQueueLimitTooLarge);
         }
         Ok(())
     }
@@ -457,7 +487,8 @@ impl WsUpgradePolicy {
                     )
                     .await;
                 });
-                let (incoming_tx, incoming_rx) = mpsc::channel(64);
+                let inbound_state = Arc::new(super::internal::InboundState::new(policy.inner.inbound_queue_bytes));
+                let (incoming_tx, incoming_rx) = mpsc::channel(policy.inner.inbound_queue_messages);
                 let reader_lifecycle = SessionLifecycle {
                     shutdown: session_shutdown.clone(),
                     close_code: close_code.clone(),
@@ -467,6 +498,7 @@ impl WsUpgradePolicy {
                 };
                 let reader_queue = queue.clone();
                 let idle_timeout = policy.inner.idle_timeout;
+                let reader_inbound_state = inbound_state.clone();
                 let reader = spawn(async move {
                     reader_loop(
                         stream,
@@ -475,11 +507,14 @@ impl WsUpgradePolicy {
                         reader_lifecycle,
                         close_ack_sender,
                         idle_timeout,
+                        reader_inbound_state,
                     )
                     .await;
                 });
                 let session = WsSession {
                     incoming: incoming_rx,
+                    inbound_state,
+                    explicitly_closed: false,
                     queue,
                     shutdown: session_shutdown,
                     idle_timeout: policy.inner.idle_timeout,

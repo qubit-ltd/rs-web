@@ -7,6 +7,7 @@
 // =============================================================================
 //! Inbound WebSocket reader loop.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ use tokio::time::timeout_at;
 use tokio_util::sync::CancellationToken;
 
 use super::DeliveryResult;
+use super::InboundState;
 use super::SessionLifecycle;
 use super::close::get_close_deadline;
 use crate::ws::internal::CloseQueueOnDrop;
@@ -43,11 +45,12 @@ use crate::ws::ws_send_queue::WsSendQueue;
 ///   delivery to the application before shutdown.
 pub(in crate::ws) async fn reader_loop(
     mut stream: SplitStream<WebSocket>,
-    incoming: mpsc::Sender<Result<Message, Error>>,
+    incoming: mpsc::Sender<super::InboundMessage>,
     queue: WsSendQueue,
     lifecycle: SessionLifecycle,
     close_ack: oneshot::Sender<()>,
     idle_timeout: Duration,
+    inbound_state: Arc<InboundState>,
 ) {
     let _close_queue_on_drop = CloseQueueOnDrop::new(queue.clone());
     let mut close_ack = Some(close_ack);
@@ -74,8 +77,20 @@ pub(in crate::ws) async fn reader_loop(
         match next {
             Ok(Some(Ok(message @ Message::Ping(_)))) => {
                 queue.notify.notify_one();
+                let Ok(message) = inbound_state.try_wrap(message) else {
+                    lifecycle.close_code.store(1013, Ordering::Release);
+                    lifecycle.shutdown.cancel();
+                    deadline.get_or_insert_with(|| {
+                        get_close_deadline(
+                            &lifecycle.close_deadline,
+                            lifecycle.server_deadline.as_ref(),
+                            lifecycle.shutdown_timeout,
+                        )
+                    });
+                    continue;
+                };
                 if handle_delivery(
-                    deliver_incoming(&incoming, &lifecycle.shutdown, Ok(message), idle_timeout).await,
+                    deliver_incoming(&incoming, &lifecycle.shutdown, message, idle_timeout).await,
                     &queue,
                     &lifecycle,
                     &mut deadline,
@@ -90,12 +105,26 @@ pub(in crate::ws) async fn reader_loop(
                 if let Some(ack) = close_ack.take() {
                     let _ = ack.send(());
                 }
-                let _ = incoming.try_send(Ok(message));
+                if let Ok(message) = inbound_state.try_wrap(message) {
+                    let _ = incoming.try_send(message);
+                }
                 break;
             }
             Ok(Some(Ok(message))) => {
+                let Ok(message) = inbound_state.try_wrap(message) else {
+                    lifecycle.close_code.store(1013, Ordering::Release);
+                    lifecycle.shutdown.cancel();
+                    deadline.get_or_insert_with(|| {
+                        get_close_deadline(
+                            &lifecycle.close_deadline,
+                            lifecycle.server_deadline.as_ref(),
+                            lifecycle.shutdown_timeout,
+                        )
+                    });
+                    continue;
+                };
                 if handle_delivery(
-                    deliver_incoming(&incoming, &lifecycle.shutdown, Ok(message), idle_timeout).await,
+                    deliver_incoming(&incoming, &lifecycle.shutdown, message, idle_timeout).await,
                     &queue,
                     &lifecycle,
                     &mut deadline,
@@ -109,7 +138,7 @@ pub(in crate::ws) async fn reader_loop(
                 lifecycle
                     .close_code
                     .store(close_code_for_read_error(&error), Ordering::Release);
-                let _ = incoming.try_send(Err(error));
+                inbound_state.record_read_error(error);
                 lifecycle.shutdown.cancel();
                 if deadline.is_none() {
                     deadline = Some(get_close_deadline(
@@ -212,9 +241,9 @@ fn handle_delivery(
 ///
 /// The outcome of delivery, cancellation, receiver closure, or timeout.
 async fn deliver_incoming(
-    incoming: &mpsc::Sender<Result<Message, Error>>,
+    incoming: &mpsc::Sender<super::InboundMessage>,
     shutdown: &CancellationToken,
-    message: Result<Message, Error>,
+    message: super::InboundMessage,
     idle_timeout: Duration,
 ) -> DeliveryResult {
     select! {

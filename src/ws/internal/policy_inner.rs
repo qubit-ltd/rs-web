@@ -26,6 +26,10 @@ pub(in crate::ws) struct PolicyInner {
     pub(in crate::ws) queue_messages: usize,
     /// Maximum total bytes held by queued or in-flight outbound messages.
     pub(in crate::ws) queue_bytes: usize,
+    /// Maximum number of inbound messages waiting for the application.
+    pub(in crate::ws) inbound_queue_messages: usize,
+    /// Maximum payload bytes retained by inbound messages per connection.
+    pub(in crate::ws) inbound_queue_bytes: usize,
     /// Maximum idle interval before a session is closed.
     pub(in crate::ws) idle_timeout: Duration,
     /// Exact allowed Origin values; `None` rejects requests that provide
