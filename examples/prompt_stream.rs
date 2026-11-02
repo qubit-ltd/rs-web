@@ -165,6 +165,32 @@ fn build_router(state: AppState, http_limits: HttpLimits, stream_limits: StreamA
         .with_state(state)
 }
 
+#[tokio_main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let options = ServerOptions::new("127.0.0.1:3001".parse::<SocketAddr>()?).with_max_transport_connections(128)?;
+    let http_limits = HttpLimits::default();
+    let server = WebServer::bind_http(options.clone()).await?;
+    let context = server.context();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let state = AppState {
+        context,
+        sse: SseConnectionPolicy::default(),
+        ws: WsUpgradePolicy::new().allowed_origins(["http://localhost:3000"]),
+        shutdown: Arc::new(Mutex::new(Some(shutdown_tx))),
+    };
+    let app = build_router(state, http_limits, StreamAdmissionLimits::default());
+    println!(
+        "listening on http://{}; POST /admin/shutdown to stop",
+        server.local_addr()
+    );
+    let _ = server
+        .serve(app, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -215,30 +241,4 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
-}
-
-#[tokio_main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let options = ServerOptions::new("127.0.0.1:3001".parse::<SocketAddr>()?).with_max_transport_connections(128)?;
-    let http_limits = HttpLimits::default();
-    let server = WebServer::bind_http(options.clone()).await?;
-    let context = server.context();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let state = AppState {
-        context,
-        sse: SseConnectionPolicy::default(),
-        ws: WsUpgradePolicy::new().allowed_origins(["http://localhost:3000"]),
-        shutdown: Arc::new(Mutex::new(Some(shutdown_tx))),
-    };
-    let app = build_router(state, http_limits, StreamAdmissionLimits::default());
-    println!(
-        "listening on http://{}; POST /admin/shutdown to stop",
-        server.local_addr()
-    );
-    let _ = server
-        .serve(app, async move {
-            let _ = shutdown_rx.await;
-        })
-        .await?;
-    Ok(())
 }
