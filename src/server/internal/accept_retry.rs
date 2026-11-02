@@ -64,3 +64,89 @@ pub(super) fn accept_retry_delay(retry_number: u32) -> Duration {
     debug_assert!((1..=8).contains(&retry_number));
     Duration::from_millis((10_u64 << (retry_number - 1)).min(1000))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::time::Duration;
+
+    use tokio::time::Instant;
+
+    use super::super::accept_loop::handle_accept_result;
+    use super::super::accept_result::AcceptResult;
+    use super::AcceptRetry;
+
+    #[test]
+    fn test_accept_transient_error_then_success_keeps_server_running() {
+        let mut retry = AcceptRetry::default();
+        let before = Instant::now();
+        let retry_at =
+            match handle_accept_result::<()>(&mut retry, Err(io::Error::from(io::ErrorKind::ConnectionAborted))) {
+                AcceptResult::Retry => retry.retry_at().expect("retry state retains its deadline"),
+                _ => panic!("transient failure must schedule retry"),
+            };
+        assert!(retry_at.duration_since(before) >= Duration::from_millis(10));
+        assert!(retry_at.duration_since(before) < Duration::from_millis(11));
+        assert!(matches!(
+            handle_accept_result(&mut retry, Ok(())),
+            AcceptResult::Accepted(())
+        ));
+        assert!(retry.retry_at().is_none());
+        let before = Instant::now();
+        let retry_at =
+            match handle_accept_result::<()>(&mut retry, Err(io::Error::from(io::ErrorKind::ConnectionAborted))) {
+                AcceptResult::Retry => retry.retry_at().expect("retry state retains its deadline"),
+                _ => panic!("failure after success starts a new retry series"),
+            };
+        assert!(retry_at.duration_since(before) >= Duration::from_millis(10));
+        assert!(retry_at.duration_since(before) < Duration::from_millis(11));
+    }
+
+    #[test]
+    fn test_accept_success_resets_consecutive_failure_limit() {
+        let mut retry = AcceptRetry::default();
+        for _ in 0..8 {
+            assert!(matches!(
+                handle_accept_result::<()>(&mut retry, Err(io::Error::from(io::ErrorKind::ConnectionAborted))),
+                AcceptResult::Retry
+            ));
+        }
+        assert!(matches!(
+            handle_accept_result(&mut retry, Ok(())),
+            AcceptResult::Accepted(())
+        ));
+        for _ in 0..8 {
+            assert!(matches!(
+                handle_accept_result::<()>(&mut retry, Err(io::Error::from(io::ErrorKind::ConnectionAborted))),
+                AcceptResult::Retry
+            ));
+        }
+        let final_result = handle_accept_result::<()>(
+            &mut retry,
+            Err(io::Error::new(io::ErrorKind::ConnectionAborted, "last source")),
+        );
+        let AcceptResult::Terminal(final_error) = final_result else {
+            panic!("ninth consecutive failure must terminate")
+        };
+        assert_eq!(final_error.to_string(), "last source");
+    }
+
+    #[test]
+    fn test_accept_fatal_error_terminates_without_retry() {
+        let mut retry = AcceptRetry::default();
+        let result = handle_accept_result::<()>(
+            &mut retry,
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "fatal source")),
+        );
+        let AcceptResult::Terminal(error) = result else {
+            panic!("fatal failure must terminate immediately")
+        };
+        assert_eq!(error.to_string(), "fatal source");
+    }
+
+    #[test]
+    fn test_accept_backoff_is_exponential_and_capped() {
+        let delays: Vec<_> = (1..=8).map(super::accept_retry_delay).collect();
+        assert_eq!(delays, [10, 20, 40, 80, 160, 320, 640, 1000].map(Duration::from_millis));
+    }
+}

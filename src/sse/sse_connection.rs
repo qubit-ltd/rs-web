@@ -52,6 +52,10 @@ pub struct SseConnection {
 }
 
 impl SseConnection {
+    /// Creates a reserved SSE connection with its lifetime guard.
+    ///
+    /// The guard releases the active-connection reservation and session guard,
+    /// then cancels the producer token when the response ends or is dropped.
     pub(in crate::sse) fn new(
         keep_alive_interval: Duration,
         guard: SseConnectionGuard,
