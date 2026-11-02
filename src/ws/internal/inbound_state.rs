@@ -16,14 +16,23 @@ use super::InboundMessage;
 use crate::ws::ws_send_queue::message_size;
 
 /// Per-connection inbound byte accounting and first read failure.
+///
+/// The byte limit covers payloads held in the inbound channel or waiting to be
+/// delivered. Once [`InboundMessage::into_message`] transfers a message to the
+/// application, its bytes are no longer included. The first read error is
+/// retained until consumed once or explicitly cleared.
 #[derive(Debug)]
 pub(in crate::ws) struct InboundState {
+    /// Maximum payload bytes reserved by queued inbound messages.
     max_bytes: usize,
+    /// Currently reserved queued or pending-delivery payload bytes.
     used_bytes: Mutex<usize>,
+    /// First read error waiting for the application to consume it.
     read_error: Mutex<Option<Error>>,
 }
 
 impl InboundState {
+    /// Creates an empty per-connection budget with the given payload limit.
     pub(in crate::ws) fn new(max_bytes: usize) -> Self {
         Self {
             max_bytes,
@@ -32,6 +41,12 @@ impl InboundState {
         }
     }
 
+    /// Reserves payload bytes and wraps a message while it is queued for
+    /// delivery.
+    ///
+    /// Returns the original message unchanged when its payload would exceed the
+    /// remaining budget. The reservation is returned when the wrapper is
+    /// dropped.
     pub(in crate::ws) fn try_wrap(self: &Arc<Self>, message: Message) -> Result<InboundMessage, Message> {
         let bytes = message_size(&message);
         let mut used = self.used_bytes.lock().unwrap_or_else(PoisonError::into_inner);
@@ -43,11 +58,13 @@ impl InboundState {
         Ok(InboundMessage::new(message, bytes, self.clone()))
     }
 
+    /// Returns a wrapper's reserved payload bytes to this connection's budget.
     pub(in crate::ws) fn release(&self, bytes: usize) {
         let mut used = self.used_bytes.lock().unwrap_or_else(PoisonError::into_inner);
         *used = used.saturating_sub(bytes);
     }
 
+    /// Stores a read error only if no earlier error is waiting for delivery.
     pub(in crate::ws) fn record_read_error(&self, error: Error) {
         let mut slot = self.read_error.lock().unwrap_or_else(PoisonError::into_inner);
         if slot.is_none() {
@@ -55,6 +72,7 @@ impl InboundState {
         }
     }
 
+    /// Takes the retained read error; subsequent calls return `None`.
     pub(in crate::ws) fn take_read_error(&self) -> Option<Error> {
         self.read_error.lock().unwrap_or_else(PoisonError::into_inner).take()
     }

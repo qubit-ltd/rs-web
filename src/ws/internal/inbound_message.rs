@@ -12,10 +12,18 @@ use axum::extract::ws::Message;
 use super::InboundState;
 
 /// Message envelope that returns its payload bytes to the connection budget.
+///
+/// The charge is released when this envelope is dropped. Calling
+/// [`into_message`](Self::into_message) transfers the message to application
+/// owned memory, so that payload is no longer covered by the inbound queue
+/// budget.
 #[derive(Debug)]
 pub(in crate::ws) struct InboundMessage {
+    /// Message payload retained while the inbound budget is charged.
     message: Option<Message>,
+    /// Payload bytes reserved from the connection budget.
     bytes: usize,
+    /// Budget owner that receives `bytes` when this wrapper is dropped.
     state: Arc<InboundState>,
 }
 
@@ -28,6 +36,11 @@ impl InboundMessage {
         }
     }
 
+    /// Removes the message from this budgeted envelope for application use.
+    ///
+    /// The envelope then drops and releases its byte charge; the returned
+    /// message is application owned and is not counted against the queue
+    /// budget.
     pub(in crate::ws) fn into_message(mut self) -> Message {
         self.message.take().expect("inbound message is present")
     }

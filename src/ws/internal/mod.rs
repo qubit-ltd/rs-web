@@ -13,6 +13,7 @@ mod inbound_message;
 mod inbound_state;
 mod policy_inner;
 mod queue_state;
+mod session_resources;
 mod upgrade_lifecycle;
 
 pub(in crate::ws) use close_queue_on_drop::CloseQueueOnDrop;
@@ -21,6 +22,7 @@ pub(in crate::ws) use inbound_message::InboundMessage;
 pub(in crate::ws) use inbound_state::InboundState;
 pub(in crate::ws) use policy_inner::PolicyInner;
 pub(in crate::ws) use queue_state::QueueState;
+pub(in crate::ws) use session_resources::SessionResources;
 pub(in crate::ws) use upgrade_lifecycle::UpgradeLifecycle;
 
 mod close;

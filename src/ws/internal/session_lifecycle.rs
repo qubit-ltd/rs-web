@@ -15,9 +15,15 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub(in crate::ws) struct SessionLifecycle {
+    /// Child cancellation token shared by the session handler and I/O drivers.
     pub(in crate::ws) shutdown: CancellationToken,
+    /// Protocol code selected for the close frame sent during shutdown.
     pub(in crate::ws) close_code: Arc<AtomicU16>,
+    /// Absolute deadline established by the first session close request.
     pub(in crate::ws) close_deadline: Arc<Mutex<Option<Instant>>>,
+    /// Optional absolute server shutdown deadline, which can shorten session
+    /// close.
     pub(in crate::ws) server_deadline: Option<Arc<Mutex<Option<Instant>>>>,
+    /// Maximum close wait when no earlier absolute deadline applies.
     pub(in crate::ws) shutdown_timeout: Duration,
 }

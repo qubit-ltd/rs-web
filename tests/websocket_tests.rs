@@ -841,6 +841,111 @@ async fn test_peer_close_closes_send_queue_before_handler_resumes() {
 }
 
 #[tokio_test]
+async fn test_writer_failure_terminates_active_session() {
+    async fn upgrade(
+        State((policy, context, exit_tx, result_tx)): State<(
+            WsUpgradePolicy,
+            ServerContext,
+            Arc<Mutex<Option<oneshot::Sender<(usize, usize)>>>>,
+            Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+        )>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        let observed_policy = policy.clone();
+        let observed_context = context.clone();
+        policy.on_upgrade(ws, &headers, context, move |mut session| async move {
+            // In tungstenite 0.29, writing Close makes its later text write
+            // return SendAfterClosing. The queue-closure barrier below observes
+            // writer termination without depending on that internal error type.
+            session.try_send(Message::Close(None)).expect("close should be queued");
+            session
+                .try_send(Message::text("after close"))
+                .expect("following message should be queued");
+            timeout(Duration::from_secs(1), async {
+                loop {
+                    if session.try_send(Message::text("writer-exit-probe")) == Err(WsSendError::Closed) {
+                        break;
+                    }
+                    yield_now().await;
+                }
+            })
+            .await
+            .expect("writer failure should close its send queue");
+            // The queue closure follows the writer failure path. Sample counts
+            // before asking the session to clean up its still-active reader.
+            if let Some(tx) = exit_tx.lock().unwrap().take() {
+                let _ = tx.send((observed_policy.active_connections(), observed_context.active_sessions()));
+            }
+            let recv_returned_none = timeout(Duration::from_secs(2), session.recv())
+                .await
+                .expect("session cleanup should finish by its close deadline")
+                .is_none();
+            if let Some(tx) = result_tx.lock().unwrap().take() {
+                let _ = tx.send(recv_returned_none);
+            }
+        })
+    }
+
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(500)),
+    )
+    .await
+    .expect("test server should bind");
+    let address = server.local_addr();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new().max_connections(1);
+    let (exit_tx, exit_rx) = oneshot::channel();
+    let (result_tx, result_rx) = oneshot::channel();
+    let app = Router::new().route("/ws", get(upgrade)).with_state((
+        policy.clone(),
+        context.clone(),
+        Arc::new(Mutex::new(Some(exit_tx))),
+        Arc::new(Mutex::new(Some(result_tx))),
+    ));
+    let serving = spawn(
+        server
+            .serve(app, pending::<()>())
+            .with_subscriber(tracing::dispatcher::get_default(Clone::clone)),
+    );
+
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    let (opcode, _) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
+        .await
+        .expect("server should emit its queued Close frame");
+    assert_eq!(opcode, 8);
+    let (connections_at_writer_exit, sessions_at_writer_exit) = timeout(Duration::from_secs(1), exit_rx)
+        .await
+        .expect("handler should report writer-exit boundary")
+        .expect("writer-exit sender should remain available");
+    // Capture whether the writer released its resources while the reader is
+    // still waiting on the peer; defer assertions until cleanup has completed.
+    let resources_retained_while_reader_active = connections_at_writer_exit == 1 && sessions_at_writer_exit == 1;
+    send_masked_text(&mut client, b"still readable").await;
+    send_masked_close(&mut client).await;
+    assert!(
+        timeout(Duration::from_secs(2), result_rx)
+            .await
+            .expect("handler should finish recv cleanup")
+            .expect("handler result sender should remain available"),
+        "recv should return None after writer cancellation"
+    );
+    timeout(Duration::from_secs(2), async {
+        while policy.active_connections() != 0 || context.active_sessions() != 0 {
+            yield_now().await;
+        }
+    })
+    .await
+    .expect("peer close should finish the active session");
+    serving.abort();
+    assert!(
+        resources_retained_while_reader_active,
+        "writer resources should remain counted until the reader exits; observed connections={connections_at_writer_exit}, sessions={sessions_at_writer_exit}"
+    );
+}
+
+#[tokio_test]
 async fn test_inbound_backpressure_closes_with_try_again_later() {
     async fn upgrade(
         State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,

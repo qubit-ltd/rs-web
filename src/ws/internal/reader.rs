@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 use super::DeliveryResult;
 use super::InboundState;
 use super::SessionLifecycle;
+use super::SessionResources;
 use super::close::get_close_deadline;
 use crate::ws::internal::CloseQueueOnDrop;
 use crate::ws::ws_send_queue::WsSendQueue;
@@ -51,6 +52,7 @@ pub(in crate::ws) async fn reader_loop(
     close_ack: oneshot::Sender<()>,
     idle_timeout: Duration,
     inbound_state: Arc<InboundState>,
+    _resources: Arc<SessionResources>,
 ) {
     let _close_queue_on_drop = CloseQueueOnDrop::new(queue.clone());
     let mut close_ack = Some(close_ack);

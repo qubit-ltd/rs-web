@@ -126,7 +126,8 @@ impl WsUpgradePolicy {
     /// Returns the number of active upgraded connections.
     ///
     /// This counts only upgrades using this policy's capacity domain,
-    /// including clones of this policy.
+    /// including clones of this policy. An admitted connection remains
+    /// counted until both its reader and writer tasks exit.
     ///
     /// # Returns
     ///
@@ -327,7 +328,7 @@ impl WsUpgradePolicy {
     /// authentication before calling it. The session is counted while the
     /// upgrade response is pending; failed upgrades release both reservations
     /// when Axum drops the callback, while successful sessions retain them
-    /// until the writer exits. Registrations are rejected after shutdown
+    /// until both I/O tasks exit. Registrations are rejected after shutdown
     /// starts.
     ///
     /// # Type Parameters
@@ -475,6 +476,8 @@ impl WsUpgradePolicy {
                 let writer_notify = queue.notify.clone();
                 let (close_ack_sender, close_ack_receiver) = oneshot::channel();
                 let (sink, stream) = socket.split();
+                let resources = Arc::new(super::internal::SessionResources::new(permit, session_guard));
+                let writer_resources = resources.clone();
                 let writer = spawn(async move {
                     writer_loop(
                         sink,
@@ -482,8 +485,7 @@ impl WsUpgradePolicy {
                         writer_notify,
                         writer_lifecycle,
                         close_ack_receiver,
-                        permit,
-                        session_guard,
+                        writer_resources,
                     )
                     .await;
                 });
@@ -499,6 +501,7 @@ impl WsUpgradePolicy {
                 let reader_queue = queue.clone();
                 let idle_timeout = policy.inner.idle_timeout;
                 let reader_inbound_state = inbound_state.clone();
+                let reader_resources = resources.clone();
                 let reader = spawn(async move {
                     reader_loop(
                         stream,
@@ -508,9 +511,11 @@ impl WsUpgradePolicy {
                         close_ack_sender,
                         idle_timeout,
                         reader_inbound_state,
+                        reader_resources,
                     )
                     .await;
                 });
+                drop(resources);
                 let session = WsSession {
                     incoming: incoming_rx,
                     inbound_state,
