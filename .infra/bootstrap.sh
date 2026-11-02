@@ -103,9 +103,38 @@ run_latest() {
 }
 
 case "$entrypoint" in
+    .infra/bin/bootstrap-update.sh)
+        python_cmd=${RS_INFRA_PYTHON:-python3}
+        command -v "$python_cmd" >/dev/null 2>&1 || {
+            echo "error: Python 3 is required to update infrastructure files" >&2
+            exit 2
+        }
+        if ! "$python_cmd" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))'; then
+            echo "error: Python 3.10 or later is required to update infrastructure files" >&2
+            exit 2
+        fi
+        "$python_cmd" "$shared_root/assets/project-bootstrap/sync.py" \
+            --project-root "$project_root" \
+            --package-root "$shared_root/assets/project-bootstrap" \
+            "$@"
+        update_tools=true
+        for arg in "$@"; do
+            case "$arg" in --dry-run|--status) update_tools=false ;; esac
+        done
+        if [[ "$update_tools" == true ]]; then
+            "$manager_bin" prewarm --project "$project_root"
+        fi
+        ;;
     .infra/bin/align-ci.sh)
         prepare_dependencies
         run_latest rs-infra-style --project "$project_root" fix "$@"
+        alignment_preview=false
+        for arg in "$@"; do
+            case "$arg" in --dry-run|-h|--help) alignment_preview=true ;; esac
+        done
+        if [[ "$alignment_preview" == false ]]; then
+            run_latest rs-infra-ci --project "$project_root" --only clippy check
+        fi
         ;;
     .infra/bin/ci-check.sh)
         source "$shared_root/.infra/lib/cleanup-build-artifacts.sh"
@@ -129,9 +158,9 @@ case "$entrypoint" in
             esac
         done
         if [[ "$mode" == update ]]; then
-            "$manager_bin" latest --project "$project_root" --tool rs-infra-dependency -- --project "$project_root" sync
+            "$manager_bin" latest --project "$project_root" --tool rs-infra-dependency -- --project "$project_root" --recursive sync
         fi
-        run_latest rs-infra-dependency --project "$project_root" check
+        run_latest rs-infra-dependency --project "$project_root" --recursive check
         ;;
     .infra/bin/infra-tool.sh)
         exec "$shared_root/.infra/lib/infra-tool.sh" "$@"
