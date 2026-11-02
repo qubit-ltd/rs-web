@@ -40,6 +40,12 @@ type PeerCloseTestState = (
     Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     Arc<Mutex<Option<oneshot::Sender<WsSendError>>>>,
 );
+type WriterFailureTestState = (
+    WsUpgradePolicy,
+    ServerContext,
+    Arc<Mutex<Option<oneshot::Sender<(usize, usize)>>>>,
+    Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+);
 use qubit_web::diagnostic::DiagnosticLayer;
 use qubit_web::ws::WsPolicyError;
 use qubit_web::ws::WsSendError;
@@ -843,12 +849,7 @@ async fn test_peer_close_closes_send_queue_before_handler_resumes() {
 #[tokio_test]
 async fn test_writer_failure_terminates_active_session() {
     async fn upgrade(
-        State((policy, context, exit_tx, result_tx)): State<(
-            WsUpgradePolicy,
-            ServerContext,
-            Arc<Mutex<Option<oneshot::Sender<(usize, usize)>>>>,
-            Arc<Mutex<Option<oneshot::Sender<bool>>>>,
-        )>,
+        State((policy, context, exit_tx, result_tx)): State<WriterFailureTestState>,
         headers: HeaderMap,
         ws: WebSocketUpgrade,
     ) -> Response {
