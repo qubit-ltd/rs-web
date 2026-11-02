@@ -538,6 +538,15 @@ fn validate_path(path: &str, prefix: bool, span: Span) -> syn::Result<()> {
             format!("{label} must be a valid absolute route template"),
         ));
     }
+    if path
+        .split('/')
+        .any(|segment| segment.starts_with(':') || segment.starts_with('*'))
+    {
+        return Err(syn::Error::new(
+            span,
+            "legacy route parameters are not supported; use `{name}` for parameters and `{*name}` for wildcards",
+        ));
+    }
     if !prefix {
         validate_template(path, span)?;
     }

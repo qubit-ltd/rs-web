@@ -626,6 +626,58 @@ fn manually_declared_invalid_path_returns_invalid_path_error() {
     assert!(!INVALID_PATH_REGISTER_CALLED.load(Ordering::Relaxed));
 }
 
+#[test]
+fn manually_declared_legacy_and_nonabsolute_paths_are_rejected_before_register() {
+    macro_rules! invalid_controller {
+        ($name:ident, $route_path:literal) => {
+            struct $name(Arc<AtomicBool>);
+
+            impl qubit_web::mvc::ControllerDefinition<()> for $name {
+                fn route_metadata() -> &'static [qubit_web::mvc::RouteMetadata] {
+                    static ROUTES: [qubit_web::mvc::RouteMetadata; 2] = [
+                        qubit_web::mvc::RouteMetadata::new("GET", "/valid", qubit_web::RouteKind::Short),
+                        qubit_web::mvc::RouteMetadata::new("GET", $route_path, qubit_web::RouteKind::Short),
+                    ];
+                    &ROUTES
+                }
+
+                fn register(
+                    self: Arc<Self>,
+                    router: Router<()>,
+                    _: qubit_web::limit::LimitState,
+                    _: qubit_web::limit::StreamAdmissionState,
+                ) -> Router<()> {
+                    self.0.store(true, Ordering::Relaxed);
+                    router
+                }
+            }
+        };
+    }
+
+    invalid_controller!(ColonPath, "/:id");
+    invalid_controller!(StarPath, "/*rest");
+    invalid_controller!(EmptyPath, "");
+    invalid_controller!(RelativePath, "users");
+
+    macro_rules! assert_rejected {
+        ($name:ident, $path:literal) => {{
+            let registered = Arc::new(AtomicBool::new(false));
+            let result = ControllerRoutes::new().add(Arc::new($name(registered.clone())));
+            let Err(ControllerRouteError::InvalidPath { path, reason }) = result else {
+                panic!("expected InvalidPath for {}", $path);
+            };
+            assert_eq!(path, $path);
+            assert!(!reason.is_empty());
+            assert!(!registered.load(Ordering::Relaxed));
+        }};
+    }
+
+    assert_rejected!(ColonPath, "/:id");
+    assert_rejected!(StarPath, "/*rest");
+    assert_rejected!(EmptyPath, "");
+    assert_rejected!(RelativePath, "users");
+}
+
 #[tokio::test]
 async fn controller_routes_keep_first_and_last_routes_after_multiple_adds() {
     struct Middle;

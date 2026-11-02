@@ -13,6 +13,7 @@ use axum::Router;
 
 use super::ControllerDefinition;
 use super::ControllerRouteError;
+use super::internal::validate_route_path;
 use crate::limit::HttpLimits;
 use crate::limit::LimitState;
 use crate::limit::StreamAdmissionLimits;
@@ -146,6 +147,10 @@ where
         C: ControllerDefinition<S>,
     {
         for route in C::route_metadata() {
+            validate_route_path(route.path()).map_err(|reason| ControllerRouteError::InvalidPath {
+                path: route.path(),
+                reason: reason.to_owned(),
+            })?;
             if self
                 .declared
                 .get(route.path())

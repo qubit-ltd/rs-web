@@ -1,0 +1,5 @@
+error: legacy route parameters are not supported; use `{name}` for parameters and `{*name}` for wildcards
+  --> tests/ui/controller_legacy_colon_prefix.rs:14:19
+   |
+14 | #[rest_controller("/:scope")]
+   |                   ^^^^^^^^^

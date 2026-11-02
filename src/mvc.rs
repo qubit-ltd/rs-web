@@ -14,8 +14,10 @@ mod join_route_path;
 mod route_metadata;
 mod internal {
     mod insert_slash;
+    mod validate_route_path;
 
     pub(super) use insert_slash::InsertSlash;
+    pub(super) use validate_route_path::validate_route_path;
 }
 
 pub use controller_definition::ControllerDefinition;
