@@ -616,7 +616,11 @@ fn validate_method(method: &ImplItemFn) -> syn::Result<()> {
             "mapped controller methods must use `&self`",
         ));
     };
-    if receiver.reference.is_none() || receiver.mutability.is_some() || receiver.colon_token.is_some() {
+    let immutable_reference = matches!(
+        &receiver.kind,
+        syn::ReceiverKind::Reference(_, _, None)
+    ) && receiver.mutability.is_none();
+    if !immutable_reference {
         return Err(syn::Error::new_spanned(
             receiver,
             "mapped controller methods must use `&self`",
@@ -667,4 +671,31 @@ fn route_kind(kind: &str) -> TokenStream {
 fn method_filter(method: &str) -> TokenStream {
     let name = format_ident!("{}", method);
     quote! { ::axum::routing::MethodFilter::#name }
+}
+
+#[cfg(test)]
+mod tests {
+    use syn::ImplItemFn;
+
+    use super::validate_method;
+
+    #[test]
+    fn test_validate_method_preserves_receiver_contract() {
+        let shared: ImplItemFn = syn::parse_quote!(async fn route(&self) {});
+        assert!(validate_method(&shared).is_ok());
+
+        let invalid: [ImplItemFn; 4] = [
+            syn::parse_quote!(async fn route(&mut self) {}),
+            syn::parse_quote!(async fn route(mut self) {}),
+            syn::parse_quote!(async fn route(self) {}),
+            syn::parse_quote!(async fn route(self: Box<Self>) {}),
+        ];
+        for method in &invalid {
+            let error = validate_method(method).expect_err("only immutable `&self` is supported");
+            assert_eq!(
+                error.to_string(),
+                "mapped controller methods must use `&self`",
+            );
+        }
+    }
 }
