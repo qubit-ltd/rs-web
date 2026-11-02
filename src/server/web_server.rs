@@ -16,7 +16,6 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use hyper::service::service_fn;
-use hyper_util::rt::TokioExecutor;
 use hyper_util::rt::TokioIo;
 use hyper_util::rt::TokioTimer;
 use hyper_util::server::conn::auto::Builder;
@@ -39,6 +38,8 @@ mod connection_completion;
 mod connection_completion_guard;
 #[path = "internal/connection_completion_state.rs"]
 mod connection_completion_state;
+#[path = "internal/connection_task_executor.rs"]
+mod connection_task_executor;
 #[path = "internal/serve_cancellation_guard.rs"]
 mod serve_cancellation_guard;
 #[path = "server_context.rs"]
@@ -54,6 +55,7 @@ mod shutdown_report;
 use accept_retry::AcceptRetry;
 use connection_activity::ConnectionActivity;
 use connection_completion::ConnectionCompletion;
+use connection_task_executor::ConnectionTaskExecutor;
 use serve_cancellation_guard::ServeCancellationGuard;
 pub use server_context::ServerContext;
 pub use session_guard::SessionGuard;
@@ -264,6 +266,7 @@ impl WebServer {
         let connection_limit = Arc::new(Semaphore::new(options.max_transport_connections.get()));
         let graceful = GracefulShutdown::new();
         let completion = ConnectionCompletion::new();
+        let connection_tasks = ConnectionTaskExecutor::new();
         let listener = Arc::new(listener);
         let mut retry = AcceptRetry::default();
         tokio::pin!(shutdown);
@@ -290,6 +293,7 @@ impl WebServer {
                 let app = app.clone();
                 let watcher = graceful.watcher();
                 let completion = accept_completion.clone();
+                let connection_tasks = connection_tasks.clone();
                 #[cfg(feature = "tls")]
                 let tls_acceptor = tls_acceptor.clone();
                 #[cfg(feature = "tls")]
@@ -309,16 +313,41 @@ impl WebServer {
                             ) => result,
                         };
                         let Ok(Ok(stream)) = accepted else { return };
-                        serve_connection(stream, app, watcher, request_header_timeout, transport_idle_timeout).await;
+                        serve_connection(
+                            stream,
+                            app,
+                            watcher,
+                            request_header_timeout,
+                            transport_idle_timeout,
+                            connection_tasks,
+                        )
+                        .await;
                         return;
                     }
-                    serve_connection(stream, app, watcher, request_header_timeout, transport_idle_timeout).await;
+                    serve_connection(
+                        stream,
+                        app,
+                        watcher,
+                        request_header_timeout,
+                        transport_idle_timeout,
+                        connection_tasks,
+                    )
+                    .await;
                 });
             },
         )
         .await;
 
-        let result = finish_serve(listener, context, graceful, completion, connections, accept_error).await;
+        let result = finish_serve(
+            listener,
+            context,
+            graceful,
+            completion,
+            connection_tasks,
+            connections,
+            accept_error,
+        )
+        .await;
         cancellation_guard.disarm();
         result
     }
@@ -380,6 +409,7 @@ async fn finish_serve(
     context: ServerContext,
     graceful: GracefulShutdown,
     completion: ConnectionCompletion,
+    connection_tasks: ConnectionTaskExecutor,
     mut connections: JoinSet<()>,
     accept_error: Option<io::Error>,
 ) -> Result<ShutdownReport, WebServerError> {
@@ -388,18 +418,27 @@ async fn finish_serve(
     let shutdown_deadline = match context.begin_shutdown() {
         Ok(deadline) => deadline,
         Err(error) => {
+            let shutdown_deadline = context.shutdown_deadline().unwrap_or_else(tokio::time::Instant::now);
+            let tracked_tasks = connection_tasks.close();
             connections.abort_all();
-            while connections.join_next().await.is_some() {}
+            tokio::join!(tracked_tasks.wait_until(shutdown_deadline), async {
+                while connections.join_next().await.is_some() {}
+            },);
             return Err(error);
         }
     };
-    let _wait_result = tokio::time::timeout_at(shutdown_deadline, async {
-        tokio::join!(graceful.shutdown(), context.wait_for_sessions())
-    })
-    .await;
+    let tracked_tasks = connection_tasks.close();
+    let (_wait_result, managed_task_report) = tokio::join!(
+        tokio::time::timeout_at(shutdown_deadline, async {
+            tokio::join!(graceful.shutdown(), context.wait_for_sessions())
+        }),
+        tracked_tasks.wait_until(shutdown_deadline),
+    );
     let unfinished_managed_sessions = context.active_sessions_at(shutdown_deadline);
     let transport_completed_by_deadline = completion.completed_by(shutdown_deadline);
-    let graceful = unfinished_managed_sessions == 0 && transport_completed_by_deadline;
+    let graceful = unfinished_managed_sessions == 0
+        && transport_completed_by_deadline
+        && managed_task_report.completed_by_deadline;
     if !graceful {
         connections.abort_all();
     }
@@ -486,6 +525,7 @@ async fn serve_connection<S>(
     watcher: hyper_util::server::graceful::Watcher,
     request_header_timeout: Duration,
     transport_idle_timeout: Duration,
+    connection_tasks: ConnectionTaskExecutor,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -505,7 +545,7 @@ async fn serve_connection<S>(
                 .map(|response| response.map(|body| connection_activity::retain_response_activity(body, lease)))
         }
     });
-    let mut builder = Builder::new(TokioExecutor::new());
+    let mut builder = Builder::new(connection_tasks);
     builder
         .http1()
         .timer(TokioTimer::new())
@@ -633,6 +673,7 @@ mod server_event_tests {
 #[cfg(test)]
 mod accept_retry_tests {
     use std::collections::VecDeque;
+    use std::future::pending;
     use std::io;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -646,14 +687,103 @@ mod accept_retry_tests {
     use tokio::sync::oneshot;
     use tokio::task::JoinSet;
     use tokio::time::Instant;
+    use tokio::time::timeout;
 
     use super::AcceptResult;
     use super::accept_retry::AcceptRetry;
     use super::connection_completion::ConnectionCompletion;
+    use super::connection_task_executor::ConnectionTaskExecutor;
     use super::finish_serve;
     use super::handle_accept_result;
     use super::run_accept_loop;
     use super::server_context::ServerContext;
+
+    #[tokio::test]
+    async fn test_finish_serve_reaps_hyper_tasks_when_deadline_overflows() {
+        struct SignalOnDrop(Arc<AtomicBool>);
+
+        impl Drop for SignalOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let context = ServerContext::new(Duration::MAX);
+        let completion = ConnectionCompletion::new();
+        let connection_tasks = ConnectionTaskExecutor::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_signal = SignalOnDrop(dropped.clone());
+        connection_tasks
+            .spawn(async move {
+                let _signal = task_signal;
+                pending::<()>().await;
+            })
+            .expect("executor should accept tasks before shutdown");
+
+        let result = timeout(
+            Duration::from_secs(1),
+            finish_serve(
+                Arc::new(listener),
+                context,
+                GracefulShutdown::new(),
+                completion,
+                connection_tasks,
+                JoinSet::new(),
+                None,
+            ),
+        )
+        .await
+        .expect("overflow cleanup should finish after aborting tracked Hyper tasks");
+
+        assert!(matches!(result, Err(crate::WebServerError::InvalidConfig)));
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_finish_serve_waits_for_hyper_tasks_and_marks_forced_shutdown() {
+        struct SignalOnDrop(Arc<AtomicBool>);
+
+        impl Drop for SignalOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let context = ServerContext::new(Duration::from_millis(20));
+        let completion = ConnectionCompletion::new();
+        let connection_tasks = ConnectionTaskExecutor::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_signal = SignalOnDrop(dropped.clone());
+        connection_tasks
+            .spawn(async move {
+                let _signal = task_signal;
+                pending::<()>().await;
+            })
+            .expect("executor should accept tasks before shutdown");
+
+        let report = timeout(
+            Duration::from_secs(1),
+            finish_serve(
+                Arc::new(listener),
+                context,
+                GracefulShutdown::new(),
+                completion,
+                connection_tasks,
+                JoinSet::new(),
+                None,
+            ),
+        )
+        .await
+        .expect("shutdown cleanup should finish after aborting tracked Hyper tasks")
+        .expect("no accept error should be returned");
+
+        assert!(!report.graceful);
+        assert_eq!(report.unfinished_managed_sessions, 0);
+        assert!(report.elapsed >= Duration::from_millis(20));
+        assert!(dropped.load(Ordering::SeqCst));
+    }
 
     #[tokio::test]
     async fn test_finish_serve_reports_late_transport_completion_as_not_graceful() {
@@ -670,6 +800,7 @@ mod accept_retry_tests {
             context,
             GracefulShutdown::new(),
             completion,
+            ConnectionTaskExecutor::new(),
             JoinSet::new(),
             None,
         )
@@ -694,6 +825,7 @@ mod accept_retry_tests {
             context,
             GracefulShutdown::new(),
             completion,
+            ConnectionTaskExecutor::new(),
             JoinSet::new(),
             None,
         )
@@ -1153,6 +1285,7 @@ mod accept_retry_tests {
             context,
             watcher,
             ConnectionCompletion::new(),
+            ConnectionTaskExecutor::new(),
             connections,
             Some(accept_error),
         )
