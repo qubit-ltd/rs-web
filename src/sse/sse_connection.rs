@@ -52,6 +52,17 @@ pub struct SseConnection {
 }
 
 impl SseConnection {
+    /// Creates an SSE connection from a reserved policy slot.
+    ///
+    /// The guard retains the session registration and active-connection count
+    /// until the response stream ends or is dropped. Dropping this value does
+    /// not wait for asynchronous producer draining.
+    ///
+    /// # Parameters
+    ///
+    /// * `keep_alive_interval` - Interval between SSE keep-alive comments.
+    /// * `guard` - Reservation guard released with the response stream.
+    /// * `cancellation` - Token cancelled when the stream ends or drops.
     pub(in crate::sse) fn new(
         keep_alive_interval: Duration,
         guard: SseConnectionGuard,

@@ -58,7 +58,7 @@ SSE 和 WebSocket 都是长连接路由，不应套用短请求并发/期限中�
 
 `ServerOptions` 默认将 HTTP/1 请求头及 TLS 握手期限设为 10 秒，将传输空闲期限和优雅停服期限各设为 30 秒。仅在没有活跃请求 handler 或响应体时，空闲期限才会关闭 TCP/TLS 连接；它不会限制已经开始但停滞的活跃请求。长连接响应体活跃期间，传输空闲计时暂停。
 
-停服开始时，服务停止接收 socket、关闭受管会话登记入口、通知已有会话，并使用同一个绝对期限等待 HTTP connection task 和受管 SSE/WS 会话。期限由 `ServerOptions` 设置，并由 `ServerContext` 提供给 WebSocket 会话；`WsUpgradePolicy` 不再单独设置停服期限。无法表示的停服期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，服务会先取消会话并回收连接任务，再返回错误。只有两组任务都按期结束，`ShutdownReport::graceful` 才为 `true`。报告记录未结束的受管会话，但不保证任意应用后台工作也已停止。Axum 无法提供可证明的强制关闭连接数，因此 `forced_connections` 为 `None`。
+停服开始时，服务停止接收 socket、关闭受管会话登记入口、通知已有会话，并使用同一个绝对期限等待 HTTP connection task 和受管 SSE/WS 会话。期限由 `ServerOptions` 设置，并由 `ServerContext` 提供给 WebSocket 会话；`WsUpgradePolicy` 不再单独设置停服期限。无法表示的停服期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，服务会先取消会话并回收连接任务，再返回错误。只有两组任务都按期结束，`ShutdownReport::graceful` 才为 `true`。报告记录未结束的受管会话，但不保证任意应用后台工作也已停止。WebServer 管理连接任务，Hyper/hyper-util 驱动连接；本实现尚不提供具有明确定义且可证明的强制关闭连接计数，因此 `forced_connections` 为 `None`。
 
 `ConfiguredWeb` 解析应用显式传入的配置对象，并分别返回 `ServerOptions` 与 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；把配置值传给 `with_http_limits` 可替换该策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。启用 `config` 时，传输配置默认值为 `transport.max_connections = 1024` 和 `transport.idle_timeout_ms = 30000`；HTTP 策略键包括 `http.max_body_bytes`、`http.max_concurrent_requests` 和 `http.request_timeout_ms`。两个并发配置键的有效范围都是 `1..=tokio::sync::Semaphore::MAX_PERMITS`；无效值通过 `ConfigOptionsError::field()` 指向原配置键。TLS 是可选项，通过独立的 `TlsConfig` 配置；PEM 加载失败会归并为 `TlsInvalid`，不会暴露密钥材料或路径。
 

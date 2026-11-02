@@ -33,11 +33,22 @@ use crate::ws::ws_send_queue::WsSendQueue;
 
 /// Reader-owned state and the shared resources retained for its task lifetime.
 pub(in crate::ws) struct ReaderContext {
+    /// Tracks inbound message delivery and read failures for the session.
     inbound_state: Arc<InboundState>,
+    /// Keeps the session guard and transport permit alive until this reader
+    /// task exits; the final I/O task holding these resources releases them.
     _resources: Arc<SessionResources>,
 }
 
 impl ReaderContext {
+    /// Creates reader state while retaining the connection resources.
+    ///
+    /// # Parameters
+    ///
+    /// * `inbound_state` - Shared state used to wrap and record inbound data.
+    /// * `resources` - Session guard and permit retained through this reader
+    ///   task's lifetime. Dropping this context releases only its `Arc`; it
+    ///   does not wait for asynchronous draining.
     pub(in crate::ws) fn new(inbound_state: Arc<InboundState>, resources: Arc<SessionResources>) -> Self {
         Self {
             inbound_state,
