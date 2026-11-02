@@ -282,6 +282,150 @@ async fn shared_state_limits_admissions_across_router_branches() {
     assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
 }
 
+const LARGE_BODY_BUDGET: usize = 4 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+enum AxumBodyPolicy {
+    Default,
+    Max(usize),
+    Disabled,
+}
+
+async fn count_native_bytes(State(calls): State<Arc<AtomicUsize>>, body: Bytes) -> String {
+    calls.fetch_add(1, Ordering::SeqCst);
+    body.len().to_string()
+}
+
+async fn count_native_string(State(calls): State<Arc<AtomicUsize>>, body: String) -> String {
+    calls.fetch_add(1, Ordering::SeqCst);
+    body.len().to_string()
+}
+
+fn native_body_router(policy: AxumBodyPolicy, calls: Arc<AtomicUsize>) -> Router {
+    let limits = StreamAdmissionLimits::default()
+        .with_max_body_bytes(LARGE_BODY_BUDGET)
+        .unwrap();
+    let router = Router::new()
+        .route("/bytes", post(count_native_bytes))
+        .route("/string", post(count_native_string))
+        .with_state(calls);
+    let router = match policy {
+        AxumBodyPolicy::Default => router,
+        AxumBodyPolicy::Max(bytes) => router.layer(axum::extract::DefaultBodyLimit::max(bytes)),
+        AxumBodyPolicy::Disabled => router.layer(axum::extract::DefaultBodyLimit::disable()),
+    };
+    router.layer(StreamAdmissionLayer::new(limits))
+}
+
+async fn assert_native_stream_limit_matrix(path: &str, request_body: fn(&str, usize) -> Request<Body>) {
+    let default_calls = Arc::new(AtomicUsize::new(0));
+    let default_response = native_body_router(AxumBodyPolicy::Default, default_calls.clone())
+        .oneshot(request_body(path, 3 * 1024 * 1024))
+        .await
+        .unwrap();
+    assert_eq!(default_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(default_calls.load(Ordering::SeqCst), 0);
+
+    let max_calls = Arc::new(AtomicUsize::new(0));
+    let max_router = native_body_router(AxumBodyPolicy::Max(LARGE_BODY_BUDGET), max_calls.clone());
+    for size in [3 * 1024 * 1024, LARGE_BODY_BUDGET] {
+        let response = max_router.clone().oneshot(request_body(path, size)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = axum::body::to_bytes(response.into_body(), 128).await.unwrap();
+        assert_eq!(std::str::from_utf8(&payload).unwrap(), size.to_string());
+    }
+    assert_eq!(max_calls.load(Ordering::SeqCst), 2);
+
+    let disabled_calls = Arc::new(AtomicUsize::new(0));
+    let disabled_response = native_body_router(AxumBodyPolicy::Disabled, disabled_calls.clone())
+        .oneshot(request_body(path, 5 * 1024 * 1024))
+        .await
+        .unwrap();
+    assert_eq!(disabled_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(disabled_calls.load(Ordering::SeqCst), 0);
+    let payload = axum::body::to_bytes(disabled_response.into_body(), 1024).await.unwrap();
+    assert!(std::str::from_utf8(&payload).unwrap().contains("body_too_large"));
+    assert_eq!(WebRejection::BodyTooLarge.code(), "body_too_large");
+}
+
+fn native_bytes_request(path: &str, size: usize) -> Request<Body> {
+    Request::post(path).body(Body::from(vec![b'x'; size])).unwrap()
+}
+
+fn native_string_request(path: &str, size: usize) -> Request<Body> {
+    Request::post(path).body(Body::from(vec![b'x'; size])).unwrap()
+}
+
+#[tokio::test]
+async fn stream_admission_preserves_axum_and_native_bytes_limits() {
+    assert_native_stream_limit_matrix("/bytes", native_bytes_request).await;
+}
+
+#[tokio::test]
+async fn stream_admission_preserves_axum_and_native_string_limits() {
+    assert_native_stream_limit_matrix("/string", native_string_request).await;
+}
+
+#[cfg(feature = "json")]
+async fn count_native_json(State(calls): State<Arc<AtomicUsize>>, axum::Json(value): axum::Json<String>) -> String {
+    calls.fetch_add(1, Ordering::SeqCst);
+    value.len().to_string()
+}
+
+#[cfg(feature = "json")]
+fn native_json_router(policy: AxumBodyPolicy, calls: Arc<AtomicUsize>) -> Router {
+    let limits = StreamAdmissionLimits::default()
+        .with_max_body_bytes(LARGE_BODY_BUDGET)
+        .unwrap();
+    let router = Router::new().route("/json", post(count_native_json)).with_state(calls);
+    let router = match policy {
+        AxumBodyPolicy::Default => router,
+        AxumBodyPolicy::Max(bytes) => router.layer(axum::extract::DefaultBodyLimit::max(bytes)),
+        AxumBodyPolicy::Disabled => router.layer(axum::extract::DefaultBodyLimit::disable()),
+    };
+    router.layer(StreamAdmissionLayer::new(limits))
+}
+
+#[cfg(feature = "json")]
+fn native_json_request(size: usize) -> Request<Body> {
+    Request::post("/json")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(format!("\"{}\"", "x".repeat(size - 2))))
+        .unwrap()
+}
+
+#[cfg(feature = "json")]
+#[tokio::test]
+async fn stream_admission_preserves_axum_and_native_json_limits() {
+    let default_calls = Arc::new(AtomicUsize::new(0));
+    let default_response = native_json_router(AxumBodyPolicy::Default, default_calls.clone())
+        .oneshot(native_json_request(3 * 1024 * 1024))
+        .await
+        .unwrap();
+    assert_eq!(default_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(default_calls.load(Ordering::SeqCst), 0);
+
+    let max_calls = Arc::new(AtomicUsize::new(0));
+    let max_router = native_json_router(AxumBodyPolicy::Max(LARGE_BODY_BUDGET), max_calls.clone());
+    for size in [3 * 1024 * 1024, LARGE_BODY_BUDGET] {
+        let response = max_router.clone().oneshot(native_json_request(size)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = axum::body::to_bytes(response.into_body(), 128).await.unwrap();
+        assert_eq!(std::str::from_utf8(&payload).unwrap(), (size - 2).to_string());
+    }
+    assert_eq!(max_calls.load(Ordering::SeqCst), 2);
+
+    let disabled_calls = Arc::new(AtomicUsize::new(0));
+    let disabled_response = native_json_router(AxumBodyPolicy::Disabled, disabled_calls.clone())
+        .oneshot(native_json_request(5 * 1024 * 1024))
+        .await
+        .unwrap();
+    assert_eq!(disabled_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(disabled_calls.load(Ordering::SeqCst), 0);
+    let payload = axum::body::to_bytes(disabled_response.into_body(), 1024).await.unwrap();
+    assert!(std::str::from_utf8(&payload).unwrap().contains("body_too_large"));
+}
+
 #[tokio::test]
 async fn admission_deadline_covers_handler_but_not_response_body() {
     async fn slow() -> &'static str {

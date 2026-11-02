@@ -79,6 +79,79 @@ impl StreamAdmissionLimits {
 
     /// Sets the maximum request body size.
     ///
+    /// This budget is enforced while
+    /// [`StreamAdmissionLayer`](super::StreamAdmissionLayer)
+    /// buffers a request, independently of Axum's `DefaultBodyLimit` for native
+    /// extractors such as `Bytes`, `String`, and `Json`. This setter does not
+    /// install or disable Axum's limit. When a route should accept a body
+    /// larger than Axum's default, configure `DefaultBodyLimit::max` for
+    /// that route as well, or disable that extractor limit only when stream
+    /// admission remains in place. Both limits must admit the body.
+    ///
+    /// The example checks Axum's default rejection, a matching 4 MiB Axum
+    /// limit, and a 5 MiB request rejected by stream admission when Axum's
+    /// limit is disabled:
+    ///
+    /// ```
+    /// use axum::Router;
+    /// use axum::body::{Body, Bytes};
+    /// use axum::extract::DefaultBodyLimit;
+    /// use axum::http::Request;
+    /// use axum::routing::post;
+    /// use qubit_web::{StreamAdmissionLayer, StreamAdmissionLimits};
+    /// use tower::ServiceExt;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// const BUDGET: usize = 4 * 1024 * 1024;
+    /// let request = |size| Request::post("/")
+    ///     .body(Body::from(vec![b'x'; size]))
+    ///     .unwrap();
+    /// let limits = || {
+    ///     StreamAdmissionLimits::default()
+    ///         .with_max_body_bytes(BUDGET)
+    ///         .unwrap()
+    /// };
+    /// let route = || post(|body: Bytes| async move { body.len().to_string() });
+    ///
+    /// let default_limit = Router::new()
+    ///     .route("/", route())
+    ///     .layer(StreamAdmissionLayer::new(limits()));
+    /// let rejected = default_limit
+    ///     .oneshot(request(3 * 1024 * 1024))
+    ///     .await
+    ///     .unwrap();
+    /// assert_eq!(rejected.status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    ///
+    /// let explicit_limit = Router::new()
+    ///     .route("/", route())
+    ///     .layer(DefaultBodyLimit::max(BUDGET))
+    ///     .layer(StreamAdmissionLayer::new(limits()));
+    /// let accepted = explicit_limit
+    ///     .oneshot(request(3 * 1024 * 1024))
+    ///     .await
+    ///     .unwrap();
+    /// assert_eq!(accepted.status(), axum::http::StatusCode::OK);
+    /// let body = axum::body::to_bytes(accepted.into_body(), 128).await.unwrap();
+    /// assert_eq!(
+    ///     std::str::from_utf8(&body).unwrap(),
+    ///     (3 * 1024 * 1024).to_string(),
+    /// );
+    ///
+    /// let disabled_limit = Router::new()
+    ///     .route("/", route())
+    ///     .layer(DefaultBodyLimit::disable())
+    ///     .layer(StreamAdmissionLayer::new(limits()));
+    /// let rejected = disabled_limit
+    ///     .oneshot(request(5 * 1024 * 1024))
+    ///     .await
+    ///     .unwrap();
+    /// assert_eq!(rejected.status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    /// let body = axum::body::to_bytes(rejected.into_body(), 1024).await.unwrap();
+    /// assert!(std::str::from_utf8(&body).unwrap().contains("body_too_large"));
+    /// # }
+    /// ```
+    ///
     /// # Parameters
     ///
     /// - `bytes`: positive per-request body budget.
