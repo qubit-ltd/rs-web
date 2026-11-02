@@ -68,6 +68,12 @@
 //! let _ = router;
 //! ```
 
+#[doc(hidden)]
+pub mod __private;
+
+#[doc(hidden)]
+pub use crate as qubit_web;
+
 pub mod diagnostic;
 /// Structured startup and request rejection errors.
 pub mod error;

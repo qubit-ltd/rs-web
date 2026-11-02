@@ -1,0 +1,10 @@
+[package]
+name = "macro-consumer-keyword-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+union = { package = "qubit-web", path = "../../../..", default-features = false }
+axum = { version = "^0.8", default-features = false }

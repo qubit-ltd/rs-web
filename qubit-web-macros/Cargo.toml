@@ -1,6 +1,6 @@
 [package]
 name = "qubit-web-macros"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
@@ -10,6 +10,7 @@ description = "Procedural macros for qubit-web"
 proc-macro = true
 
 [dependencies]
+proc-macro-crate = "^3.4"
 proc-macro2 = "^1.0"
 quote = "^1.0"
 syn = { version = "^3.0", features = ["full"] }

@@ -31,9 +31,9 @@ use proc_macro::TokenStream;
 /// A `ws` route must declare only `GET` methods.
 ///
 /// A Controller uses one concrete Axum state type. State is extracted directly
-/// as `State<AppState>`; all enabled methods that use `State` must use that same
-/// type. The macro compares the written types and does not resolve aliases or
-/// renames, nor does it synthesize a root state from several `FromRef` child
+/// as `State<AppState>`; all enabled methods that use `State` must use that
+/// same type. The macro compares the written types and does not resolve aliases
+/// or renames, nor does it synthesize a root state from several `FromRef` child
 /// states. Put the values a Controller needs on the root state and read them
 /// from that value:
 ///

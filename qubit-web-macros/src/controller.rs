@@ -35,6 +35,7 @@ use internal::MappingArgs;
 use internal::Method;
 use internal::Route;
 use internal::RouteArgs;
+use internal::resolve_runtime_path;
 
 /// Expands a controller attribute into its implementation and route definition.
 ///
@@ -52,6 +53,8 @@ pub fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
 /// The input must be a non-generic inherent implementation with valid route
 /// attributes and compatible state extractor types.
 fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStream> {
+    let runtime = resolve_runtime_path()?;
+    let axum = quote! { #runtime::__private::axum };
     let prefix = parse2::<LitStr>(args)?;
     let mut implementation = parse2::<ItemImpl>(input)?;
     if implementation.trait_.is_some() {
@@ -170,7 +173,7 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
         let handler_name = controller_name.to_string().to_lowercase();
         let handler = format_ident!("__qubit_controller_handler_{}_{}", handler_name, methods.len());
         let cfg_attr = cfg_attribute(&cfg);
-        let handler_tokens = make_handler(method, &handler, &instance_name, &self_ty);
+        let handler_tokens = make_handler(method, &handler, &instance_name, &self_ty, &axum);
         declarations.push(quote! { #cfg_attr #handler_tokens });
         methods.push(Method { routes, handler, cfg });
     }
@@ -181,9 +184,9 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
             method.routes.iter().flat_map(|route| {
                 route.methods.iter().map(|verb| {
                     let path = &route.path;
-                    let kind = route_kind(&route.kind);
+                    let kind = route_kind(&route.kind, &runtime);
                     let cfg_attr = cfg_attribute(&method.cfg);
-                    quote! { #cfg_attr ::qubit_web::mvc::RouteMetadata::new(#verb, #path, #kind) }
+                    quote! { #cfg_attr #runtime::mvc::RouteMetadata::new(#verb, #path, #kind) }
                 })
             })
         })
@@ -223,6 +226,8 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
         }
     }
     let instance_name_ref = &instance_name;
+    let runtime_ref = &runtime;
+    let axum_ref = &axum;
     for (cfg_attr, impl_generics, state_type) in impl_specs {
         let state_type_ref = &state_type;
         let registrations = methods
@@ -234,17 +239,17 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
                     let strategy_layers = if route.kind == "short" {
                         quote! {
                             let route = route
-                                .layer(::qubit_web::RequestLimitLayer::from_state(limit_state.clone()))
-                                .layer(::qubit_web::diagnostic::DiagnosticLayer::new());
+                                .layer(#runtime_ref::RequestLimitLayer::from_state(limit_state.clone()))
+                                .layer(#runtime_ref::diagnostic::DiagnosticLayer::new());
                         }
                     } else {
                         quote! {
                             let route = route
-                                .layer(::qubit_web::StreamAdmissionLayer::from_state(stream_state.clone()))
-                                .layer(::qubit_web::diagnostic::DiagnosticLayer::new());
+                                .layer(#runtime_ref::StreamAdmissionLayer::from_state(stream_state.clone()))
+                                .layer(#runtime_ref::diagnostic::DiagnosticLayer::new());
                         }
                     };
-                    let filters = route.methods.iter().map(|verb| method_filter(verb));
+                    let filters = route.methods.iter().map(|verb| method_filter(verb, axum_ref));
                     let mut filters = filters.collect::<Vec<_>>().into_iter();
                     let first = filters.next().expect("route has methods");
                     let filter = filters.fold(first, |combined, next| quote! { #combined.or(#next) });
@@ -252,9 +257,9 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
                     quote! {
                         #method_cfg
                         {
-                            let route = ::axum::Router::<#state_type_ref>::new()
-                                .route(#path, ::axum::routing::on(#filter, #handler))
-                                .layer(::axum::Extension(#instance_name_ref(self.clone())));
+                            let route = #axum_ref::Router::<#state_type_ref>::new()
+                                .route(#path, #axum_ref::routing::on(#filter, #handler))
+                                .layer(#axum_ref::Extension(#instance_name_ref(self.clone())));
                             #strategy_layers
                             router = router.merge(route);
                         }
@@ -264,21 +269,21 @@ fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStrea
             .collect::<Vec<_>>();
         state_impls.push(quote! {
             #cfg_attr
-            impl #impl_generics ::qubit_web::mvc::ControllerDefinition<#state_type> for #self_ty
+            impl #impl_generics #runtime::mvc::ControllerDefinition<#state_type> for #self_ty
             where
                 #state_type: Clone + Send + Sync + 'static,
             {
-                fn route_metadata() -> &'static [::qubit_web::mvc::RouteMetadata] {
-                    static __QUBIT_ROUTES: &[::qubit_web::mvc::RouteMetadata] = &[#(#metadata),*];
+                fn route_metadata() -> &'static [#runtime::mvc::RouteMetadata] {
+                    static __QUBIT_ROUTES: &[#runtime::mvc::RouteMetadata] = &[#(#metadata),*];
                     __QUBIT_ROUTES
                 }
 
                 fn register(
                     self: ::std::sync::Arc<Self>,
-                    mut router: ::axum::Router<#state_type>,
-                    limit_state: ::qubit_web::limit::LimitState,
-                    stream_state: ::qubit_web::limit::StreamAdmissionState,
-                ) -> ::axum::Router<#state_type> {
+                    mut router: #axum::Router<#state_type>,
+                    limit_state: #runtime::limit::LimitState,
+                    stream_state: #runtime::limit::StreamAdmissionState,
+                ) -> #axum::Router<#state_type> {
                     #(#registrations)*
                     router
                 }
@@ -616,10 +621,8 @@ fn validate_method(method: &ImplItemFn) -> syn::Result<()> {
             "mapped controller methods must use `&self`",
         ));
     };
-    let immutable_reference = matches!(
-        &receiver.kind,
-        syn::ReceiverKind::Reference(_, _, None)
-    ) && receiver.mutability.is_none();
+    let immutable_reference =
+        matches!(&receiver.kind, syn::ReceiverKind::Reference(_, _, None)) && receiver.mutability.is_none();
     if !immutable_reference {
         return Err(syn::Error::new_spanned(
             receiver,
@@ -636,7 +639,13 @@ fn validate_method(method: &ImplItemFn) -> syn::Result<()> {
 }
 
 /// Generates an Axum handler that forwards extracted arguments to the method.
-fn make_handler(method: &ImplItemFn, handler: &syn::Ident, instance: &syn::Ident, self_ty: &Type) -> TokenStream {
+fn make_handler(
+    method: &ImplItemFn,
+    handler: &syn::Ident,
+    instance: &syn::Ident,
+    self_ty: &Type,
+    axum: &TokenStream,
+) -> TokenStream {
     let method_name = &method.sig.ident;
     let mut params = Vec::new();
     let mut args = Vec::new();
@@ -649,9 +658,9 @@ fn make_handler(method: &ImplItemFn, handler: &syn::Ident, instance: &syn::Ident
     }
     quote! {
         async fn #handler(
-            ::axum::Extension(__instance): ::axum::Extension<#instance<#self_ty>>,
+            #axum::Extension(__instance): #axum::Extension<#instance<#self_ty>>,
             #(#params),*
-        ) -> impl ::axum::response::IntoResponse + use<> {
+        ) -> impl #axum::response::IntoResponse + use<> {
             __instance.0.#method_name(#(#args),*).await
         }
     }
@@ -659,18 +668,18 @@ fn make_handler(method: &ImplItemFn, handler: &syn::Ident, instance: &syn::Ident
 
 /// Converts a validated strategy name into its generated `RouteKind`
 /// expression.
-fn route_kind(kind: &str) -> TokenStream {
+fn route_kind(kind: &str, runtime: &TokenStream) -> TokenStream {
     match kind {
-        "sse" => quote! { ::qubit_web::RouteKind::Sse },
-        "ws" => quote! { ::qubit_web::RouteKind::WebSocket },
-        _ => quote! { ::qubit_web::RouteKind::Short },
+        "sse" => quote! { #runtime::RouteKind::Sse },
+        "ws" => quote! { #runtime::RouteKind::WebSocket },
+        _ => quote! { #runtime::RouteKind::Short },
     }
 }
 
 /// Creates the Axum method-filter expression for a validated method name.
-fn method_filter(method: &str) -> TokenStream {
+fn method_filter(method: &str, axum: &TokenStream) -> TokenStream {
     let name = format_ident!("{}", method);
-    quote! { ::axum::routing::MethodFilter::#name }
+    quote! { #axum::routing::MethodFilter::#name }
 }
 
 #[cfg(test)]
@@ -681,21 +690,28 @@ mod tests {
 
     #[test]
     fn test_validate_method_preserves_receiver_contract() {
-        let shared: ImplItemFn = syn::parse_quote!(async fn route(&self) {});
+        let shared: ImplItemFn = syn::parse_quote!(
+            async fn route(&self) {}
+        );
         assert!(validate_method(&shared).is_ok());
 
         let invalid: [ImplItemFn; 4] = [
-            syn::parse_quote!(async fn route(&mut self) {}),
-            syn::parse_quote!(async fn route(mut self) {}),
-            syn::parse_quote!(async fn route(self) {}),
-            syn::parse_quote!(async fn route(self: Box<Self>) {}),
+            syn::parse_quote!(
+                async fn route(&mut self) {}
+            ),
+            syn::parse_quote!(
+                async fn route(mut self) {}
+            ),
+            syn::parse_quote!(
+                async fn route(self) {}
+            ),
+            syn::parse_quote!(
+                async fn route(self: Box<Self>) {}
+            ),
         ];
         for method in &invalid {
             let error = validate_method(method).expect_err("only immutable `&self` is supported");
-            assert_eq!(
-                error.to_string(),
-                "mapped controller methods must use `&self`",
-            );
+            assert_eq!(error.to_string(), "mapped controller methods must use `&self`",);
         }
     }
 }
