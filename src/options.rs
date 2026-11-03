@@ -148,7 +148,8 @@ impl ServerOptions {
     ///
     /// # Parameters
     ///
-    /// * `timeout` - Idle duration before an inactive transport is closed.
+    /// * `timeout` - Idle duration before an inactive transport is closed; it
+    ///   must form a representable Tokio deadline.
     ///
     /// # Returns
     ///
@@ -193,13 +194,13 @@ impl ServerOptions {
     ///
     /// # Returns
     ///
-    /// `Ok(())` when all timeouts are positive, the shutdown and request-header
-    /// deadlines can be represented by Tokio, and connection limits are valid.
+    /// `Ok(())` when all timeouts are positive and form representable Tokio
+    /// deadlines, and connection limits are valid.
     ///
     /// # Errors
     ///
     /// Returns [`WebServerError::InvalidConfig`] if a timeout is zero, the
-    /// shutdown or request-header deadline cannot be represented by Tokio, or
+    /// any timeout deadline cannot be represented by Tokio, or
     /// the transport capacity exceeds `tokio::sync::Semaphore::MAX_PERMITS`.
     pub fn validate(&self) -> Result<(), WebServerError> {
         if self.shutdown_timeout.is_zero()
@@ -209,6 +210,9 @@ impl ServerOptions {
                 .checked_add(self.request_header_timeout)
                 .is_none()
             || self.transport_idle_timeout.is_zero()
+            || tokio::time::Instant::now()
+                .checked_add(self.transport_idle_timeout)
+                .is_none()
         {
             return Err(WebServerError::InvalidConfig);
         }
@@ -267,6 +271,12 @@ mod tests {
         assert!(
             ServerOptions::new(address)
                 .with_transport_idle_timeout(Duration::ZERO)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            ServerOptions::new(address)
+                .with_transport_idle_timeout(Duration::MAX)
                 .validate()
                 .is_err()
         );

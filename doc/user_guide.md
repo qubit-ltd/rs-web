@@ -42,7 +42,7 @@ let options = ServerOptions::new("127.0.0.1:3001".parse()?)
 assert_eq!(options.transport_idle_timeout(), Duration::from_secs(45));
 ```
 
-An active handler or response body pauses the idle timer, so long-lived SSE is not closed by this timeout. It also reclaims an HTTP/2 connection that never starts a request. HTTP/2 PING traffic does not count as request activity. With `config`, `transport.idle_timeout_ms` sets the same value and defaults to `30000`; zero is invalid. `request_header_timeout` remains a separate 10-second HTTP/1 header and TLS handshake limit.
+An active handler or response body pauses the idle timer, so long-lived SSE is not closed by this timeout. It also reclaims an HTTP/2 connection that never starts a request. HTTP/2 PING traffic does not count as request activity. The timeout must be positive and form a representable Tokio deadline; `Duration::MAX` is rejected. With `config`, `transport.idle_timeout_ms` sets the same value and defaults to `30000`; zero and values that cannot form a deadline are invalid. `request_header_timeout` remains a separate 10-second HTTP/1 header and TLS handshake limit.
 
 With the optional `config` feature, parse settings and keep route policy separate:
 
@@ -408,7 +408,7 @@ tokio::select! {
 
 Here `process_next_item` and `apply_result` belong to the application. If `ended` wins, `close()` discards unread queued messages. The notification does not mean that a Close frame reached the peer or that the handler, business work, or spawned tasks have finished. Work that must continue should take ownership of its required input and be managed separately by the application.
 
-`WsUpgradePolicy::validate()` checks the final configured field values, so a later setter value replaces an earlier invalid value for validation. The valid `max_connections` and `inbound_queue_limits` message-count ranges are `1..=tokio::sync::Semaphore::MAX_PERMITS`; zero returns `WsPolicyError::ZeroLimit`, while an oversized connection limit returns `WsPolicyError::ConnectionLimitTooLarge` and an oversized inbound message count returns `WsPolicyError::InboundQueueLimitTooLarge`. The inbound byte budget must also be positive. Callers that exhaustively match `WsPolicyError` should add a branch for `InboundQueueLimitTooLarge`. An invalid policy is rejected by `on_upgrade` with HTTP 500 and cannot upgrade. For example, correcting a zero value before validation succeeds:
+`WsUpgradePolicy::validate()` checks the final configured field values, so a later setter value replaces an earlier invalid value for validation. The valid `max_connections` and `inbound_queue_limits` message-count ranges are `1..=tokio::sync::Semaphore::MAX_PERMITS`; zero returns `WsPolicyError::ZeroLimit`, while an oversized connection limit returns `WsPolicyError::ConnectionLimitTooLarge` and an oversized inbound message count returns `WsPolicyError::InboundQueueLimitTooLarge`. The inbound byte budget must also be positive. An idle timeout that cannot form a Tokio deadline returns `WsPolicyError::IdleTimeoutTooLarge`. Callers that exhaustively match `WsPolicyError` should add branches for `InboundQueueLimitTooLarge` and `IdleTimeoutTooLarge`, or use a fallback branch. An invalid policy is rejected by `on_upgrade` with HTTP 500 and cannot upgrade. For example, correcting a zero value before validation succeeds:
 
 ```rust,ignore
 assert!(WsUpgradePolicy::new()

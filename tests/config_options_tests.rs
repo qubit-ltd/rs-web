@@ -230,6 +230,18 @@ fn rejects_zero_or_malformed_transport_idle_timeout_by_field() {
 }
 
 #[test]
+fn configured_transport_idle_timeout_uses_the_field_specific_deadline_check() {
+    let timeout = std::time::Duration::from_millis(u64::MAX);
+    if tokio::time::Instant::now().checked_add(timeout).is_none() {
+        let mut config = Config::new();
+        config.set("address", "127.0.0.1:0").unwrap();
+        config.set("transport.idle_timeout_ms", u64::MAX).unwrap();
+        let error = ConfiguredWeb::from_config(&config).unwrap_err();
+        assert_eq!(error.field(), "transport.idle_timeout_ms");
+    }
+}
+
+#[test]
 fn rejects_configured_semaphore_capacity_above_maximum() {
     let invalid = u64::try_from(tokio::sync::Semaphore::MAX_PERMITS).expect("Tokio semaphore maximum fits u64") + 1;
     for field in ["http.max_concurrent_requests", "transport.max_connections"] {

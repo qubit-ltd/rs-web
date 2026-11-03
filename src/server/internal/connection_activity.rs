@@ -51,7 +51,11 @@ impl ConnectionActivity {
                             return;
                         }
                     }
-                    _ = tokio::time::sleep(timeout) => return,
+                    _ = async {
+                        if let Some(deadline) = tokio::time::Instant::now().checked_add(timeout) {
+                            tokio::time::sleep_until(deadline).await;
+                        }
+                    } => return,
                 }
             } else if active.changed().await.is_err() {
                 return;
@@ -72,4 +76,23 @@ pub(super) fn retain_response_activity(body: Body, lease: ActivityLease) -> Body
 /// Acquires a request lease from the connection tracker.
 pub(super) fn request_lease(activity: &ConnectionActivity) -> ActivityLease {
     activity.acquire()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    use super::ConnectionActivity;
+
+    #[tokio::test]
+    async fn unrepresentable_idle_deadline_ends_the_wait_immediately() {
+        timeout(
+            Duration::from_millis(100),
+            ConnectionActivity::new().wait_until_idle_for(Duration::MAX),
+        )
+        .await
+        .expect("an unrepresentable idle deadline must not create an unbounded wait");
+    }
 }

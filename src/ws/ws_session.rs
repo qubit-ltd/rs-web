@@ -17,6 +17,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use tokio::time::timeout_at;
 use tokio_util::sync::CancellationToken;
 
 use super::internal::InboundMessage;
@@ -113,17 +114,18 @@ impl WsSession {
         if self.explicitly_closed {
             return None;
         }
-        let message = select! {
-            biased;
-            _ = self.shutdown.cancelled() => {
-                None
-            }
-            message = timeout(self.idle_timeout, self.incoming.recv()) => {
-                match message {
-                    Ok(message) => message.map(InboundMessage::into_message),
-                    Err(_) => None,
+        let message = match tokio::time::Instant::now().checked_add(self.idle_timeout) {
+            Some(deadline) => select! {
+                biased;
+                _ = self.shutdown.cancelled() => None,
+                message = timeout_at(deadline, self.incoming.recv()) => {
+                    match message {
+                        Ok(message) => message.map(InboundMessage::into_message),
+                        Err(_) => None,
+                    }
                 }
-            }
+            },
+            None => None,
         };
         if message.is_some() {
             return message.map(Ok);
@@ -343,5 +345,31 @@ mod tests {
             "first read error should survive cancellation"
         );
         assert!(session.recv().await.is_none(), "read error should be consumed once");
+    }
+
+    #[tokio::test]
+    async fn unrepresentable_recv_deadline_returns_none_and_cleans_up() {
+        let (incoming_tx, incoming) = mpsc::channel(1);
+        let mut session = WsSession {
+            incoming,
+            inbound_state: Arc::new(InboundState::new(1024)),
+            explicitly_closed: false,
+            queue: WsSendQueue::new(1, 1024),
+            shutdown: CancellationToken::new(),
+            closed: CancellationToken::new(),
+            idle_timeout: Duration::MAX,
+            shutdown_timeout: Duration::from_millis(20),
+            writer: Some(tokio::spawn(async {})),
+            reader: Some(tokio::spawn(async {})),
+        };
+
+        let message = timeout(Duration::from_millis(100), session.recv())
+            .await
+            .expect("unrepresentable recv deadline must return promptly");
+
+        assert!(message.is_none());
+        assert!(session.writer.is_none());
+        assert!(session.reader.is_none());
+        drop(incoming_tx);
     }
 }

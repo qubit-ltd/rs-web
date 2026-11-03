@@ -269,12 +269,13 @@ impl WsUpgradePolicy {
     /// # Parameters
     ///
     /// * `timeout` - Positive maximum interval without a received frame or
-    ///   successful delivery of a frame to the application.
+    ///   successful delivery of a frame to the application, and a duration that
+    ///   can form a representable Tokio deadline.
     ///
     /// # Returns
     ///
-    /// The updated policy; zero is reported by `validate`. A later call
-    /// replaces this value, including an invalid one.
+    /// The updated policy; zero and unrepresentable deadlines are reported by
+    /// `validate`. A later call replaces this value, including an invalid one.
     pub fn idle_timeout(self, timeout: Duration) -> Self {
         self.map_inner(|inner| {
             inner.idle_timeout = timeout;
@@ -299,7 +300,9 @@ impl WsUpgradePolicy {
     /// [`WsPolicyError::ConnectionLimitTooLarge`] when the connection limit
     /// exceeds Semaphore's maximum, or
     /// [`WsPolicyError::InboundQueueLimitTooLarge`] when the inbound queue
-    /// capacity exceeds Tokio's channel limit.
+    /// capacity exceeds Tokio's channel limit, or
+    /// [`WsPolicyError::IdleTimeoutTooLarge`] when the idle timeout cannot form
+    /// a Tokio deadline.
     pub fn validate(&self) -> Result<(), WsPolicyError> {
         if self.inner.max_connections == 0 {
             return Err(WsPolicyError::ZeroLimit);
@@ -319,6 +322,12 @@ impl WsUpgradePolicy {
         }
         if self.inner.inbound_queue_messages > Semaphore::MAX_PERMITS {
             return Err(WsPolicyError::InboundQueueLimitTooLarge);
+        }
+        if tokio::time::Instant::now()
+            .checked_add(self.inner.idle_timeout)
+            .is_none()
+        {
+            return Err(WsPolicyError::IdleTimeoutTooLarge);
         }
         Ok(())
     }

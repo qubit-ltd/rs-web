@@ -19,7 +19,7 @@ use futures_util::stream::SplitStream;
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::time::timeout;
+use tokio::time::error::Elapsed;
 use tokio::time::timeout_at;
 use tokio_util::sync::CancellationToken;
 
@@ -30,6 +30,18 @@ use super::SessionResources;
 use super::close::get_close_deadline;
 use crate::ws::internal::CloseQueueOnDrop;
 use crate::ws::ws_send_queue::WsSendQueue;
+
+enum ReaderWaitResult {
+    Timed(Result<Option<Result<Message, Error>>, Elapsed>),
+    IdleDeadlineUnrepresentable,
+}
+
+fn reader_deadline(
+    shutdown_deadline: Option<tokio::time::Instant>,
+    idle_timeout: Duration,
+) -> Option<tokio::time::Instant> {
+    shutdown_deadline.or_else(|| tokio::time::Instant::now().checked_add(idle_timeout))
+}
 
 /// Reader-owned state and resources retained for the entire reader task.
 pub(in crate::ws) struct ReaderContext {
@@ -95,12 +107,24 @@ pub(in crate::ws) async fn reader_loop(
                 continue;
             }
             result = async {
-                if let Some(deadline) = deadline {
-                    timeout_at(deadline, stream.next()).await
-                } else {
-                    timeout(idle_timeout, stream.next()).await
+                match reader_deadline(deadline, idle_timeout) {
+                    Some(deadline) => ReaderWaitResult::Timed(timeout_at(deadline, stream.next()).await),
+                    None => ReaderWaitResult::IdleDeadlineUnrepresentable,
                 }
             } => result,
+        };
+        let next = match next {
+            ReaderWaitResult::Timed(result) => result,
+            ReaderWaitResult::IdleDeadlineUnrepresentable => {
+                lifecycle.close_code.store(1001, Ordering::Release);
+                deadline = Some(get_close_deadline(
+                    &lifecycle.close_deadline,
+                    lifecycle.server_deadline.as_ref(),
+                    lifecycle.shutdown_timeout,
+                ));
+                lifecycle.shutdown.cancel();
+                continue;
+            }
         };
         match next {
             Ok(Some(Ok(message @ Message::Ping(_)))) => {
@@ -277,21 +301,35 @@ async fn deliver_incoming(
     select! {
         biased;
         _ = shutdown.cancelled() => DeliveryResult::Cancelled,
-        result = timeout(idle_timeout, incoming.send(message)) => match result {
-            Ok(Ok(())) => DeliveryResult::Delivered,
-            Ok(Err(_)) => DeliveryResult::ReceiverClosed,
-            Err(_) => DeliveryResult::TimedOut,
+        result = async {
+            let deadline = tokio::time::Instant::now().checked_add(idle_timeout)?;
+            Some(timeout_at(deadline, incoming.send(message)).await)
+        } => match result {
+            None => DeliveryResult::TimedOut,
+            Some(Ok(Ok(()))) => DeliveryResult::Delivered,
+            Some(Ok(Err(_))) => DeliveryResult::ReceiverClosed,
+            Some(Err(_)) => DeliveryResult::TimedOut,
         },
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use axum::Error;
+    use axum::extract::ws::Message;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
     use tungstenite::Error as WebSocketError;
     use tungstenite::error::CapacityError;
 
     use super::close_code_for_read_error;
+    use super::deliver_incoming;
+    use super::reader_deadline;
+    use crate::ws::internal::DeliveryResult;
+    use crate::ws::internal::InboundState;
 
     #[test]
     fn test_close_code_for_read_error_uses_capacity_type() {
@@ -306,5 +344,23 @@ mod tests {
 
         let other_websocket_error = Error::new(WebSocketError::ConnectionClosed);
         assert_eq!(close_code_for_read_error(&other_websocket_error), 1002);
+    }
+
+    #[test]
+    fn unrepresentable_reader_idle_deadline_is_detected() {
+        assert!(reader_deadline(None, Duration::MAX).is_none());
+    }
+
+    #[tokio::test]
+    async fn unrepresentable_delivery_deadline_uses_the_timeout_path() {
+        let state = Arc::new(InboundState::new(8));
+        let message = state
+            .try_wrap(Message::Text("payload".into()))
+            .expect("the test message fits the inbound budget");
+        let (incoming, _receiver) = mpsc::channel(1);
+
+        let result = deliver_incoming(&incoming, &CancellationToken::new(), message, Duration::MAX).await;
+
+        assert!(matches!(result, DeliveryResult::TimedOut));
     }
 }

@@ -92,7 +92,12 @@ impl ConfiguredWeb {
             .get_optional::<u64>("transport.idle_timeout_ms")
             .map_err(|_| ConfigOptionsError::new("transport.idle_timeout_ms"))?
             .unwrap_or(30_000);
-        if transport_idle_timeout_ms == 0 {
+        let transport_idle_timeout = Duration::from_millis(transport_idle_timeout_ms);
+        if transport_idle_timeout.is_zero()
+            || tokio::time::Instant::now()
+                .checked_add(transport_idle_timeout)
+                .is_none()
+        {
             return Err(ConfigOptionsError::new("transport.idle_timeout_ms"));
         }
 
@@ -129,7 +134,7 @@ impl ConfiguredWeb {
 
         let server_options = ServerOptions::new(address)
             .with_shutdown_timeout(Duration::from_millis(shutdown_timeout_ms))
-            .with_transport_idle_timeout(Duration::from_millis(transport_idle_timeout_ms))
+            .with_transport_idle_timeout(transport_idle_timeout)
             .with_max_transport_connections(
                 usize::try_from(max_transport_connections)
                     .map_err(|_| ConfigOptionsError::new("transport.max_connections"))?,

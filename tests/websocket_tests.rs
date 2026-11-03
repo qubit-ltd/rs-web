@@ -679,6 +679,17 @@ fn test_corrected_policy_limits_are_valid() {
             .validate(),
         Ok(())
     );
+    assert_eq!(
+        WsUpgradePolicy::new().idle_timeout(Duration::MAX).validate(),
+        Err(WsPolicyError::IdleTimeoutTooLarge)
+    );
+    assert_eq!(
+        WsUpgradePolicy::new()
+            .idle_timeout(Duration::MAX)
+            .idle_timeout(Duration::from_millis(10))
+            .validate(),
+        Ok(())
+    );
 
     assert_eq!(
         WsUpgradePolicy::new()
