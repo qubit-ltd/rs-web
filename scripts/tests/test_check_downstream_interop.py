@@ -116,6 +116,68 @@ class CheckerSafetyTests(unittest.TestCase):
         with self.assertRaises(checker.InteropError):
             checker.assert_resolved_source(data, self.downstream.resolve(), self.upstream.resolve())
 
+    def test_wss_option_is_explicit_and_off_by_default(self):
+        parser = checker.build_parser()
+        self.assertFalse(parser.parse_args(self._args()).with_wss)
+        self.assertTrue(parser.parse_args(self._args() + ["--with-wss"]).with_wss)
+
+    def test_wss_manifest_overrides_only_the_two_direct_local_dependencies(self):
+        fixture = self.root / "wss-fixture"
+        source = SCRIPT.parents[1] / "tests" / "fixtures" / "wss_consumer"
+        generated = checker.prepare_wss_fixture(source, fixture, self.upstream, self.downstream)
+        manifest = checker._read_manifest(generated)
+        self.assertEqual(manifest["dependencies"]["qubit-web"]["path"], str(self.upstream.resolve()))
+        self.assertEqual(manifest["dependencies"]["qubit-websocket"]["path"], str(self.downstream.resolve()))
+        self.assertEqual(manifest["dependencies"]["qubit-web"]["features"], ["ws", "tls"])
+        self.assertFalse((generated / "Cargo.lock").exists())
+        self.assertTrue((generated / "tests" / "wss_interop.rs").is_file())
+        self.assertTrue((generated.parent / "tls" / "https-h2-cert.pem").is_file())
+
+    def test_wss_metadata_checks_both_direct_paths_and_sources(self):
+        upstream_manifest = str((self.upstream / "Cargo.toml").resolve())
+        downstream_manifest = str((self.downstream / "Cargo.toml").resolve())
+        metadata = {
+            "packages": [
+                {"id": "up", "name": "qubit-web", "manifest_path": upstream_manifest, "source": None},
+                {"id": "down", "name": "qubit-websocket", "manifest_path": downstream_manifest, "source": None},
+                {"id": "fixture", "name": "qubit-web-wss-consumer", "manifest_path": "/tmp/wss/Cargo.toml", "source": None},
+            ],
+            "resolve": {"nodes": [{"id": "fixture", "deps": [
+                {"name": "qubit_web", "pkg": "up"},
+                {"name": "qubit_websocket", "pkg": "down"},
+            ]}]},
+        }
+        paths = checker.assert_wss_resolved_sources(metadata, Path("/tmp/wss/Cargo.toml"), self.upstream, self.downstream)
+        self.assertEqual(paths, (self.upstream.resolve() / "Cargo.toml", self.downstream.resolve() / "Cargo.toml"))
+        metadata["packages"][1]["source"] = "git+https://example.invalid"
+        with self.assertRaises(checker.InteropError):
+            checker.assert_wss_resolved_sources(metadata, Path("/tmp/wss/Cargo.toml"), self.upstream, self.downstream)
+        metadata["packages"][1].update(manifest_path=downstream_manifest, source=None)
+        metadata["resolve"]["nodes"][0]["deps"].pop()
+        with self.assertRaises(checker.InteropError):
+            checker.assert_wss_resolved_sources(metadata, Path("/tmp/wss/Cargo.toml"), self.upstream, self.downstream)
+
+    def test_ws_failure_propagates_without_running_wss(self):
+        calls = []
+
+        def fake_run(command, *args, **kwargs):
+            calls.append(command)
+            if "update" in command:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if "metadata" in command:
+                return mock.Mock(returncode=0, stdout=json.dumps(self._metadata_old_source()), stderr="")
+            return mock.Mock(returncode=17)
+
+        metadata = self._metadata_old_source()
+        metadata["packages"][0].update(manifest_path=str((self.upstream / "Cargo.toml").resolve()), source=None)
+        with mock.patch.object(checker, "_validate_paths", return_value=(self.upstream.resolve(), self.downstream.resolve())), \
+             mock.patch.object(checker.subprocess, "run", side_effect=fake_run):
+            with mock.patch.object(checker.json, "loads", return_value=metadata):
+                self.assertEqual(checker.run(str(self.upstream), str(self.downstream), str(self.marker), True), 17)
+        cargo_calls = [command for command in calls if command[0] == "cargo"]
+        self.assertEqual(len(cargo_calls), 3)
+        self.assertNotIn("wss_interop", str(cargo_calls))
+
 
 if __name__ == "__main__":
     unittest.main()

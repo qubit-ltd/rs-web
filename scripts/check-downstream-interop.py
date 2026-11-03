@@ -7,6 +7,8 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -125,6 +127,92 @@ def assert_resolved_source(metadata: dict, downstream: Path, upstream: Path) -> 
     return actual_manifest
 
 
+def assert_wss_resolved_sources(metadata: dict, fixture_manifest: Path, upstream: Path, downstream: Path):
+    """Require the WSS fixture's two direct dependencies to resolve to local checkouts."""
+    packages_by_id = {package.get("id"): package for package in metadata.get("packages", [])}
+    consumers = [
+        package for package in metadata.get("packages", [])
+        if package.get("name") == "qubit-web-wss-consumer"
+        and Path(package.get("manifest_path", "")).resolve() == fixture_manifest.resolve()
+    ]
+    if len(consumers) != 1:
+        raise InteropError(f"metadata did not identify one WSS fixture at {fixture_manifest}")
+    nodes = {node.get("id"): node for node in metadata.get("resolve", {}).get("nodes", [])}
+    node = nodes.get(consumers[0].get("id"))
+    if node is None:
+        raise InteropError("metadata resolve graph has no node for the WSS fixture")
+    direct = {}
+    for dependency in node.get("deps", []):
+        name = dependency.get("name", "").replace("-", "_")
+        if name in {"qubit_web", "qubit_websocket"}:
+            direct.setdefault(name, set()).add(dependency.get("pkg"))
+    expected = {
+        "qubit_web": (upstream / "Cargo.toml").resolve(),
+        "qubit_websocket": (downstream / "Cargo.toml").resolve(),
+    }
+    resolved = []
+    for name, manifest in expected.items():
+        ids = direct.get(name, set())
+        packages = [packages_by_id[package_id] for package_id in ids if package_id in packages_by_id]
+        if len(ids) != 1 or len(packages) != 1 or packages[0].get("name") != name.replace("_", "-"):
+            raise InteropError(f"WSS fixture direct dependency {name} did not resolve uniquely: {sorted(ids)}")
+        package = packages[0]
+        actual = Path(package.get("manifest_path", "")).resolve()
+        if actual != manifest or package.get("source") is not None:
+            raise InteropError(
+                f"WSS fixture {name} resolved to manifest_path={actual}, source={package.get('source')!r}; "
+                f"expected manifest_path={manifest}, source=None"
+            )
+        resolved.append(actual)
+    return tuple(resolved)
+
+
+def prepare_wss_fixture(source: Path, destination: Path, upstream: Path, downstream: Path) -> Path:
+    """Copy the fixed WSS tests and strictly override only their two direct dependencies."""
+    source_manifest = _read_manifest(source)
+    dependencies = source_manifest.get("dependencies", {})
+    for dependency in ("qubit-web", "qubit-websocket"):
+        if not isinstance(dependencies.get(dependency), dict):
+            raise InteropError(f"WSS fixture must declare {dependency} as a table dependency")
+    destination.mkdir(parents=True, exist_ok=False)
+    tests_path = source / "tests"
+    if tests_path.exists():
+        shutil.copytree(tests_path, destination / "tests")
+    tls_path = source.parent / "tls"
+    if tls_path.exists():
+        shutil.copytree(tls_path, destination.parent / "tls")
+    else:
+        raise InteropError(f"fixed WSS TLS assets are missing: {tls_path}")
+    manifest_text = (source / "Cargo.toml").read_text(encoding="utf-8")
+    replacements = {
+        "qubit-web": str(upstream.resolve()),
+        "qubit-websocket": str(downstream.resolve()),
+    }
+    def toml_value(value):
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, str):
+            return json.dumps(value)
+        if isinstance(value, list):
+            return "[" + ", ".join(toml_value(item) for item in value) + "]"
+        raise InteropError(f"unsupported WSS dependency setting: {value!r}")
+
+    for name, path in replacements.items():
+        pattern = rf'(?m)^(\s*{re.escape(name)}\s*=\s*\{{)([^\n]*)(\}}\s*)$'
+        matches = list(re.finditer(pattern, manifest_text))
+        if len(matches) != 1:
+            raise InteropError(f"expected one structured Cargo.toml dependency line for {name}")
+        table = dependencies[name]
+        preserved = {key: value for key, value in table.items() if key not in {"path", "git", "rev", "branch", "tag"}}
+        rendered_fields = [f"path = {json.dumps(path)}"]
+        rendered_fields.extend(f"{key} = {toml_value(value)}" for key, value in preserved.items())
+        manifest_text = manifest_text[:matches[0].start()] + (
+            matches[0].group(1) + " " + ", ".join(rendered_fields) + " " + matches[0].group(3)
+        ) + manifest_text[matches[0].end():]
+    (destination / "Cargo.toml").write_text(manifest_text, encoding="utf-8")
+    return destination
+
+
 def _git_revision(directory: Path) -> str:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=directory, text=True,
@@ -135,7 +223,7 @@ def _git_revision(directory: Path) -> str:
     return result.stdout.strip()
 
 
-def run(upstream_arg: str, downstream_arg: str, marker_arg: str) -> int:
+def run(upstream_arg: str, downstream_arg: str, marker_arg: str, with_wss: bool = False) -> int:
     upstream, downstream = _validate_paths(upstream_arg, downstream_arg, marker_arg)
     with tempfile.TemporaryDirectory(prefix="rs-web-downstream-interop-") as temporary:
         temporary_path = Path(temporary)
@@ -183,17 +271,49 @@ def run(upstream_arg: str, downstream_arg: str, marker_arg: str) -> int:
         environment["CARGO_TARGET_DIR"] = str(target_path)
         result = subprocess.run(test_command, cwd=downstream, env=environment, check=False)
         print(f"web_interop_tests exit code: {result.returncode}")
-        return result.returncode
+        if result.returncode != 0 or not with_wss:
+            return result.returncode
+        fixture_source = upstream / "tests" / "fixtures" / "wss_consumer"
+        fixture = prepare_wss_fixture(fixture_source, temporary_path / "wss_consumer", upstream, downstream)
+        fixture_manifest = fixture / "Cargo.toml"
+        wss_metadata_command = ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(fixture_manifest)]
+        wss_metadata_result = subprocess.run(
+            wss_metadata_command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        if wss_metadata_result.returncode != 0:
+            raise InteropError(
+                f"WSS cargo metadata failed with exit {wss_metadata_result.returncode}:\n{wss_metadata_result.stderr}"
+            )
+        try:
+            wss_metadata = json.loads(wss_metadata_result.stdout)
+        except json.JSONDecodeError as error:
+            raise InteropError(f"WSS cargo metadata returned invalid JSON: {error}") from error
+        web_manifest, websocket_manifest = assert_wss_resolved_sources(
+            wss_metadata, fixture_manifest, upstream, downstream,
+        )
+        print(f"resolved WSS qubit-web manifest: {web_manifest} (source=None)")
+        print(f"resolved WSS qubit-websocket manifest: {websocket_manifest} (source=None)")
+        wss_command = [
+            "cargo", "test", "--manifest-path", str(fixture_manifest), "--test", "wss_interop",
+        ]
+        wss_result = subprocess.run(wss_command, env=environment, check=False)
+        print(f"wss_interop exit code: {wss_result.returncode}")
+        return wss_result.returncode
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--upstream", required=True, help="absolute rs-web checkout path")
     parser.add_argument("--downstream", required=True, help="absolute disposable rs-websocket checkout path")
     parser.add_argument("--disposable-marker", required=True, help="external marker naming the disposable checkout")
-    arguments = parser.parse_args(argv)
+    parser.add_argument("--with-wss", action="store_true", help="also run the current-source WSS fixture")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = build_parser().parse_args(argv)
     try:
-        return run(arguments.upstream, arguments.downstream, arguments.disposable_marker)
+        return run(arguments.upstream, arguments.downstream, arguments.disposable_marker, arguments.with_wss)
     except InteropError as error:
         print(f"downstream interop check failed: {error}", file=sys.stderr)
         return 1

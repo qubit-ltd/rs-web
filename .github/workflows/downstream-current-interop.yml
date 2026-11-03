@@ -39,10 +39,11 @@ jobs:
           DOWNSTREAM_PATH: ${{ github.workspace }}/interop/rs-websocket
           MARKER_PATH: ${{ runner.temp }}/rs-websocket-disposable-checkout.marker
         run: python3 -c 'import os; from pathlib import Path; Path(os.environ["MARKER_PATH"]).write_text(str(Path(os.environ["DOWNSTREAM_PATH"]).resolve()) + "\n", encoding="utf-8")'
-      - name: Test current downstream WebSocket consumer against current upstream
+      - name: Test current downstream WS and WSS consumers against current upstream
         working-directory: interop/rs-websocket
         run: >-
           python3 "$GITHUB_WORKSPACE/interop/rs-web/scripts/check-downstream-interop.py"
           --upstream "$GITHUB_WORKSPACE/interop/rs-web"
           --downstream "$GITHUB_WORKSPACE/interop/rs-websocket"
           --disposable-marker "$RUNNER_TEMP/rs-websocket-disposable-checkout.marker"
+          --with-wss
