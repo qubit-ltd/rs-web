@@ -78,6 +78,8 @@ curl -i -X POST http://127.0.0.1:3000/admin/shutdown
 
 The first request returns `200 OK` with body `ok`; the second returns `202 Accepted` and signals the shutdown future passed to `serve`. The example binds only to loopback. The request limit is attached only to the short `/health` route; `WebServer` serves the Router as supplied and does not install HTTP limits implicitly. The shutdown route is an unauthenticated demonstration endpoint and should not be exposed beyond loopback.
 
+Each HTTP/2 connection advertises a concurrent-stream limit of 200 by default. Set a different per-connection value with `ServerOptions::with_http2_max_concurrent_streams`, or with `transport.http2_max_concurrent_streams` when using `config`. This is a protocol stream limit, not a process-wide request, connection, or memory cap.
+
 For the separate in-memory CRUD example, run `cargo run --example controller_crud --all-features`. Its `/users` route belongs to that example, not the minimal service above. Creating a user there returns `201 Created`; see [`examples/controller_crud.rs`](examples/controller_crud.rs) for replacing Controller short-route defaults with `ControllerRoutes::with_http_limits`. For native Axum routes, install `RequestLimitLayer::new(http_limits)` on selected short branches and `StreamAdmissionLayer` on SSE/WS branches. Controller `sse` and `ws` routes use a separate stream-admission budget.
 
 When using the `config` feature, `ConfiguredWeb::from_config` returns `ServerOptions` and `HttpLimits` as separate values. Controller short routes already have `HttpLimits::default()`; pass the configured limits to `with_http_limits` to replace that policy. For native Axum routes, install `RequestLimitLayer` on selected short branches and `StreamAdmissionLayer` on SSE/WS branches. `WebServer` does not apply either policy to the Router.
@@ -141,7 +143,7 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the f
 
 ## Contributing
 
-Contributions are welcome. Run `./.infra/bin/style-check.sh` for style checks and `./.infra/bin/ci-check.sh` for the crate's full acceptance checks before submitting a pull request. The [WebSocket interoperability workflow](.github/workflows/downstream-interop.yml) tests this crate's WebSocket contracts and a fixed rs-websocket consumer against the current rs-web source. Please open an [issue](https://github.com/qubit-ltd/rs-web/issues) to discuss a change or submit a [pull request](https://github.com/qubit-ltd/rs-web/pulls).
+Contributions are welcome. Run `./.infra/bin/style-check.sh` for style checks and `./.infra/bin/ci-check.sh` for the crate's full acceptance checks before submitting a pull request. The [fixed interoperability workflow](.github/workflows/downstream-interop.yml) preserves the pinned consumer baseline. The separate [current-consumer WS workflow](.github/workflows/downstream-current-interop.yml) checks rs-websocket `main` weekly or on manual dispatch; it covers WS, not current-consumer WSS. Please open an [issue](https://github.com/qubit-ltd/rs-web/issues) to discuss a change or submit a [pull request](https://github.com/qubit-ltd/rs-web/pulls).
 
 ## Author
 

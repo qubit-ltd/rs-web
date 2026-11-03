@@ -35,6 +35,7 @@ accept 遇到可重试的 socket I/O 错误时，最多连续重试 8 次，等�
 | 容量域 | 默认值 | 范围与超限行为 |
 | --- | --- | --- |
 | 已接收的传输连接 | 每个 `WebServer` 1,024 个 | 配置值必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。包含 TLS 握手和 HTTP connection future。达到上限时 accept 循环暂停接收；客户端可能等待操作系统 backlog，也可能连接失败；不会生成 HTTP 503。 |
+| HTTP/2 并发流 | 每条连接 200 个 | 可通过 `ServerOptions::with_http2_max_concurrent_streams` 或 `config` 的 `transport.http2_max_concurrent_streams`（`1..=u32::MAX`）设置。这是每连接的协议上限，与传输连接、路由和会话额度独立；不是进程级请求数、header 字节或内存预算。 |
 | Controller 短请求 | 每个 `ControllerRoutes` builder 同时 256 个 | 配置值必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。`ControllerRoutes::new()` 默认采用 `HttpLimits::default()`：每个请求体 1 MiB，handler/响应体期限 30 秒。期限到达时会主动释放应用响应体和短请求许可，无需等待再次轮询。响应头发出后，超时只能在传输再次轮询时通过 body error 体现，不会关闭连接。`with_http_limits` 替换这些默认值，应在添加 Controller 前调用。每个 builder 的路由共享自己的状态。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 不安装路由限额。容量耗尽时返回容量拒绝。 |
 | SSE 连接 | 每个 `SseConnectionPolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。容量耗尽与停服拒绝分别报告。 |
 | WebSocket 连接 | 每个 `WsUpgradePolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。策略按最终字段值校验；`max_connections` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`，零值对应 `WsPolicyError::ZeroLimit`，超上限对应 `ConnectionLimitTooLarge`。`inbound_queue_limits` 的消息条数接受 `1..=Semaphore::MAX_PERMITS`，字节数必须为正；条数超上限返回 `WsPolicyError::InboundQueueLimitTooLarge`。穷尽匹配该枚举的调用方需增加此分支。接纳失败会在会话纳入管理前拒绝。 |
@@ -56,11 +57,11 @@ SSE 和 WebSocket 都是长连接路由，不应套用短请求并发/期限中�
 
 ## 超时、停服与配置
 
-`ServerOptions` 默认将 HTTP/1 请求头及 TLS 握手期限设为 10 秒，将传输空闲期限和优雅停服期限各设为 30 秒。仅在没有活跃请求 handler 或响应体时，空闲期限才会关闭 TCP/TLS 连接；它不会限制已经开始但停滞的活跃请求。长连接响应体活跃期间，传输空闲计时暂停。
+`ServerOptions` 默认每条连接最多同时开启 200 个 HTTP/2 流，HTTP/1 请求头及 TLS 握手期限为 10 秒，传输空闲期限和优雅停服期限各为 30 秒。HTTP/1 请求头期限不是 HTTP/2 header block 的期限。WEB-004 协议实验中，第二条流的合法请求头尚未结束时 SSE 仍继续发送；实验未测量长期资源保留情况。版本化源码检查和实验见[核查报告](http2-resource-investigation-20261103.md)。仅在没有活跃请求 handler 或响应体时，空闲期限才会关闭 TCP/TLS 连接；它不会限制已经开始但停滞的活跃请求。长连接响应体活跃期间，传输空闲计时暂停。
 
 停服开始时，服务停止接收 socket、关闭受管会话登记入口、通知已有会话，并使用同一个绝对期限等待 HTTP connection task 和受管 SSE/WS 会话。期限由 `ServerOptions` 设置，并由 `ServerContext` 提供给 WebSocket 会话；`WsUpgradePolicy` 不再单独设置停服期限。无法表示的停服期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，服务会先取消会话并回收连接任务，再返回错误。只有两组任务都按期结束，`ShutdownReport::graceful` 才为 `true`。报告记录未结束的受管会话，但不保证任意应用后台工作也已停止。`WebServer` 拥有并跟踪连接任务，Hyper/hyper-util 驱动各连接。本实现尚不提供具有明确定义且可证明的强制关闭连接计数，因此 `forced_connections` 为 `None`。
 
-`ConfiguredWeb` 解析应用显式传入的配置对象，并分别返回 `ServerOptions` 与 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；把配置值传给 `with_http_limits` 可替换该策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。启用 `config` 时，传输配置默认值为 `transport.max_connections = 1024` 和 `transport.idle_timeout_ms = 30000`；HTTP 策略键包括 `http.max_body_bytes`、`http.max_concurrent_requests` 和 `http.request_timeout_ms`。两个并发配置键的有效范围都是 `1..=tokio::sync::Semaphore::MAX_PERMITS`；无效值通过 `ConfigOptionsError::field()` 指向原配置键。TLS 是可选项，通过独立的 `TlsConfig` 配置；PEM 加载失败会归并为 `TlsInvalid`，不会暴露密钥材料或路径。
+`ConfiguredWeb` 解析应用显式传入的配置对象，并分别返回 `ServerOptions` 与 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；把配置值传给 `with_http_limits` 可替换该策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。启用 `config` 时，传输配置默认值为 `transport.max_connections = 1024`、`transport.idle_timeout_ms = 30000` 和每条 HTTP/2 连接 `transport.http2_max_concurrent_streams = 200`；流数值须为正 u32。HTTP 策略键包括 `http.max_body_bytes`、`http.max_concurrent_requests` 和 `http.request_timeout_ms`。两个并发配置键的有效范围都是 `1..=tokio::sync::Semaphore::MAX_PERMITS`；无效值通过 `ConfigOptionsError::field()` 指向原配置键。TLS 是可选项，通过独立的 `TlsConfig` 配置；PEM 加载失败会归并为 `TlsInvalid`，不会暴露密钥材料或路径。
 
 ## 失败阶段与应用责任
 
@@ -69,7 +70,7 @@ SSE 和 WebSocket 都是长连接路由，不应套用短请求并发/期限中�
 | 启动与绑定 | 在开始服务前校验选项、绑定 socket、查询本地地址并校验 TLS 配置。公开错误区分配置无效、绑定/地址失败、TLS 错误和服务/accept 错误。 | 提供有效地址及正数超时/容量；加载有效证书和私钥；决定如何向上层报告启动错误。 |
 | 路由装配 | 检测重复的 controller method/path 声明。已安装请求策略中间件的路由会对请求体、容量和期限返回稳定拒绝。 | 装配预期路由，将短请求限制安装到合适分支，并在需要时转换公开拒绝结果。 |
 | SSE 接纳 | 在创建流之前预留策略容量并登记受管服务会话。容量耗尽与停服拒绝彼此区分。 | 决定是否共享策略状态；实现 event ID、重放和事件缓冲；处理客户端重连。 |
-| WebSocket 接纳与 I/O | 检查策略和 Origin，预留策略/服务会话容量，并管理读写生命周期；限制 frame、message、队列和入站交付。 | 在调用 `on_upgrade` 前完成身份认证，配置允许的 Origin，持续调用 `WsSession::recv()`，并处理业务逻辑与交付语义。Origin 校验不等于身份认证。 |
+| WebSocket 接纳与 I/O | 检查策略和 Origin，在升级前拒绝重复 Origin 字段，预留策略/服务会话容量，并管理读写生命周期；限制 frame、message、队列和入站交付。 | 在调用 `on_upgrade` 前完成身份认证，配置允许的 Origin 且至多发送一个 Origin 字段，持续调用 `WsSession::recv()`，并处理业务逻辑与交付语义。Origin 校验不等于身份认证。 |
 | 停服 | 对 HTTP 连接和受管会话使用同一个期限，并报告仍未结束的受管会话。 | 停止或监管应用后台任务，并决定如何处理非优雅停服报告。原生 Axum upgrade 和任意应用任务不在受管会话统计范围内。 |
 
 [生命周期摘要](2026-10-09-rs-web-lifecycle-design.zh_CN.md)是现行会话和停服保证的简明参考；[用户指南](user_guide.zh_CN.md)介绍具体接入方式。

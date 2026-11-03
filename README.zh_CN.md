@@ -78,6 +78,8 @@ curl -i -X POST http://127.0.0.1:3000/admin/shutdown
 
 健康检查返回 `200 OK`，正文为 `ok`；停服路由返回 `202 Accepted`，并通知传给 `serve` 的关闭 future。示例仅绑定 loopback。请求限额只安装在短请求 `/health` 上；`WebServer` 直接运行传入的 Router，不会自动安装 HTTP 限额。停服路由没有认证，仅供本机演示，不能对外开放。
 
+每条 HTTP/2 连接默认允许同时开启 200 个流。可通过 `ServerOptions::with_http2_max_concurrent_streams` 设置每连接上限，也可在启用 `config` 时使用 `transport.http2_max_concurrent_streams`。该协议流上限不是进程级请求数、连接数或内存上限。
+
 另一个独立的内存 CRUD 示例可用 `cargo run --example controller_crud --all-features` 启动。`/users` 属于该示例，并不存在于上面的最小服务中；创建用户会返回 `201 Created`。在 [`examples/controller_crud.rs`](examples/controller_crud.rs) 可查看如何用 `ControllerRoutes::with_http_limits` 替换 Controller 短路由的默认限额。原生 Axum 路由需要在选定的短路由分支安装 `RequestLimitLayer::new(http_limits)`，并在 SSE/WS 分支安装 `StreamAdmissionLayer`。Controller 的 `sse` 和 `ws` 路由使用独立的流式接纳预算。
 
 启用 `config` feature 后，`ConfiguredWeb::from_config` 会分别返回 `ServerOptions` 和 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；将配置所得限额传给 `with_http_limits` 可替换默认策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`，并在 SSE/WS 分支安装 `StreamAdmissionLayer`；`WebServer` 不会替 Router 应用限额。
@@ -141,7 +143,7 @@ cargo test -p qubit-web --no-default-features --features ws --test websocket_tes
 
 ## 贡献
 
-欢迎参与贡献。提交 Pull Request 前，可用 `./.infra/bin/style-check.sh` 检查代码风格，并用 `./.infra/bin/ci-check.sh` 完成本 crate 的验收检查。[WebSocket 互操作 workflow](.github/workflows/downstream-interop.yml) 会检查当前 crate 的 WebSocket 合同，并将固定版本的 rs-websocket 下游与当前 rs-web 源码进行互操作测试。提出改进前可先到 [Issues](https://github.com/qubit-ltd/rs-web/issues) 讨论，也可直接提交 [Pull Request](https://github.com/qubit-ltd/rs-web/pulls)。
+欢迎参与贡献。提交 Pull Request 前，可用 `./.infra/bin/style-check.sh` 检查代码风格，并用 `./.infra/bin/ci-check.sh` 完成本 crate 的验收检查。[固定互操作 workflow](.github/workflows/downstream-interop.yml) 保留固定消费者基线；独立的[当前消费者 WS workflow](.github/workflows/downstream-current-interop.yml) 每周或手动检查 rs-websocket `main`，覆盖 WS 而不覆盖当前消费者 WSS。提出改进前可先到 [Issues](https://github.com/qubit-ltd/rs-web/issues) 讨论，也可直接提交 [Pull Request](https://github.com/qubit-ltd/rs-web/pulls)。
 
 ## 作者
 

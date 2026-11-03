@@ -58,6 +58,15 @@ assert_eq!(options.transport_idle_timeout(), Duration::from_secs(45));
 
 handler 正在运行或响应体仍活跃时，空闲计时会暂停，因此长时间 SSE 不会被此期限关闭。它也会回收尚未开始处理请求的 HTTP/2 连接；HTTP/2 PING 不算请求活动。启用 `config` 后，`transport.idle_timeout_ms` 可设置同一期限，缺省为 `30000`；期限必须为正且能构造 Tokio deadline，不能设为 0 或 `Duration::MAX` 这类不可表示值。`request_header_timeout` 仍是独立的 10 秒 HTTP/1 请求头和 TLS 握手期限。
 
+每条 HTTP/2 连接默认向客户端通告最多同时 200 个流。创建服务时可设置每连接上限：
+
+```rust,ignore
+let options = ServerOptions::new("127.0.0.1:3001".parse()?)
+    .with_http2_max_concurrent_streams(32)?;
+```
+
+启用 `config` 后，`transport.http2_max_concurrent_streams` 接受 `1..=u32::MAX`，缺省为 200。该值只控制每条 HTTP/2 连接的流数，与传输连接、路由并发和会话限额相互独立；它不是进程级请求数、header 字节或内存上限。`request_header_timeout` 仅适用于 HTTP/1 请求头和 TLS 握手，不为 HTTP/2 header block 计时。
+
 启用 `config` feature 后，可以拆分监听设置和路由限额：
 
 ```rust,ignore
@@ -66,7 +75,7 @@ let (server_options, http_limits) = configured.into_parts();
 let server = WebServer::bind_http(server_options).await?;
 ```
 
-配置必须包含 `address`；`shutdown_timeout_ms` 缺省为 30000，`transport.max_connections` 和 `transport.idle_timeout_ms` 分别缺省为 1024 和 30000。`transport.max_connections` 和 `http.max_concurrent_requests` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。`http.*` 配置只生成 `HttpLimits`，不会自动装到 Router：Controller 短路由已有 `HttpLimits::default()`，将配置值传给 `with_http_limits` 可替换该策略。原生 Axum 短路由需在选定分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。解析错误可通过 `ConfigOptionsError::field()` 定位字段；容量错误分别指向原键 `http.max_concurrent_requests` 或 `transport.max_connections`，错误不会回显输入值。
+配置必须包含 `address`；`shutdown_timeout_ms` 缺省为 30000，`transport.max_connections`、`transport.idle_timeout_ms` 和 `transport.http2_max_concurrent_streams` 分别缺省为 1024、30000 和 200。HTTP/2 流数必须是正的 u32。`transport.max_connections` 和 `http.max_concurrent_requests` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。`http.*` 配置只生成 `HttpLimits`，不会自动装到 Router：Controller 短路由已有 `HttpLimits::default()`，将配置值传给 `with_http_limits` 可替换该策略。原生 Axum 短路由需在选定分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。解析错误可通过 `ConfigOptionsError::field()` 定位字段；无效限额会指出对应原键，错误不会回显输入值。
 
 ## 装配普通接口与长连接
 
@@ -295,7 +304,7 @@ async fn websocket(
 
 SSE handler 先通过 `begin` 登记会话，再把取消令牌交给事件生产任务；`EventReceiver` 将 mpsc 接收端适配为 `Stream`，`into_sse` 负责生成响应。客户端断开或服务关闭时，生产者收到取消信号并停止。上面的片段省略了 `EventReceiver` 的 `Stream` 实现，完整代码见示例链接。WebSocket handler 必须先检查 `Authorization`，验证失败返回 401，只有通过后才调用 `on_upgrade`。升级后的任务持续 `recv()` 入站消息，用 `try_send()` 回显文本；对端关闭或出站队列无法接纳消息时结束循环。示例中的 `Bearer demo-only` 只是演示占位符，不能提供生产认证。
 
-示例把 `http://localhost:3000` 配置为 `WsUpgradePolicy::allowed_origins` 的 Origin allowlist。Origin 检查只约束浏览器来源，不能代替身份认证；应用应在 `on_upgrade` 前认证，并按自身部署设置允许的来源。SSE 有独立会话上限，同时仍占用 HTTP transport 额度；WebSocket 完成 HTTP upgrade 后改由其 policy 的会话上限管理。
+示例把 `http://localhost:3000` 配置为 `WsUpgradePolicy::allowed_origins` 的 Origin allowlist。Origin 检查只约束浏览器来源，不能代替身份认证；应用应在 `on_upgrade` 前认证，并按自身部署设置允许的来源。两个及以上 `Origin` 字段一律返回 HTTP 403，包括重复的相同值；缺少 Origin 与单个值的语义保持不变。SSE 有独立会话上限，同时仍占用 HTTP transport 额度；WebSocket 完成 HTTP upgrade 后改由其 policy 的会话上限管理。
 
 使用配置适配器时，把 `configured.http_limits()` 在添加 Controller 前传给 `ControllerRoutes::with_http_limits`，即可替换 Controller 短路由默认策略；原生 Axum 短路由则在选定分支创建 `RequestLimitLayer`。Controller 的 `sse` 和 `ws` 路由使用单独的流式接纳额度。原生 Axum SSE/WS 分支需安装 `StreamAdmissionLayer`；`WebServer` 接收完整的 Axum `Router`，不会为路由添加限额。
 
