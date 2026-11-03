@@ -277,9 +277,11 @@ impl WebServer {
             ..
         } = self;
         let mut cancellation_guard = ServeCancellationGuard::new(context.clone());
-        let request_header_timeout = options.request_header_timeout;
-        let transport_idle_timeout = options.transport_idle_timeout;
-        let http2_max_concurrent_streams = options.http2_max_concurrent_streams.get();
+        let connection_settings = ConnectionSettings {
+            request_header_timeout: options.request_header_timeout,
+            transport_idle_timeout: options.transport_idle_timeout,
+            http2_max_concurrent_streams: options.http2_max_concurrent_streams.get(),
+        };
         let connection_limit = Arc::new(Semaphore::new(options.max_transport_connections.get()));
         let graceful = GracefulShutdown::new();
         let completion = ConnectionCompletion::new();
@@ -330,7 +332,7 @@ impl WebServer {
                                 biased;
                                 _ = cancellation.cancelled() => return,
                                 result = tokio::time::timeout(
-                                    request_header_timeout,
+                                    connection_settings.request_header_timeout,
                                     acceptor.accept(stream),
                                 ) => result,
                             };
@@ -345,30 +347,12 @@ impl WebServer {
                                     return;
                                 }
                             };
-                            serve_connection(
-                                stream,
-                                app,
-                                watcher,
-                                request_header_timeout,
-                                transport_idle_timeout,
-                                http2_max_concurrent_streams,
-                                connection_tasks,
-                                diagnostics,
-                            )
-                            .await;
+                            serve_connection(stream, app, watcher, connection_settings, connection_tasks, diagnostics)
+                                .await;
                             return;
                         }
-                        serve_connection(
-                            stream,
-                            app,
-                            watcher,
-                            request_header_timeout,
-                            transport_idle_timeout,
-                            http2_max_concurrent_streams,
-                            connection_tasks,
-                            diagnostics,
-                        )
-                        .await;
+                        serve_connection(stream, app, watcher, connection_settings, connection_tasks, diagnostics)
+                            .await;
                     }
                     .instrument(tracing::Span::current())
                     .with_subscriber(connection_dispatch),
@@ -419,6 +403,17 @@ fn serve_error(source: io::Error) -> WebServerError {
     WebServerError::ServeFailed { source }
 }
 
+/// Per-connection HTTP settings copied from the listener options.
+#[derive(Clone, Copy)]
+struct ConnectionSettings {
+    /// Deadline for receiving HTTP/1 request headers.
+    request_header_timeout: Duration,
+    /// Maximum duration without an active request or response body.
+    transport_idle_timeout: Duration,
+    /// Maximum concurrent HTTP/2 streams on this connection.
+    http2_max_concurrent_streams: u32,
+}
+
 /// Adapts one TCP or TLS stream into an HTTP connection with upgrades enabled.
 ///
 /// # Type Parameters
@@ -430,10 +425,7 @@ fn serve_error(source: io::Error) -> WebServerError {
 /// * `stream` - Accepted transport stream, optionally after TLS negotiation.
 /// * `app` - Router cloned into each request service call.
 /// * `watcher` - Graceful shutdown watcher for this connection.
-/// * `request_header_timeout` - Deadline for receiving HTTP/1 request headers.
-/// * `transport_idle_timeout` - Maximum time without an active request or
-///   response body.
-/// * `http2_max_concurrent_streams` - Per-connection HTTP/2 stream limit.
+/// * `settings` - Per-connection timeouts and protocol limits.
 /// * `connection_tasks` - Executor registering Hyper tasks so shutdown can wait
 ///   for them until the server deadline, then abort and reap them.
 /// * `diagnostics` - Per-serve sampled failure counters.
@@ -441,14 +433,17 @@ async fn serve_connection<S>(
     stream: S,
     app: Router<()>,
     watcher: hyper_util::server::graceful::Watcher,
-    request_header_timeout: Duration,
-    transport_idle_timeout: Duration,
-    http2_max_concurrent_streams: u32,
+    settings: ConnectionSettings,
     connection_tasks: ConnectionTaskExecutor,
     diagnostics: Arc<ConnectionDiagnostics>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let ConnectionSettings {
+        request_header_timeout,
+        transport_idle_timeout,
+        http2_max_concurrent_streams,
+    } = settings;
     static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
     let connection_id = crate::diagnostic::ConnectionId(NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed));
     let activity = ConnectionActivity::new();

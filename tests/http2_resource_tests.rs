@@ -1,14 +1,26 @@
+// =============================================================================
+//    Copyright (c) 2025 - 2026 Haixing Hu.
+//
+//    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
+// =============================================================================
 use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::Router;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::Event;
+use axum::response::sse::Sse;
 use axum::routing::get;
 use futures_util::stream;
-use qubit_web::{ServerOptions, WebServer};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, tcp::OwnedReadHalf, tcp::OwnedWriteHalf};
+use qubit_web::ServerOptions;
+use qubit_web::WebServer;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+use tokio::net::tcp::OwnedReadHalf;
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time;
@@ -134,7 +146,8 @@ async fn investigates_incomplete_h2_headers_with_active_sse() {
         "SSE should produce data before the next stream"
     );
 
-    // A second complete request is a protocol control and must be served on the same connection.
+    // A second complete request is a protocol control and must be served on the
+    // same connection.
     send_headers(&mut writer, 3, true, HEALTH_HEADERS).await;
     let mut health_headers_seen = false;
     while !health_headers_seen {
@@ -149,8 +162,9 @@ async fn investigates_incomplete_h2_headers_with_active_sse() {
         "the first SSE remains active during a complete request"
     );
 
-    // A legal HEADERS frame whose block is explicitly unfinished. Do not send CONTINUATION.
-    // The fragment begins with a valid HPACK indexed :method field.
+    // A legal HEADERS frame whose block is explicitly unfinished. Do not send
+    // CONTINUATION. The fragment begins with a valid HPACK indexed :method
+    // field.
     send_headers(&mut writer, 5, false, b"\x82").await;
     let advanced_while_incomplete = read_until_stream_data(&mut reader, 1).await;
     eprintln!("SSE_DATA_WHILE_SECOND_HEADER_BLOCK_INCOMPLETE={advanced_while_incomplete}");
@@ -205,7 +219,8 @@ async fn incomplete_h2_header_block_on_idle_connection_waits_for_continuation() 
         }
     }
 
-    // With the connection otherwise idle, an incomplete stream produces no response frame.
+    // With the connection otherwise idle, an incomplete stream produces no response
+    // frame.
     send_headers(&mut writer, 3, false, b"\x82").await;
     let idle_observation = time::timeout(Duration::from_millis(300), read_frame(&mut reader)).await;
     assert!(
@@ -213,7 +228,8 @@ async fn incomplete_h2_header_block_on_idle_connection_waits_for_continuation() 
         "an unfinished header block should wait for CONTINUATION"
     );
 
-    // Completing the same valid HPACK header block lets the server produce its response.
+    // Completing the same valid HPACK header block lets the server produce its
+    // response.
     writer
         .write_all(&frame(0x09, 0x04, 3, b"\x86\x84\x01\x09localhost"))
         .await

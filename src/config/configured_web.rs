@@ -57,9 +57,9 @@ impl ConfiguredWeb {
     /// `transport.max_connections` defaults to 1024, and
     /// `transport.idle_timeout_ms` defaults to 30 seconds, and
     /// `transport.http2_max_concurrent_streams` defaults to 200 per HTTP/2
-    /// connection. HTTP limits are returned separately so they can be installed only on appropriate
-    /// short routes. This function does not discover or load a global
-    /// configuration source.
+    /// connection. HTTP limits are returned separately so they can be installed
+    /// only on appropriate short routes. This function does not discover or
+    /// load a global configuration source.
     ///
     /// # Parameters
     ///

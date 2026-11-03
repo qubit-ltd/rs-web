@@ -6,7 +6,8 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroU32;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use crate::WebServerError;
@@ -128,7 +129,8 @@ impl ServerOptions {
     ///
     /// # Parameters
     ///
-    /// * `streams` - Positive concurrent stream limit advertised to each HTTP/2 peer.
+    /// * `streams` - Positive concurrent stream limit advertised to each HTTP/2
+    ///   peer.
     ///
     /// # Errors
     ///
