@@ -27,15 +27,13 @@ use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 
-#[path = "internal/accept_retry.rs"]
-mod accept_retry;
-// Coordinates accepting and reaping completed transport tasks.
+// Accept-loop responsibilities stay private to this server implementation.
 #[path = "internal/accept_loop.rs"]
 mod accept_loop;
-// Carries the result of one accept attempt after retry policy is applied.
 #[path = "internal/accept_result.rs"]
 mod accept_result;
-// Coordinates managed-session draining and transport cleanup at shutdown.
+#[path = "internal/accept_retry.rs"]
+mod accept_retry;
 #[path = "internal/connection_activity.rs"]
 mod connection_activity;
 #[path = "internal/connection_completion.rs"]
@@ -46,13 +44,13 @@ mod connection_completion_guard;
 mod connection_completion_state;
 #[path = "internal/connection_task_executor.rs"]
 mod connection_task_executor;
+// Shutdown cleanup is kept separate from the public WebServer API.
 #[path = "internal/finish_serve.rs"]
 mod finish_serve;
 #[path = "internal/serve_cancellation_guard.rs"]
 mod serve_cancellation_guard;
 #[path = "server_context.rs"]
 mod server_context;
-// Represents events selected by the accept loop.
 #[path = "internal/server_event.rs"]
 mod server_event;
 #[path = "session_guard.rs"]
@@ -389,7 +387,7 @@ fn local_address_result(result: io::Result<SocketAddr>) -> Result<SocketAddr, We
 /// # Returns
 ///
 /// A serving error that exposes the original I/O error through `source()`.
-pub(super) fn serve_error(source: io::Error) -> WebServerError {
+fn serve_error(source: io::Error) -> WebServerError {
     WebServerError::ServeFailed { source }
 }
 
@@ -407,9 +405,8 @@ pub(super) fn serve_error(source: io::Error) -> WebServerError {
 /// * `request_header_timeout` - Deadline for receiving HTTP/1 request headers.
 /// * `transport_idle_timeout` - Maximum time without an active request or
 ///   response body.
-/// * `connection_tasks` - Executor that registers Hyper-spawned connection
-///   tasks so shutdown can wait for or abort and reap them by the shared
-///   deadline.
+/// * `connection_tasks` - Executor registering Hyper tasks so shutdown can wait
+///   for them until the server deadline, then abort and reap them.
 async fn serve_connection<S>(
     stream: S,
     app: Router<()>,

@@ -5,8 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Coordinates managed-session shutdown and transport task cleanup.
-
+//! Closes admission and reaps managed and transport tasks after serving.
 use std::io;
 use std::sync::Arc;
 
@@ -20,13 +19,14 @@ use super::serve_error;
 use super::server_context::ServerContext;
 use super::shutdown_report::ShutdownReport;
 use crate::WebServerError;
-
-/// Closes admission and drains managed sessions and transport tasks.
+/// Completes shutdown within the established deadline and reaps all connection
+/// tasks.
 ///
-/// The shared shutdown deadline is established once before graceful draining.
-/// Session cancellation is signaled by `begin_shutdown`; transport tasks are
-/// then awaited to that same deadline, aborted if needed, and reaped before
-/// this function returns.
+/// It closes the listener, starts the server shutdown deadline, closes managed
+/// task registration, and waits for graceful transport completion, sessions,
+/// and registered tasks until that deadline. It then snapshots completion
+/// state, aborts unfinished connection tasks when needed, and always joins
+/// them.
 pub(super) async fn finish_serve(
     listener: Arc<TcpListener>,
     context: ServerContext,

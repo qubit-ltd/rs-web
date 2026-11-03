@@ -35,9 +35,11 @@
 //! managed sessions still active at that deadline; it does not cover arbitrary
 //! application background tasks or native Axum upgrades. Transport connections
 //! with no active request or response body close after the configured idle
-//! timeout (30 seconds by default). `ShutdownReport::forced_connections` is
-//! `None` because Axum does not expose a provable count. The shutdown future
-//! must be `Send`.
+//! timeout (30 seconds by default). `WebServer` owns and tracks the connection
+//! tasks, while Hyper/hyper-util drives each connection. This implementation
+//! does not provide a provable count of forcibly closed connections, so
+//! `ShutdownReport::forced_connections` is `None`. The shutdown future must be
+//! `Send`.
 //!
 //! `WebServer` serves the supplied router without installing route limits.
 //! Install [`StreamAdmissionLayer`] explicitly on native Axum SSE and

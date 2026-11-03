@@ -32,8 +32,9 @@ pub struct ShutdownReport {
     /// observed as finished after scheduler delay is judged by its recorded
     /// completion time, not by when the report task resumes.
     pub graceful: bool,
-    /// Number of forcibly closed connections, when the transport can prove it.
-    /// WebServer manages connection tasks driven by Hyper/hyper-util, but this
+    /// Number of forcibly closed connections, when this implementation can
+    /// provide a provable count. `WebServer` owns and tracks the connection
+    /// tasks, while Hyper/hyper-util drives each connection. This
     /// implementation does not provide a provable count of forcibly closed
     /// connections, so this field is `None`.
     pub forced_connections: Option<usize>,

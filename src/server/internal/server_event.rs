@@ -5,11 +5,12 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Events selected by the server accept loop.
-
-/// Event selected while the server accepts transports and reaps tasks.
+/// Event selected while the listener and accepted connections are active.
 pub(super) enum ServerEvent<A> {
+    /// The host requested shutdown.
     Shutdown,
+    /// The accept future completed with its output.
     Accept(A),
+    /// A completed connection task was reaped.
     Joined,
 }

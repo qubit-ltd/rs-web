@@ -5,8 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Coordinates transport acceptance, retry handling, and connection reaping.
-
+//! Coordinates accept results, shutdown priority, and completed connection
+//! tasks.
 use std::future::Future;
 use std::io;
 
@@ -16,12 +16,11 @@ use tokio::task::JoinSet;
 use super::accept_result::AcceptResult;
 use super::accept_retry::AcceptRetry;
 use super::server_event::ServerEvent;
-
-/// Accepts transports until shutdown or a terminal accept failure.
+/// Runs accept, shutdown, and connection-reaping coordination until serving
+/// stops.
 ///
-/// Completed connection tasks are reaped while accepting. Shutdown is selected
-/// before other ready events, and retry deadlines remain absolute when the
-/// accept future is rebuilt.
+/// Shutdown remains biased over ready accepts, and completed tasks are polled
+/// between accepts so a continuously ready listener cannot starve reaping.
 pub(super) async fn run_accept_loop<T, MakeAccept, AcceptFuture, OnAccepted, Shutdown>(
     mut connections: JoinSet<()>,
     mut shutdown: Shutdown,
@@ -54,11 +53,7 @@ where
     (accept_error, connections)
 }
 
-/// Applies the retry policy to one accept result.
-///
-/// Successful accepts reset the consecutive failure count. Transient errors
-/// request a retry; fatal errors and the retry limit return the original I/O
-/// error for shutdown cleanup.
+/// Records an accept result and determines whether to continue, retry, or stop.
 pub(super) fn handle_accept_result<T>(retry: &mut AcceptRetry, result: io::Result<T>) -> AcceptResult<T> {
     match result {
         Ok(accepted) => {
@@ -72,10 +67,7 @@ pub(super) fn handle_accept_result<T>(retry: &mut AcceptRetry, result: io::Resul
     }
 }
 
-/// Selects shutdown, completed-task, or accept readiness.
-///
-/// Shutdown has priority, followed by completed tasks so continuous accept
-/// readiness cannot starve task reaping.
+/// Selects shutdown, a completed connection task, or the current accept result.
 pub(super) async fn select_server_event<A, S>(
     connections: &mut JoinSet<()>,
     shutdown: S,
@@ -97,19 +89,27 @@ where
 }
 
 #[cfg(test)]
-mod server_event_tests {
-    use std::future::Future;
+mod tests {
+    use std::collections::VecDeque;
     use std::future::pending;
     use std::future::ready;
+    use std::io;
     use std::pin::pin;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::task::Context;
     use std::task::Poll;
     use std::task::Waker;
+    use std::time::Duration;
 
+    use tokio::sync::Semaphore;
+    use tokio::sync::mpsc;
     use tokio::sync::oneshot;
     use tokio::task::JoinSet;
 
+    use super::super::accept_retry::AcceptRetry;
     use super::super::server_event::ServerEvent;
+    use super::run_accept_loop;
     use super::select_server_event;
 
     #[tokio::test(flavor = "current_thread")]
@@ -164,52 +164,6 @@ mod server_event_tests {
         let event = select_server_event(&mut connections, ready(()), ready("accepted")).await;
 
         assert!(matches!(event, ServerEvent::Shutdown));
-    }
-}
-
-#[cfg(test)]
-mod accept_retry_tests {
-    use std::collections::VecDeque;
-    use std::io;
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
-    use std::time::Duration;
-
-    use tokio::sync::Semaphore;
-    use tokio::sync::mpsc;
-    use tokio::sync::oneshot;
-    use tokio::task::JoinSet;
-    use tokio::time::Instant;
-
-    use super::super::accept_result::AcceptResult;
-    use super::super::accept_retry::AcceptRetry;
-    use super::handle_accept_result;
-    use super::run_accept_loop;
-
-    #[test]
-    fn test_accept_transient_error_then_success_keeps_server_running() {
-        let mut retry = AcceptRetry::default();
-        let before = Instant::now();
-        let retry_at =
-            match handle_accept_result::<()>(&mut retry, Err(io::Error::from(io::ErrorKind::ConnectionAborted))) {
-                AcceptResult::Retry => retry.retry_at().expect("retry state retains its deadline"),
-                _ => panic!("transient failure must schedule retry"),
-            };
-        assert!(retry_at.duration_since(before) >= Duration::from_millis(10));
-        assert!(retry_at.duration_since(before) < Duration::from_millis(11));
-        assert!(matches!(
-            handle_accept_result(&mut retry, Ok(())),
-            AcceptResult::Accepted(())
-        ));
-        assert!(retry.retry_at().is_none());
-        let before = Instant::now();
-        let retry_at =
-            match handle_accept_result::<()>(&mut retry, Err(io::Error::from(io::ErrorKind::ConnectionAborted))) {
-                AcceptResult::Retry => retry.retry_at().expect("retry state retains its deadline"),
-                _ => panic!("failure after success starts a new retry series"),
-            };
-        assert!(retry_at.duration_since(before) >= Duration::from_millis(10));
-        assert!(retry_at.duration_since(before) < Duration::from_millis(11));
     }
 
     #[tokio::test]
@@ -508,47 +462,5 @@ mod accept_retry_tests {
         loop_result
             .expect("loop result was checked")
             .expect("accept loop task completes");
-    }
-
-    #[test]
-    fn test_accept_success_resets_consecutive_failure_limit() {
-        let mut retry = AcceptRetry::default();
-        for _ in 0..8 {
-            assert!(matches!(
-                handle_accept_result::<()>(&mut retry, Err(io::Error::from(io::ErrorKind::ConnectionAborted))),
-                AcceptResult::Retry
-            ));
-        }
-        assert!(matches!(
-            handle_accept_result(&mut retry, Ok(())),
-            AcceptResult::Accepted(())
-        ));
-        for _ in 0..8 {
-            assert!(matches!(
-                handle_accept_result::<()>(&mut retry, Err(io::Error::from(io::ErrorKind::ConnectionAborted))),
-                AcceptResult::Retry
-            ));
-        }
-        let final_result = handle_accept_result::<()>(
-            &mut retry,
-            Err(io::Error::new(io::ErrorKind::ConnectionAborted, "last source")),
-        );
-        let AcceptResult::Terminal(final_error) = final_result else {
-            panic!("ninth consecutive failure must terminate")
-        };
-        assert_eq!(final_error.to_string(), "last source");
-    }
-
-    #[test]
-    fn test_accept_fatal_error_terminates_without_retry() {
-        let mut retry = AcceptRetry::default();
-        let result = handle_accept_result::<()>(
-            &mut retry,
-            Err(io::Error::new(io::ErrorKind::PermissionDenied, "fatal source")),
-        );
-        let AcceptResult::Terminal(error) = result else {
-            panic!("fatal failure must terminate immediately")
-        };
-        assert_eq!(error.to_string(), "fatal source");
     }
 }

@@ -31,24 +31,21 @@ use super::close::get_close_deadline;
 use crate::ws::internal::CloseQueueOnDrop;
 use crate::ws::ws_send_queue::WsSendQueue;
 
-/// Reader-owned state and the shared resources retained for its task lifetime.
+/// Reader-owned state and resources retained for the entire reader task.
 pub(in crate::ws) struct ReaderContext {
-    /// Tracks inbound message delivery and read failures for the session.
+    /// Mutable state used to wrap inbound messages.
     inbound_state: Arc<InboundState>,
-    /// Keeps the session guard and transport permit alive until this reader
-    /// task exits; the final I/O task holding these resources releases them.
+    /// Keeps the connection permit and session guard alive until this task
+    /// exits.
     _resources: Arc<SessionResources>,
 }
 
 impl ReaderContext {
-    /// Creates reader state while retaining the connection resources.
+    /// Creates reader context while retaining the connection's shared
+    /// resources.
     ///
-    /// # Parameters
-    ///
-    /// * `inbound_state` - Shared state used to wrap and record inbound data.
-    /// * `resources` - Session guard and permit retained through this reader
-    ///   task's lifetime. Dropping this context releases only its `Arc`; it
-    ///   does not wait for asynchronous draining.
+    /// The permit and session guard are released when the reader and writer
+    /// tasks have both dropped their references to the shared resources.
     pub(in crate::ws) fn new(inbound_state: Arc<InboundState>, resources: Arc<SessionResources>) -> Self {
         Self {
             inbound_state,

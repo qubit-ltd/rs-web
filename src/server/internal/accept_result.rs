@@ -5,16 +5,12 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Outcomes produced by the transport accept retry policy.
-
-use std::io;
-
-/// Outcome of one transport accept attempt after retry policy is applied.
-///
-/// A transient error schedules another attempt; a terminal error is retained
-/// until the accept loop completes shutdown cleanup.
+/// Outcome of processing one listener accept result.
 pub(super) enum AcceptResult<T> {
+    /// The listener accepted a transport and the permit remains with it.
     Accepted(T),
+    /// The I/O error is transient and another accept may be attempted.
     Retry,
-    Terminal(io::Error),
+    /// The listener can no longer accept and serving must stop.
+    Terminal(std::io::Error),
 }
