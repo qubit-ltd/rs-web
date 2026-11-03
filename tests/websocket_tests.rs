@@ -249,6 +249,24 @@ async fn handshake_path(addr: SocketAddr, path: &str, origin: Option<&str>) -> (
     (stream, status)
 }
 
+async fn handshake_with_origins(addr: SocketAddr, origins: &[&str]) -> (TcpStream, StatusCode) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut stream = timeout_at(deadline, TcpStream::connect(addr)).await.unwrap().unwrap();
+    let mut request = format!(
+        "GET /ws HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+    );
+    for origin in origins {
+        request.push_str(&format!("Origin: {origin}\r\n"));
+    }
+    request.push_str("\r\n");
+    timeout_at(deadline, stream.write_all(request.as_bytes()))
+        .await
+        .unwrap()
+        .unwrap();
+    let status = read_response_status_until(&mut stream, deadline).await.unwrap();
+    (stream, status)
+}
+
 async fn start_handshake(addr: SocketAddr, path: &str, origin: Option<&str>) -> TcpStream {
     start_handshake_until(addr, path, origin, Instant::now() + Duration::from_secs(2))
         .await
@@ -1639,6 +1657,48 @@ async fn test_origin_and_capacity_rejections_do_not_register_sessions() {
     })
     .await
     .unwrap();
+    serving.abort();
+}
+
+#[tokio_test]
+async fn test_duplicate_origin_headers_are_rejected_before_registration() {
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new().allowed_origins(["https://app.example"]);
+    let app = Router::new()
+        .route("/ws", get(context_ws_upgrade))
+        .with_state((policy.clone(), context.clone()));
+    let address = server.local_addr();
+    let serving = spawn(server.serve(app, pending::<()>()));
+
+    let (_, rejected_status) = handshake(address, Some("https://evil.example")).await;
+    assert_eq!(rejected_status, StatusCode::FORBIDDEN);
+    assert_eq!(context.active_sessions(), 0);
+    assert_eq!(policy.active_connections(), 0);
+
+    for origins in [
+        ["https://app.example", "https://evil.example"],
+        ["https://evil.example", "https://app.example"],
+        ["https://app.example", "https://app.example"],
+    ] {
+        let (_, status) = handshake_with_origins(address, &origins).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "origins: {origins:?}");
+        assert_eq!(context.active_sessions(), 0);
+        assert_eq!(policy.active_connections(), 0);
+    }
+
+    let (_no_origin_client, no_origin_status) = handshake_with_origins(address, &[]).await;
+    assert_eq!(no_origin_status, StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(context.active_sessions(), 1);
+    assert_eq!(policy.active_connections(), 1);
+
+    let (_allowed_client, allowed_status) = handshake(address, Some("https://app.example")).await;
+    assert_eq!(allowed_status, StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(context.active_sessions(), 2);
+    assert_eq!(policy.active_connections(), 2);
+
     serving.abort();
 }
 

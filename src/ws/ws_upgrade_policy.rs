@@ -173,7 +173,8 @@ impl WsUpgradePolicy {
     /// Sets the exact accepted browser Origin values.
     ///
     /// Requests without an Origin still proceed to application authentication;
-    /// requests with an Origin must match one of these values exactly.
+    /// requests with exactly one Origin must match one of these values exactly.
+    /// Requests with multiple Origin fields are rejected.
     ///
     /// # Type Parameters
     ///
@@ -400,12 +401,16 @@ impl WsUpgradePolicy {
     ///
     /// # Returns
     ///
-    /// `true` when no Origin is present or one exact allowed value matches.
+    /// `true` when no Origin is present or exactly one allowed value matches.
     #[must_use]
     fn origin_allowed(&self, headers: &HeaderMap) -> bool {
-        let Some(origin) = headers.get(ORIGIN) else {
+        let mut origins = headers.get_all(ORIGIN).iter();
+        let Some(origin) = origins.next() else {
             return true;
         };
+        if origins.next().is_some() {
+            return false;
+        }
         let Ok(origin) = origin.to_str() else {
             return false;
         };
