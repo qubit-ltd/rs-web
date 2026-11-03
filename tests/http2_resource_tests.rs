@@ -186,3 +186,50 @@ async fn investigates_incomplete_h2_headers_with_active_sse() {
 
     finish_server(shutdown, serving).await;
 }
+
+#[tokio::test]
+async fn incomplete_h2_header_block_on_idle_connection_waits_for_continuation() {
+    let (address, shutdown, serving) = start_server().await;
+    let (mut reader, mut writer) = begin_h2(address).await;
+
+    // Complete and drain one finite response so no stream remains active.
+    send_headers(&mut writer, 1, true, HEALTH_HEADERS).await;
+    let mut response_ended = false;
+    while !response_ended {
+        let (_, flags, id, _) = time::timeout(Duration::from_secs(3), read_frame(&mut reader))
+            .await
+            .unwrap()
+            .expect("read idle-control response frame");
+        if id == 1 && flags & 0x01 != 0 {
+            response_ended = true;
+        }
+    }
+
+    // With the connection otherwise idle, an incomplete stream produces no response frame.
+    send_headers(&mut writer, 3, false, b"\x82").await;
+    let idle_observation = time::timeout(Duration::from_millis(300), read_frame(&mut reader)).await;
+    assert!(
+        idle_observation.is_err(),
+        "an unfinished header block should wait for CONTINUATION"
+    );
+
+    // Completing the same valid HPACK header block lets the server produce its response.
+    writer
+        .write_all(&frame(0x09, 0x04, 3, b"\x86\x84\x01\x09localhost"))
+        .await
+        .unwrap();
+    let mut response_ended = false;
+    while !response_ended {
+        let (_, flags, id, _) = time::timeout(Duration::from_secs(3), read_frame(&mut reader))
+            .await
+            .unwrap()
+            .expect("read completed idle-control response frame");
+        if id == 3 && flags & 0x01 != 0 {
+            response_ended = true;
+        }
+    }
+
+    drop(writer);
+    drop(reader);
+    finish_server(shutdown, serving).await;
+}

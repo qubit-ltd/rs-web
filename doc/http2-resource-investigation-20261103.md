@@ -17,7 +17,7 @@ WEB-004 asked whether a client can leave a second HTTP/2 request header block in
 
 ## Experiment
 
-`tests/http2_resource_tests.rs::investigates_incomplete_h2_headers_with_active_sse` uses a loopback rs-web server and raw HTTP/2 frames. The sequence is:
+`tests/http2_resource_tests.rs` uses a loopback rs-web server and raw HTTP/2 frames in two bounded cases. `investigates_incomplete_h2_headers_with_active_sse` runs the active-SSE experiment:
 
 1. Send the HTTP/2 client preface and an empty SETTINGS frame; read server SETTINGS and send its ACK.
 2. Send a complete, valid HPACK GET on stream 1 to `/events`. Confirm SSE response DATA arrives.
@@ -25,7 +25,9 @@ WEB-004 asked whether a client can leave a second HTTP/2 request header block in
 4. Send a valid HEADERS frame on stream 5 with END_STREAM set, END_HEADERS clear, and a valid HPACK indexed `:method GET` fragment. Send no CONTINUATION for an observation interval (the test's next-frame read is bounded to three seconds), and record whether stream 1 DATA arrives.
 5. Send a valid CONTINUATION completing the HPACK block, close the client transport, and verify that a new HTTP/1 request can use the server's sole transport permit. Server shutdown is bounded to three seconds and awaited.
 
-The test reported `SSE_DATA_WHILE_SECOND_HEADER_BLOCK_INCOMPLETE=true` and passed. A complete second request also succeeded concurrently with SSE. This was one local run; the observation is intentionally diagnostic, not a portable latency or RSS threshold. There was no deliberately idle-connection comparison in this new test; existing idle-preface and active-handler tests cover the server's idle-activity behavior, not an incomplete HTTP/2 header block.
+`incomplete_h2_header_block_on_idle_connection_waits_for_continuation` is the idle control. It completes and drains a finite `/health` response, sends the same kind of partial HEADERS on stream 3, and observes no server frame or EOF for 300 ms. It then sends a valid CONTINUATION and confirms that the response completes on that connection. This is evidence that the incomplete block remained pending while the connection had no active response stream; it does not establish how long it may remain pending or quantify resources retained.
+
+The active-SSE test reported `SSE_DATA_WHILE_SECOND_HEADER_BLOCK_INCOMPLETE=true`. Both cases passed. A complete second request also succeeded concurrently with SSE. These were local runs; the timing observations are diagnostic, not portable latency or RSS thresholds. Existing idle-preface and active-handler tests also cover transport idle activity, but do not exercise incomplete HTTP/2 headers.
 
 ## Interpretation and remaining boundary
 
