@@ -6,7 +6,7 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
 use crate::WebServerError;
@@ -25,6 +25,10 @@ use crate::WebServerError;
 /// assert_eq!(options.transport_idle_timeout(), std::time::Duration::from_secs(30));
 /// let options = options.with_transport_idle_timeout(std::time::Duration::from_secs(45));
 /// assert_eq!(options.transport_idle_timeout(), std::time::Duration::from_secs(45));
+/// let h2_options = ServerOptions::new("127.0.0.1:8080".parse().expect("valid socket address"))
+///     .with_http2_max_concurrent_streams(32)
+///     .expect("positive HTTP/2 stream limit");
+/// assert_eq!(h2_options.http2_max_concurrent_streams(), 32);
 /// ```
 #[derive(Clone, Debug)]
 #[must_use]
@@ -44,6 +48,8 @@ pub struct ServerOptions {
     /// Positive per-server cap covering TLS handshakes and HTTP connection
     /// futures.
     pub(crate) max_transport_connections: NonZeroUsize,
+    /// Maximum concurrent HTTP/2 streams on each connection.
+    pub(crate) http2_max_concurrent_streams: NonZeroU32,
 }
 
 impl ServerOptions {
@@ -64,6 +70,7 @@ impl ServerOptions {
             request_header_timeout: Duration::from_secs(10),
             transport_idle_timeout: Duration::from_secs(30),
             max_transport_connections: NonZeroUsize::new(1024).expect("default transport limit is non-zero"),
+            http2_max_concurrent_streams: NonZeroU32::new(200).expect("default HTTP/2 stream limit is non-zero"),
         }
     }
 
@@ -104,6 +111,31 @@ impl ServerOptions {
     #[inline]
     pub const fn max_transport_connections(&self) -> usize {
         self.max_transport_connections.get()
+    }
+
+    /// Returns the maximum number of concurrent HTTP/2 streams per connection.
+    ///
+    /// The default is 200. This connection-level protocol limit is independent
+    /// of the server's transport connection, route concurrency, and session
+    /// limits; it is not a process-wide request or memory limit.
+    #[must_use]
+    #[inline]
+    pub const fn http2_max_concurrent_streams(&self) -> u32 {
+        self.http2_max_concurrent_streams.get()
+    }
+
+    /// Sets the maximum number of concurrent HTTP/2 streams per connection.
+    ///
+    /// # Parameters
+    ///
+    /// * `streams` - Positive concurrent stream limit advertised to each HTTP/2 peer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WebServerError::InvalidConfig`] when `streams` is zero.
+    pub fn with_http2_max_concurrent_streams(mut self, streams: u32) -> Result<Self, WebServerError> {
+        self.http2_max_concurrent_streams = NonZeroU32::new(streams).ok_or(WebServerError::InvalidConfig)?;
+        Ok(self)
     }
 
     /// Sets the maximum time allowed for graceful shutdown.
@@ -281,6 +313,26 @@ mod tests {
                 .is_err()
         );
         assert!(ServerOptions::new(address).with_max_transport_connections(0).is_err());
+    }
+
+    #[test]
+    fn http2_stream_limit_defaults_and_validates_positive_u32_values() {
+        let address = "127.0.0.1:8080".parse().unwrap();
+        assert_eq!(ServerOptions::new(address).http2_max_concurrent_streams(), 200);
+        for streams in [1, u32::MAX] {
+            assert_eq!(
+                ServerOptions::new(address)
+                    .with_http2_max_concurrent_streams(streams)
+                    .unwrap()
+                    .http2_max_concurrent_streams(),
+                streams
+            );
+        }
+        assert!(
+            ServerOptions::new(address)
+                .with_http2_max_concurrent_streams(0)
+                .is_err()
+        );
     }
 
     #[test]

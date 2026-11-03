@@ -18,9 +18,14 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::http::header;
 use axum::routing::get;
+use http_body_util::Empty;
+use hyper::Request as HyperRequest;
+use hyper::body::Bytes;
+use hyper::client::conn::http2;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::TokioIo;
 use qubit_web::ServerOptions;
 use qubit_web::SseConnectionPolicy;
 use qubit_web::WebServer;
@@ -232,6 +237,172 @@ async fn test_transport_connection_limit_defaults_rejects_zero_and_gates_tcp_acc
 
     shutdown_tx.send(()).unwrap();
     assert!(task.await.unwrap().unwrap().graceful);
+}
+
+#[tokio_test]
+async fn test_http2_settings_advertise_configured_stream_limit() {
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_http2_max_concurrent_streams(1)
+        .unwrap();
+    let server = WebServer::bind_http(options).await.unwrap();
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let serving = spawn(server.serve(Router::new(), async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").await.unwrap();
+    stream.write_all(&[0, 0, 0, 0x04, 0, 0, 0, 0, 0]).await.unwrap();
+    let mut header = [0; 9];
+    time::timeout(Duration::from_secs(2), stream.read_exact(&mut header))
+        .await
+        .expect("server SETTINGS should arrive")
+        .expect("read server SETTINGS header");
+    assert_eq!(header[3], 0x04, "expected a SETTINGS frame");
+    let length = (usize::from(header[0]) << 16) | (usize::from(header[1]) << 8) | usize::from(header[2]);
+    let mut payload = vec![0; length];
+    time::timeout(Duration::from_secs(2), stream.read_exact(&mut payload))
+        .await
+        .expect("SETTINGS payload should arrive")
+        .expect("read server SETTINGS payload");
+    let max_streams = payload
+        .chunks_exact(6)
+        .find(|entry| u16::from_be_bytes([entry[0], entry[1]]) == 0x03)
+        .map(|entry| u32::from_be_bytes([entry[2], entry[3], entry[4], entry[5]]));
+    assert_eq!(max_streams, Some(1));
+    stream.write_all(&[0, 0, 0, 0x04, 0x01, 0, 0, 0, 0]).await.unwrap();
+    drop(stream);
+
+    let _ = shutdown_tx.send(());
+    assert!(
+        time::timeout(Duration::from_secs(3), serving)
+            .await
+            .expect("server shutdown should complete")
+            .unwrap()
+            .unwrap()
+            .graceful
+    );
+}
+
+#[tokio_test]
+async fn test_http2_stream_limit_is_per_connection_and_releases_after_request() {
+    let entered_hold = Arc::new(Notify::new());
+    let release_hold = Arc::new(Notify::new());
+    let entered_next = Arc::new(Notify::new());
+    let app = Router::new()
+        .route(
+            "/hold",
+            get({
+                let entered = entered_hold.clone();
+                let release = release_hold.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        "released"
+                    }
+                }
+            }),
+        )
+        .route(
+            "/next",
+            get({
+                let entered = entered_next.clone();
+                move || {
+                    let entered = entered.clone();
+                    async move {
+                        entered.notify_one();
+                        "next"
+                    }
+                }
+            }),
+        );
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_http2_max_concurrent_streams(1)
+        .unwrap();
+    let server = WebServer::bind_http(options).await.unwrap();
+    let addr = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let serving = spawn(server.serve(app, async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    async fn connect(
+        addr: SocketAddr,
+    ) -> (
+        http2::SendRequest<Empty<Bytes>>,
+        tokio::task::JoinHandle<Result<(), hyper::Error>>,
+    ) {
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let (sender, connection) = time::timeout(
+            Duration::from_secs(2),
+            http2::handshake(TokioExecutor::new(), TokioIo::new(stream)),
+        )
+        .await
+        .expect("HTTP/2 handshake must finish")
+        .expect("HTTP/2 handshake must succeed");
+        (sender, spawn(connection))
+    }
+
+    async fn request(
+        mut sender: http2::SendRequest<Empty<Bytes>>,
+        addr: SocketAddr,
+        path: &'static str,
+    ) -> hyper::Response<hyper::body::Incoming> {
+        let request = HyperRequest::builder()
+            .method("GET")
+            .uri(format!("http://{addr}{path}"))
+            .body(Empty::new())
+            .unwrap();
+        time::timeout(Duration::from_secs(3), sender.send_request(request))
+            .await
+            .expect("HTTP/2 request must finish")
+            .expect("HTTP/2 request must succeed")
+    }
+
+    let (first_sender, first_driver) = connect(addr).await;
+    let first = spawn(request(first_sender.clone(), addr, "/hold"));
+    time::timeout(Duration::from_secs(2), entered_hold.notified())
+        .await
+        .expect("first handler should enter");
+    let second = spawn(request(first_sender, addr, "/next"));
+    assert!(
+        time::timeout(Duration::from_millis(100), entered_next.notified())
+            .await
+            .is_err(),
+        "the peer must not enter a second stream while the connection limit is one"
+    );
+
+    // A different HTTP/2 connection has its own stream budget.
+    let (independent_sender, independent_driver) = connect(addr).await;
+    let independent_response = request(independent_sender, addr, "/next").await;
+    assert_eq!(independent_response.status(), hyper::StatusCode::OK);
+
+    release_hold.notify_one();
+    let first_response = time::timeout(Duration::from_secs(2), first)
+        .await
+        .expect("the first stream should finish after release")
+        .unwrap();
+    assert_eq!(first_response.status(), hyper::StatusCode::OK);
+    let second_response = time::timeout(Duration::from_secs(2), second)
+        .await
+        .expect("the next stream should proceed after the first completes")
+        .unwrap();
+    assert_eq!(second_response.status(), hyper::StatusCode::OK);
+    let report = {
+        let _ = shutdown_tx.send(());
+        time::timeout(Duration::from_secs(3), serving)
+            .await
+            .expect("server shutdown should complete")
+            .unwrap()
+            .unwrap()
+    };
+    assert!(report.graceful);
+    drop(first_driver);
+    drop(independent_driver);
 }
 
 #[tokio_test]

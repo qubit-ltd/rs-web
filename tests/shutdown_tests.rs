@@ -593,7 +593,10 @@ async fn run_http2_shutdown_with_pending_handler() {
     let dropped = Arc::new(AtomicBool::new(false));
     let handler_dropped = dropped.clone();
     let server = WebServer::bind_http(
-        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(80)),
+        ServerOptions::new("127.0.0.1:0".parse().unwrap())
+            .with_shutdown_timeout(Duration::from_millis(80))
+            .with_http2_max_concurrent_streams(1)
+            .unwrap(),
     )
     .await
     .unwrap();

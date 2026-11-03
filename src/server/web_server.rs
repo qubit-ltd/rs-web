@@ -279,6 +279,7 @@ impl WebServer {
         let mut cancellation_guard = ServeCancellationGuard::new(context.clone());
         let request_header_timeout = options.request_header_timeout;
         let transport_idle_timeout = options.transport_idle_timeout;
+        let http2_max_concurrent_streams = options.http2_max_concurrent_streams.get();
         let connection_limit = Arc::new(Semaphore::new(options.max_transport_connections.get()));
         let graceful = GracefulShutdown::new();
         let completion = ConnectionCompletion::new();
@@ -350,6 +351,7 @@ impl WebServer {
                                 watcher,
                                 request_header_timeout,
                                 transport_idle_timeout,
+                                http2_max_concurrent_streams,
                                 connection_tasks,
                                 diagnostics,
                             )
@@ -362,6 +364,7 @@ impl WebServer {
                             watcher,
                             request_header_timeout,
                             transport_idle_timeout,
+                            http2_max_concurrent_streams,
                             connection_tasks,
                             diagnostics,
                         )
@@ -430,6 +433,7 @@ fn serve_error(source: io::Error) -> WebServerError {
 /// * `request_header_timeout` - Deadline for receiving HTTP/1 request headers.
 /// * `transport_idle_timeout` - Maximum time without an active request or
 ///   response body.
+/// * `http2_max_concurrent_streams` - Per-connection HTTP/2 stream limit.
 /// * `connection_tasks` - Executor registering Hyper tasks so shutdown can wait
 ///   for them until the server deadline, then abort and reap them.
 /// * `diagnostics` - Per-serve sampled failure counters.
@@ -439,6 +443,7 @@ async fn serve_connection<S>(
     watcher: hyper_util::server::graceful::Watcher,
     request_header_timeout: Duration,
     transport_idle_timeout: Duration,
+    http2_max_concurrent_streams: u32,
     connection_tasks: ConnectionTaskExecutor,
     diagnostics: Arc<ConnectionDiagnostics>,
 ) where
@@ -465,6 +470,9 @@ async fn serve_connection<S>(
         .http1()
         .timer(TokioTimer::new())
         .header_read_timeout(Some(request_header_timeout));
+    builder
+        .http2()
+        .max_concurrent_streams(Some(http2_max_concurrent_streams));
     let connection = builder
         .serve_connection_with_upgrades(TokioIo::new(stream), service)
         .into_owned();

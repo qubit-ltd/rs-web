@@ -36,6 +36,7 @@ use crate::limit::HttpLimits;
 /// let configured = ConfiguredWeb::from_config(&config).unwrap();
 /// let (server_options, http_limits) = configured.into_parts();
 /// assert_eq!(server_options.max_transport_connections(), 1024);
+/// assert_eq!(server_options.http2_max_concurrent_streams(), 200);
 /// assert_eq!(http_limits.max_body_bytes(), 1024 * 1024);
 /// # }
 /// ```
@@ -54,8 +55,9 @@ impl ConfiguredWeb {
     /// The required `address` value is a socket address. The optional
     /// `shutdown_timeout_ms` value defaults to 30 seconds,
     /// `transport.max_connections` defaults to 1024, and
-    /// `transport.idle_timeout_ms` defaults to 30 seconds. HTTP limits are
-    /// returned separately so they can be installed only on appropriate
+    /// `transport.idle_timeout_ms` defaults to 30 seconds, and
+    /// `transport.http2_max_concurrent_streams` defaults to 200 per HTTP/2
+    /// connection. HTTP limits are returned separately so they can be installed only on appropriate
     /// short routes. This function does not discover or load a global
     /// configuration source.
     ///
@@ -88,6 +90,10 @@ impl ConfiguredWeb {
             .get_optional::<u64>("transport.max_connections")
             .map_err(|_| ConfigOptionsError::new("transport.max_connections"))?
             .unwrap_or(1024);
+        let http2_max_concurrent_streams = config
+            .get_optional::<u64>("transport.http2_max_concurrent_streams")
+            .map_err(|_| ConfigOptionsError::new("transport.http2_max_concurrent_streams"))?
+            .unwrap_or(200);
         let transport_idle_timeout_ms = config
             .get_optional::<u64>("transport.idle_timeout_ms")
             .map_err(|_| ConfigOptionsError::new("transport.idle_timeout_ms"))?
@@ -139,7 +145,12 @@ impl ConfiguredWeb {
                 usize::try_from(max_transport_connections)
                     .map_err(|_| ConfigOptionsError::new("transport.max_connections"))?,
             )
-            .map_err(|_| ConfigOptionsError::new("transport.max_connections"))?;
+            .map_err(|_| ConfigOptionsError::new("transport.max_connections"))?
+            .with_http2_max_concurrent_streams(
+                u32::try_from(http2_max_concurrent_streams)
+                    .map_err(|_| ConfigOptionsError::new("transport.http2_max_concurrent_streams"))?,
+            )
+            .map_err(|_| ConfigOptionsError::new("transport.http2_max_concurrent_streams"))?;
         server_options.validate().map_err(|error| match error {
             WebServerError::InvalidConfig => ConfigOptionsError::new("shutdown_timeout_ms"),
             WebServerError::BindFailed { .. }

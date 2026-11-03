@@ -269,3 +269,92 @@ async fn test_https_h2_shutdown_drains_active_request() {
         .expect("HTTP/2 client driver should finish within three seconds")
         .expect("HTTP/2 client driver should not panic");
 }
+
+#[tokio::test]
+async fn test_https_h2_applies_per_connection_stream_limit() {
+    let entered_hold = Arc::new(Notify::new());
+    let release_hold = Arc::new(Notify::new());
+    let entered_next = Arc::new(Notify::new());
+    let app = Router::new()
+        .route(
+            "/hold",
+            get({
+                let entered = Arc::clone(&entered_hold);
+                let release = Arc::clone(&release_hold);
+                move || {
+                    let entered = Arc::clone(&entered);
+                    let release = Arc::clone(&release);
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        "released"
+                    }
+                }
+            }),
+        )
+        .route(
+            "/next",
+            get({
+                let entered = Arc::clone(&entered_next);
+                move || {
+                    let entered = Arc::clone(&entered);
+                    async move {
+                        entered.notify_one();
+                        "next"
+                    }
+                }
+            }),
+        );
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_http2_max_concurrent_streams(1)
+        .unwrap();
+    let (address, shutdown, serving) = start_server(options, app).await;
+    let (sender, driver) = connect_h2(address).await;
+    let mut first_sender = sender.clone();
+    let first_request = tokio::spawn(async move {
+        let request = Request::builder()
+            .method("GET")
+            .uri("https://localhost/hold")
+            .body(Empty::new())
+            .expect("build the first HTTP/2 request");
+        first_sender.send_request(request).await
+    });
+    time::timeout(Duration::from_secs(3), entered_hold.notified())
+        .await
+        .expect("first HTTPS handler should enter");
+
+    let second_request = tokio::spawn(async move {
+        let mut sender = sender;
+        let request = Request::builder()
+            .method("GET")
+            .uri("https://localhost/next")
+            .body(Empty::new())
+            .expect("build the second HTTP/2 request");
+        time::timeout(Duration::from_secs(3), sender.send_request(request))
+            .await
+            .expect("second HTTP/2 request should finish")
+            .expect("second HTTP/2 request should succeed")
+    });
+    assert!(
+        time::timeout(Duration::from_millis(100), entered_next.notified())
+            .await
+            .is_err(),
+        "the second HTTPS stream must wait for the per-connection stream slot"
+    );
+    release_hold.notify_one();
+    let first_response = time::timeout(Duration::from_secs(3), first_request)
+        .await
+        .expect("first HTTPS stream should complete after release")
+        .expect("first request task should not panic")
+        .expect("first HTTPS request should succeed");
+    assert_eq!(first_response.status(), hyper::StatusCode::OK);
+    let second_response = time::timeout(Duration::from_secs(3), second_request)
+        .await
+        .expect("second HTTPS stream should proceed")
+        .expect("second request task should not panic");
+    assert_eq!(second_response.status(), hyper::StatusCode::OK);
+
+    let report = finish_server(shutdown, serving).await;
+    assert!(report.graceful);
+    drop(driver);
+}

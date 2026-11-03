@@ -39,6 +39,7 @@ async fn maps_loopback_address_and_accepts_a_valid_shutdown_timeout() {
     let (options, limits) = configured.into_parts();
     assert_eq!(options.address(), "127.0.0.1:0".parse().unwrap());
     assert_eq!(options.max_transport_connections(), 3);
+    assert_eq!(options.http2_max_concurrent_streams(), 200);
     assert_eq!(options.transport_idle_timeout(), std::time::Duration::from_millis(900));
     assert_eq!(options.shutdown_timeout(), std::time::Duration::from_millis(2500));
     assert_eq!(limits.max_body_bytes(), 4096);
@@ -207,6 +208,34 @@ fn defaults_transport_connection_limit_to_1024_and_reports_invalid_values() {
         let error = ConfiguredWeb::from_config(&config).unwrap_err();
 
         assert_eq!(error.field(), "transport.max_connections");
+        assert!(!error.to_string().contains("private-sentinel"));
+    }
+}
+
+#[test]
+fn configures_per_connection_http2_stream_limit_and_reports_its_field() {
+    for (configured, expected) in [(1u64, 1u32), (u64::from(u32::MAX), u32::MAX)] {
+        let mut config = Config::new();
+        config.set("address", "127.0.0.1:0").unwrap();
+        config
+            .set("transport.http2_max_concurrent_streams", configured)
+            .unwrap();
+        let parsed = ConfiguredWeb::from_config(&config).unwrap();
+        assert_eq!(parsed.server_options().http2_max_concurrent_streams(), expected);
+    }
+
+    for invalid in [Some(0u64), Some(u64::from(u32::MAX) + 1), None] {
+        let mut config = Config::new();
+        config.set("address", "127.0.0.1:0").unwrap();
+        if let Some(value) = invalid {
+            config.set("transport.http2_max_concurrent_streams", value).unwrap();
+        } else {
+            config
+                .set("transport.http2_max_concurrent_streams", "private-sentinel")
+                .unwrap();
+        }
+        let error = ConfiguredWeb::from_config(&config).unwrap_err();
+        assert_eq!(error.field(), "transport.http2_max_concurrent_streams");
         assert!(!error.to_string().contains("private-sentinel"));
     }
 }
