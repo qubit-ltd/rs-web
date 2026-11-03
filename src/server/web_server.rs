@@ -26,6 +26,8 @@ use tokio::task::JoinSet;
 #[cfg(feature = "tls")]
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
+use tracing::Instrument;
+use tracing::instrument::WithSubscriber;
 
 // Accept-loop responsibilities stay private to this server implementation.
 #[path = "internal/accept_loop.rs"]
@@ -42,6 +44,8 @@ mod connection_completion;
 mod connection_completion_guard;
 #[path = "internal/connection_completion_state.rs"]
 mod connection_completion_state;
+#[path = "internal/connection_diagnostics.rs"]
+mod connection_diagnostics;
 #[path = "internal/connection_task_executor.rs"]
 mod connection_task_executor;
 // Shutdown cleanup is kept separate from the public WebServer API.
@@ -65,6 +69,7 @@ use accept_loop::run_accept_loop;
 use accept_retry::AcceptRetry;
 use connection_activity::ConnectionActivity;
 use connection_completion::ConnectionCompletion;
+use connection_diagnostics::ConnectionDiagnostics;
 use connection_task_executor::ConnectionTaskExecutor;
 use finish_serve::finish_serve;
 use serve_cancellation_guard::ServeCancellationGuard;
@@ -278,6 +283,8 @@ impl WebServer {
         let graceful = GracefulShutdown::new();
         let completion = ConnectionCompletion::new();
         let connection_tasks = ConnectionTaskExecutor::new();
+        let diagnostics = Arc::new(ConnectionDiagnostics::default());
+        let connection_dispatch = tracing::dispatcher::get_default(Clone::clone);
         let listener = Arc::new(listener);
         let mut retry = AcceptRetry::default();
         tokio::pin!(shutdown);
@@ -305,25 +312,50 @@ impl WebServer {
                 let watcher = graceful.watcher();
                 let completion = accept_completion.clone();
                 let connection_tasks = connection_tasks.clone();
+                let diagnostics = Arc::clone(&diagnostics);
+                let connection_dispatch = connection_dispatch.clone();
                 #[cfg(feature = "tls")]
                 let tls_acceptor = tls_acceptor.clone();
                 #[cfg(feature = "tls")]
                 let cancellation = context.cancellation_token();
                 let completion_guard = completion.register();
-                connections.spawn(async move {
-                    let _completion_guard = completion_guard;
-                    let _permit = permit;
-                    #[cfg(feature = "tls")]
-                    if let Some(acceptor) = tls_acceptor {
-                        let accepted = tokio::select! {
-                            biased;
-                            _ = cancellation.cancelled() => return,
-                            result = tokio::time::timeout(
+                connections.spawn(
+                    async move {
+                        let _completion_guard = completion_guard;
+                        let _permit = permit;
+                        #[cfg(feature = "tls")]
+                        if let Some(acceptor) = tls_acceptor {
+                            let accepted = tokio::select! {
+                                biased;
+                                _ = cancellation.cancelled() => return,
+                                result = tokio::time::timeout(
+                                    request_header_timeout,
+                                    acceptor.accept(stream),
+                                ) => result,
+                            };
+                            let stream = match accepted {
+                                Ok(Ok(stream)) => stream,
+                                Ok(Err(_)) => {
+                                    diagnostics.record_tls_handshake_failure();
+                                    return;
+                                }
+                                Err(_) => {
+                                    diagnostics.record_tls_handshake_timeout();
+                                    return;
+                                }
+                            };
+                            serve_connection(
+                                stream,
+                                app,
+                                watcher,
                                 request_header_timeout,
-                                acceptor.accept(stream),
-                            ) => result,
-                        };
-                        let Ok(Ok(stream)) = accepted else { return };
+                                transport_idle_timeout,
+                                connection_tasks,
+                                diagnostics,
+                            )
+                            .await;
+                            return;
+                        }
                         serve_connection(
                             stream,
                             app,
@@ -331,20 +363,13 @@ impl WebServer {
                             request_header_timeout,
                             transport_idle_timeout,
                             connection_tasks,
+                            diagnostics,
                         )
                         .await;
-                        return;
                     }
-                    serve_connection(
-                        stream,
-                        app,
-                        watcher,
-                        request_header_timeout,
-                        transport_idle_timeout,
-                        connection_tasks,
-                    )
-                    .await;
-                });
+                    .instrument(tracing::Span::current())
+                    .with_subscriber(connection_dispatch),
+                );
             },
         )
         .await;
@@ -407,6 +432,7 @@ fn serve_error(source: io::Error) -> WebServerError {
 ///   response body.
 /// * `connection_tasks` - Executor registering Hyper tasks so shutdown can wait
 ///   for them until the server deadline, then abort and reap them.
+/// * `diagnostics` - Per-serve sampled failure counters.
 async fn serve_connection<S>(
     stream: S,
     app: Router<()>,
@@ -414,6 +440,7 @@ async fn serve_connection<S>(
     request_header_timeout: Duration,
     transport_idle_timeout: Duration,
     connection_tasks: ConnectionTaskExecutor,
+    diagnostics: Arc<ConnectionDiagnostics>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -442,7 +469,11 @@ async fn serve_connection<S>(
         .serve_connection_with_upgrades(TokioIo::new(stream), service)
         .into_owned();
     tokio::select! {
-        _ = watcher.watch(connection) => {}
+        result = watcher.watch(connection) => {
+            if result.is_err() {
+                diagnostics.record_http_connection_failure();
+            }
+        }
         _ = activity.wait_until_idle_for(transport_idle_timeout) => {}
     }
 }

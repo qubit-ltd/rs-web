@@ -310,6 +310,8 @@ let server = WebServer::bind_https(options, tls).await?;
 
 ## 运行、观察和关闭
 
+服务端通过现有 `tracing` subscriber 发出采样后的连接失败事件。将 `qubit_web::transport` target 的级别设为 `DEBUG`（例如过滤器 `qubit_web::transport=debug`），即可观测 `tls_handshake_timeout`、`tls_handshake_failed` 和 `http_connection_failed`。每次 `serve` 调用、每种失败类别分别累计 `failure_count`；计数为 1、2、4、8 及后续 2 的幂时输出事件，字段 `sampling="powers_of_two"`。这种采样用于限制日志量，不是逐次失败审计日志，也不保证严格的每秒速率。事件只含固定失败类别和计数，不含底层错误、请求数据、对端地址或 TLS 秘密信息。本 crate 不安装全局 subscriber。
+
 在需要观测的 Router 分支上使用 `DiagnosticLayer::new()` 安装请求诊断层。构造器不再接受类型参数；已有调用请删除 `::<...>` turbofish。这不会改变 Router 的 `AppState`，也无需修改状态类型。
 
 在把 server 移入服务任务前复制一份 `ServerContext`。通过 context-aware 入口创建的 SSE 和 WebSocket 会登记到活跃会话数。应用可以自行添加诊断路由：

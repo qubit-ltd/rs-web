@@ -317,6 +317,8 @@ Use a certificate trusted by clients, or terminate TLS at a trusted edge and con
 
 ## Run, observe, and stop the service
 
+The server emits sampled connection failure events through the existing `tracing` subscriber. Enable the `qubit_web::transport` target at `DEBUG` (for example, with the filter `qubit_web::transport=debug`) to observe `tls_handshake_timeout`, `tls_handshake_failed`, and `http_connection_failed`. Each `serve` call and failure class has its own cumulative `failure_count`; events are emitted at counts 1, 2, 4, 8, and subsequent powers of two, with `sampling="powers_of_two"`. This sampling limits log volume, so it is not a per-failure audit log or a strict per-second rate limit. Events contain only the fixed failure category and count; they omit underlying errors, request data, peer addresses, and TLS secrets. The crate does not install a global subscriber.
+
 Install request diagnostics with `DiagnosticLayer::new()` on the router branch you want to observe. The constructor no longer takes a type parameter: remove any `::<...>` turbofish from existing calls. This does not change the router's `AppState` or require changes to its state type.
 
 Clone `ServerContext` before moving the server into its serving task. Context-aware SSE and WebSocket policy calls register active sessions. For example, an application can expose its own protected diagnostic route:
