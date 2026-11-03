@@ -7,10 +7,16 @@
 // =============================================================================
 use super::internal::InsertSlash;
 
-/// Joins a Controller prefix and child template with exactly one separator.
+/// Joins a Controller prefix and child template using boundary-specific slash
+/// handling.
 ///
-/// Empty prefixes or children are handled without introducing duplicate
-/// separators; a root prefix yields a leading slash for non-empty children.
+/// If `prefix` is `/`, all leading slashes are removed from a non-empty
+/// `child`, then one leading slash is added. An empty `child` returns `/`.
+/// For any other prefix, an empty `child` returns `prefix` unchanged,
+/// including any trailing slashes. Otherwise, trailing slashes are removed
+/// from `prefix`; a `child` that starts with `/` is appended unchanged, and
+/// any other `child` is joined with one slash. This helper does not validate
+/// or normalize internal repeated slashes.
 ///
 /// # Parameters
 ///
@@ -28,6 +34,10 @@ use super::internal::InsertSlash;
 ///
 /// assert_eq!(join_route_path("/api/", "health"), "/api/health");
 /// assert_eq!(join_route_path("/", "health"), "/health");
+/// assert_eq!(join_route_path("/api/", "//health"), "/api//health");
+/// assert_eq!(join_route_path("/", "//health"), "/health");
+/// assert_eq!(join_route_path("/api//", ""), "/api//");
+/// assert_eq!(join_route_path("", ""), "");
 /// ```
 #[must_use]
 #[inline]

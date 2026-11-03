@@ -630,6 +630,14 @@ fn route_path_join_normalizes_empty_child_and_root_prefix() {
     assert_eq!(metadata.kind(), qubit_web::RouteKind::Short);
 }
 
+#[test]
+fn test_join_route_path_preserves_documented_slash_boundaries() {
+    assert_eq!(qubit_web::mvc::join_route_path("/api/", "//health"), "/api//health");
+    assert_eq!(qubit_web::mvc::join_route_path("/", "//health"), "/health");
+    assert_eq!(qubit_web::mvc::join_route_path("/api//", ""), "/api//");
+    assert_eq!(qubit_web::mvc::join_route_path("", ""), "");
+}
+
 #[tokio::test]
 async fn duplicate_method_and_path_across_controllers_is_reported() {
     struct Duplicate;
