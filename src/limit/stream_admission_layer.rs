@@ -125,6 +125,11 @@ impl StreamAdmissionLayer {
     }
 }
 
+/// Rejects an oversized declared body before admission, then acquires a
+/// non-waiting concurrency permit and applies one deadline from admission
+/// through body buffering and handler completion up to response headers.
+/// Capacity, size, configuration, read, and timeout failures map to stable
+/// [`WebRejection`] responses.
 fn admit_stream_request(
     State(state): State<StreamAdmissionState>,
     request: Request<Body>,
@@ -149,6 +154,11 @@ fn admit_stream_request(
     })
 }
 
+/// Buffers the complete request body before invoking the handler. The owned
+/// permit remains held through the handler future and is released when that
+/// future returns or is cancelled. The admission deadline ends when response
+/// headers are produced; response body streaming is outside this layer's
+/// deadline.
 async fn buffer_then_run(
     request: Request<Body>,
     next: Next,
@@ -166,6 +176,9 @@ async fn buffer_then_run(
     Ok(next.run(Request::from_parts(parts, Body::from(bytes))).await)
 }
 
+/// Checks only a parseable `Content-Length` declaration without consuming the
+/// body. This is a fast rejection path; `buffer_then_run` separately accounts
+/// for streamed bodies whose length is absent or cannot be parsed.
 fn body_exceeds_limit(request: &Request<Body>, maximum: usize) -> bool {
     request
         .headers()
