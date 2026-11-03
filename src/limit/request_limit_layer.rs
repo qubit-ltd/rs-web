@@ -28,6 +28,7 @@ use super::http_limits::HttpLimits;
 use super::internal;
 use super::limit_state::LimitState;
 use super::web_rejection::WebRejection;
+use crate::diagnostic::internal::BodyObservation;
 
 /// Boxed future produced by the request-limit middleware.
 #[doc(hidden)]
@@ -142,13 +143,14 @@ fn enforce_limits(State(state): State<LimitState>, request: Request<Body>, next:
             Ok(permit) => permit,
             Err(_) => return WebRejection::CapacityExceeded.into_response(),
         };
+        let observation = request.extensions().get::<Arc<BodyObservation>>().cloned();
         let exceeded = Arc::new(AtomicBool::new(false));
         let request = limit_request_body(request, state.max_body_bytes, exceeded.clone());
         let deadline = state.request_timeout;
         let Some(deadline_at) = tokio::time::Instant::now().checked_add(deadline) else {
             return WebRejection::InvalidConfiguration.into_response();
         };
-        let processing = run_limited_request(next, request, permit, exceeded, deadline_at);
+        let processing = run_limited_request(next, request, permit, exceeded, deadline_at, observation);
         match tokio::time::timeout_at(deadline_at, processing).await {
             Ok(Ok(response)) => response,
             Ok(Err(rejection)) => rejection.into_response(),
@@ -213,6 +215,7 @@ async fn run_limited_request(
     permit: OwnedSemaphorePermit,
     exceeded: Arc<AtomicBool>,
     deadline: tokio::time::Instant,
+    observation: Option<Arc<BodyObservation>>,
 ) -> Result<Response, WebRejection> {
     let response = next.run(request).await;
     if exceeded.load(Ordering::Acquire) {
@@ -220,6 +223,6 @@ async fn run_limited_request(
     }
     Ok(response.map(|body| {
         let permit = if body.is_end_stream() { None } else { Some(permit) };
-        internal::permit_body(body, permit, deadline)
+        internal::permit_body(body, permit, deadline, observation)
     }))
 }

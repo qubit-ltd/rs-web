@@ -7,8 +7,11 @@
 // =============================================================================
 use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::io;
+use std::io::Write;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::task::Context;
@@ -24,10 +27,13 @@ use axum::http::header::CONTENT_LENGTH;
 use axum::response::Response;
 use axum::routing::post;
 use hyper::body::Body as HttpBody;
+use qubit_web::diagnostic::DiagnosticLayer;
 use qubit_web::limit::HttpLimits;
 use qubit_web::limit::RequestLimitLayer;
 use qubit_web::limit::WebRejection;
 use tower::ServiceExt;
+use tracing::Level;
+use tracing_subscriber::fmt::MakeWriter;
 
 struct ObservedChunks {
     chunks: VecDeque<Bytes>,
@@ -836,6 +842,89 @@ async fn dropping_response_near_deadline_drops_source_once_and_releases_capacity
     .expect("timeout or response drop must release capacity")
     .unwrap();
     assert_eq!(next.status(), StatusCode::OK);
+}
+
+#[test]
+fn unpolled_response_timeout_is_logged_once_and_keeps_status() {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = LimitSharedWriter(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::INFO)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let body_dropped = dropped.clone();
+        let limits = HttpLimits::default()
+            .with_request_timeout(std::time::Duration::from_millis(20))
+            .unwrap();
+        let app = Router::new()
+            .route(
+                "/stalled",
+                post(move || {
+                    let dropped = body_dropped.clone();
+                    async move { Response::new(Body::new(DropObservedResponse(dropped))) }
+                }),
+            )
+            .layer(RequestLimitLayer::new(limits))
+            .layer(DiagnosticLayer::with_body_diagnostics());
+        let response = app
+            .oneshot(Request::post("/stalled").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while dropped.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("deadline watcher must release the body without polling");
+        tokio::task::yield_now().await;
+        let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("outcome=\"timeout\""), "missing timeout log: {log}");
+        assert!(log.contains("status=200"), "missing original response status: {log}");
+        assert_eq!(
+            log.matches("response_body_end").count(),
+            1,
+            "duplicate timeout event: {log}"
+        );
+        drop(response);
+        let log_after_drop = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            log_after_drop.matches("response_body_end").count(),
+            1,
+            "drop must not duplicate timeout: {log_after_drop}"
+        );
+    });
+}
+
+#[derive(Clone)]
+struct LimitSharedWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for LimitSharedWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for LimitSharedWriter {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
 }
 
 #[tokio::test]

@@ -10,10 +10,14 @@
 
 mod diagnostic_layer;
 mod request_diagnostic;
-mod internal {
+pub(crate) mod internal {
+    mod body_observation;
     mod connection_id;
+    mod diagnostic_body;
 
+    pub(crate) use body_observation::BodyObservation;
     pub(crate) use connection_id::ConnectionId;
+    pub(crate) use diagnostic_body::DiagnosticBody;
 }
 
 pub use diagnostic_layer::DiagnosticFuture;

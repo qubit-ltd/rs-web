@@ -14,6 +14,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::http::HeaderValue;
 use axum::http::Method;
 use axum::http::Request;
@@ -21,6 +22,7 @@ use axum::http::StatusCode;
 use axum::http::header;
 use axum::routing::get;
 use axum::routing::post;
+use hyper::body::Body as HttpBody;
 use qubit_web::diagnostic::DiagnosticLayer;
 use qubit_web::diagnostic::RequestDiagnostic;
 use tokio::runtime::Builder;
@@ -44,6 +46,271 @@ async fn diagnostic_layer_installs_on_stateless_router() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[test]
+fn explicit_body_diagnostics_report_complete_after_eof() {
+    let output = capture_body_diagnostic(false, false);
+    assert!(
+        output.contains("event=\"response_body_end\""),
+        "missing body event: {output}"
+    );
+    assert!(
+        output.contains("outcome=\"complete\""),
+        "missing complete outcome: {output}"
+    );
+    assert!(output.contains("status=200"), "missing response status: {output}");
+    assert_eq!(
+        output.matches("response_body_end").count(),
+        1,
+        "duplicate body event: {output}"
+    );
+    assert!(
+        !output.contains("body-secret-sentinel"),
+        "body content leaked: {output}"
+    );
+}
+
+#[test]
+fn explicit_body_diagnostics_report_body_error_without_error_text() {
+    let output = capture_error_body_diagnostic();
+    assert!(
+        output.contains("outcome=\"body_error\""),
+        "missing body error outcome: {output}"
+    );
+    assert_eq!(
+        output.matches("response_body_end").count(),
+        1,
+        "duplicate body event: {output}"
+    );
+    assert!(!output.contains("error-secret-sentinel"), "error text leaked: {output}");
+}
+
+fn capture_error_body_diagnostic() -> String {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = SharedWriter(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::INFO)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let app = Router::new()
+                .route(
+                    "/",
+                    get(|| async { axum::response::Response::new(Body::new(ErrorBody)) }),
+                )
+                .layer(DiagnosticLayer::with_body_diagnostics());
+            let response = app
+                .oneshot(Request::get("/").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert!(axum::body::to_bytes(response.into_body(), usize::MAX).await.is_err());
+        });
+    });
+    String::from_utf8(output.lock().unwrap().clone()).unwrap()
+}
+
+struct ErrorBody;
+
+impl hyper::body::Body for ErrorBody {
+    type Data = axum::body::Bytes;
+    type Error = io::Error;
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        std::task::Poll::Ready(Some(Err(io::Error::other("error-secret-sentinel"))))
+    }
+}
+
+fn capture_body_diagnostic(default_layer: bool, empty: bool) -> String {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = SharedWriter(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::INFO)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let layer = if default_layer {
+                DiagnosticLayer::new()
+            } else {
+                DiagnosticLayer::with_body_diagnostics()
+            };
+            let app = Router::new()
+                .route(
+                    "/",
+                    get(move || async move {
+                        if empty {
+                            Body::empty()
+                        } else {
+                            Body::from("body-secret-sentinel")
+                        }
+                    }),
+                )
+                .layer(layer);
+            let response = app
+                .oneshot(Request::get("/").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            if empty {
+                assert!(bytes.is_empty());
+            } else {
+                assert_eq!(&bytes[..], b"body-secret-sentinel");
+            }
+        });
+    });
+    String::from_utf8(output.lock().unwrap().clone()).unwrap()
+}
+
+#[test]
+fn explicit_body_diagnostics_report_empty_body_complete() {
+    let output = capture_body_diagnostic(false, true);
+    assert!(
+        output.contains("outcome=\"complete\""),
+        "missing complete outcome: {output}"
+    );
+    assert_eq!(
+        output.matches("response_body_end").count(),
+        1,
+        "duplicate body event: {output}"
+    );
+}
+
+#[test]
+fn diagnostic_body_preserves_size_hint_and_trailers() {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = SharedWriter(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::INFO)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let app = Router::new()
+                .route(
+                    "/",
+                    get(|| async {
+                        let mut trailers = HeaderMap::new();
+                        trailers.insert("x-check", HeaderValue::from_static("preserved"));
+                        axum::response::Response::new(Body::new(TrailerBody { step: 0, trailers }))
+                    }),
+                )
+                .layer(DiagnosticLayer::with_body_diagnostics());
+            let mut response = app
+                .oneshot(Request::get("/").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.body().size_hint().exact(), Some(3));
+            let data = std::future::poll_fn(|cx| std::pin::Pin::new(response.body_mut()).poll_frame(cx))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(data.into_data().unwrap(), "abc");
+            let trailers = std::future::poll_fn(|cx| std::pin::Pin::new(response.body_mut()).poll_frame(cx))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(trailers.into_trailers().unwrap().get("x-check").unwrap(), "preserved");
+            assert!(
+                std::future::poll_fn(|cx| std::pin::Pin::new(response.body_mut()).poll_frame(cx))
+                    .await
+                    .is_none()
+            );
+        });
+    });
+    let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(log.contains("outcome=\"complete\""), "missing completion event: {log}");
+}
+
+struct TrailerBody {
+    step: u8,
+    trailers: HeaderMap,
+}
+
+impl HttpBody for TrailerBody {
+    type Data = axum::body::Bytes;
+    type Error = io::Error;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let frame = match self.step {
+            0 => hyper::body::Frame::data(axum::body::Bytes::from_static(b"abc")),
+            1 => hyper::body::Frame::trailers(std::mem::take(&mut self.trailers)),
+            _ => return std::task::Poll::Ready(None),
+        };
+        self.step += 1;
+        std::task::Poll::Ready(Some(Ok(frame)))
+    }
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        let mut hint = hyper::body::SizeHint::new();
+        hint.set_exact(3);
+        hint
+    }
+}
+
+#[test]
+fn default_diagnostic_layer_does_not_report_body_termination() {
+    let output = capture_body_diagnostic(true, false);
+    assert!(
+        !output.contains("response_body_end"),
+        "default layer emitted body event: {output}"
+    );
+}
+
+#[test]
+fn explicit_body_diagnostics_report_drop() {
+    let output = capture_dropped_body_diagnostic();
+    assert!(
+        output.contains("outcome=\"dropped\""),
+        "missing dropped outcome: {output}"
+    );
+    assert_eq!(
+        output.matches("response_body_end").count(),
+        1,
+        "duplicate body event: {output}"
+    );
+}
+
+fn capture_dropped_body_diagnostic() -> String {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = SharedWriter(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::INFO)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let app = Router::new()
+                .route("/", get(|| async { "dropped-secret" }))
+                .layer(DiagnosticLayer::with_body_diagnostics());
+            let response = app
+                .oneshot(Request::get("/").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            drop(response);
+        });
+    });
+    String::from_utf8(output.lock().unwrap().clone()).unwrap()
 }
 
 #[tokio::test]

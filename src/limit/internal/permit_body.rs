@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 
 use super::body_state::BodyState;
 use super::phase::Phase;
+use crate::diagnostic::internal::BodyObservation;
 
 /// Response body wrapper that holds capacity until streaming finishes or times
 /// out.
@@ -29,6 +30,7 @@ struct PermitBody {
     deadline: tokio::time::Instant,
     /// Deadline task cancelled when this wrapper finishes or is dropped.
     watcher: Option<JoinHandle<()>>,
+    observation: Option<Arc<BodyObservation>>,
 }
 
 impl PermitBody {
@@ -101,7 +103,14 @@ impl hyper::body::Body for PermitBody {
             let inner = state.inner.take();
             let permit = state.permit.take();
             let waker = state.waker.take();
+            let event = this
+                .observation
+                .as_ref()
+                .and_then(|observation| observation.mark_terminal("timeout"));
             drop(state);
+            if let Some(observation) = &this.observation {
+                observation.emit(event);
+            }
             this.cancel_watcher();
             drop(inner);
             drop(permit);
@@ -143,6 +152,17 @@ impl hyper::body::Body for PermitBody {
             }
             std::task::Poll::Ready(Some(Ok(frame))) => {
                 state.waker = None;
+                let event = if state.inner.as_ref().is_some_and(Body::is_end_stream) {
+                    this.observation
+                        .as_ref()
+                        .and_then(|observation| observation.mark_terminal("complete"))
+                } else {
+                    None
+                };
+                drop(state);
+                if let Some(observation) = &this.observation {
+                    observation.emit(event);
+                }
                 std::task::Poll::Ready(Some(Ok(frame)))
             }
             std::task::Poll::Ready(Some(Err(error))) => {
@@ -208,16 +228,26 @@ impl hyper::body::Body for PermitBody {
 /// The lock decides whether timeout or normal completion wins. The application
 /// body and permit are dropped after releasing the lock so their destructors
 /// cannot block other lifecycle transitions.
-async fn watch_deadline(state: Arc<Mutex<BodyState>>, deadline: tokio::time::Instant) {
+async fn watch_deadline(
+    state: Arc<Mutex<BodyState>>,
+    deadline: tokio::time::Instant,
+    observation: Option<Arc<BodyObservation>>,
+) {
     tokio::time::sleep_until(deadline).await;
-    let (inner, permit, waker) = {
+    let (inner, permit, waker, event) = {
         let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !matches!(state.phase, Phase::Active) {
             return;
         }
         state.phase = Phase::TimedOut;
-        (state.inner.take(), state.permit.take(), state.waker.take())
+        let event = observation
+            .as_ref()
+            .and_then(|observation| observation.mark_terminal("timeout"));
+        (state.inner.take(), state.permit.take(), state.waker.take(), event)
     };
+    if let Some(observation) = observation {
+        observation.emit(event);
+    }
     drop(inner);
     drop(permit);
     if let Some(waker) = waker {
@@ -246,6 +276,7 @@ pub(in crate::limit) fn permit_body(
     inner: Body,
     permit: Option<OwnedSemaphorePermit>,
     deadline: tokio::time::Instant,
+    observation: Option<Arc<BodyObservation>>,
 ) -> Body {
     let is_end_stream = inner.is_end_stream();
     let state = Arc::new(Mutex::new(BodyState {
@@ -256,11 +287,12 @@ pub(in crate::limit) fn permit_body(
     }));
     let watcher = (!is_end_stream).then(|| {
         let watcher_state = state.clone();
-        tokio::spawn(watch_deadline(watcher_state, deadline))
+        tokio::spawn(watch_deadline(watcher_state, deadline, observation.clone()))
     });
     Body::new(PermitBody {
         state,
         deadline,
         watcher,
+        observation,
     })
 }
