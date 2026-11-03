@@ -6,36 +6,42 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 //! Tracks the HTTP tasks submitted by Hyper for one server instance.
+//!
+//! The state, task shutdown operation, shutdown report, tracked future, and
+//! completion guard are kept in this module's local submodules. Keeping those
+//! ownership boundaries beside the executor makes lock and drop ordering
+//! explicit without expanding the server's public API.
 
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::task::Context;
-use std::task::Poll;
 
 use hyper::rt::Executor;
 use tokio::task::AbortHandle;
 use tokio::task::JoinSet;
-use tokio::time::Instant;
+
+#[path = "connection_task_executor/task_completion_guard.rs"]
+mod task_completion_guard;
+#[path = "connection_task_executor/task_executor_state.rs"]
+mod task_executor_state;
+#[path = "connection_task_executor/task_shutdown.rs"]
+mod task_shutdown;
+#[path = "connection_task_executor/task_shutdown_report.rs"]
+mod task_shutdown_report;
+#[path = "connection_task_executor/tracked_future.rs"]
+mod tracked_future;
+
+use task_completion_guard::TaskCompletionGuard;
+use task_executor_state::TaskExecutorState;
+pub(super) use task_shutdown::TaskShutdown;
+pub(super) use task_shutdown_report::TaskShutdownReport;
+use tracked_future::TrackedFuture;
 
 /// An executor that registers Hyper tasks with one server instance.
 #[derive(Clone)]
 pub(super) struct ConnectionTaskExecutor {
+    /// Shared admission and task-completion state guarded for short updates.
     state: Arc<Mutex<TaskExecutorState>>,
-}
-
-struct TaskExecutorState {
-    accepting: bool,
-    tasks: Option<JoinSet<()>>,
-    active: usize,
-    last_completed: Option<Instant>,
-}
-
-/// The result of waiting for all registered Hyper tasks to stop.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct TaskShutdownReport {
-    pub(super) completed_by_deadline: bool,
 }
 
 impl ConnectionTaskExecutor {
@@ -53,6 +59,10 @@ impl ConnectionTaskExecutor {
 
     /// Submits one Hyper task, returning `None` after shutdown closes
     /// admission.
+    ///
+    /// Admission and shutdown are serialized by the state lock, so a task is
+    /// either registered in the owned `JoinSet` or rejected. Reaped task
+    /// futures are destroyed after the registration lock is released.
     pub(super) fn spawn<F>(&self, future: F) -> Option<AbortHandle>
     where
         F: Future + Send + 'static,
@@ -84,6 +94,10 @@ impl ConnectionTaskExecutor {
     }
 
     /// Closes task admission and takes ownership of all registered tasks.
+    ///
+    /// The first call moves the `JoinSet` out of shared state. Later calls
+    /// return an empty task set; the `accepting` flag remains closed. The set
+    /// is dropped or awaited only after the state lock has been released.
     pub(super) fn close(&self) -> TaskShutdown {
         let mut state = self.lock_state();
         state.accepting = false;
@@ -94,6 +108,10 @@ impl ConnectionTaskExecutor {
         }
     }
 
+    /// Locks executor state for a short state update or snapshot.
+    ///
+    /// Callers must move task sets out of the guard before destroying or
+    /// awaiting them, because dropping a future can run application code.
     fn lock_state(&self) -> std::sync::MutexGuard<'_, TaskExecutorState> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -106,84 +124,6 @@ where
 {
     fn execute(&self, future: F) {
         let _ = self.spawn(future);
-    }
-}
-
-pub(super) struct TaskShutdown {
-    tasks: JoinSet<()>,
-    state: Arc<Mutex<TaskExecutorState>>,
-}
-
-impl TaskShutdown {
-    /// Waits until every task exits, aborting remaining tasks at `deadline`.
-    pub(super) async fn wait_until(self, deadline: Instant) -> TaskShutdownReport {
-        let Self { mut tasks, state } = self;
-        let wait_result = tokio::time::timeout_at(deadline, async { while tasks.join_next().await.is_some() {} }).await;
-
-        if wait_result.is_err() {
-            let active = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).active;
-            if active > 0 {
-                tasks.abort_all();
-            }
-            while tasks.join_next().await.is_some() {}
-        }
-
-        let state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        TaskShutdownReport {
-            completed_by_deadline: state.active == 0
-                && state.last_completed.is_none_or(|completed| completed <= deadline),
-        }
-    }
-}
-
-struct TrackedFuture<F> {
-    future: Option<Pin<Box<F>>>,
-    completion: Option<TaskCompletionGuard>,
-}
-
-impl<F> Future for TrackedFuture<F>
-where
-    F: Future,
-{
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        match this
-            .future
-            .as_mut()
-            .expect("tracked task future is present while it is polled")
-            .as_mut()
-            .poll(context)
-        {
-            Poll::Ready(output) => {
-                drop(output);
-                this.future.take();
-                this.completion.take();
-                Poll::Ready(())
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl<F> Drop for TrackedFuture<F> {
-    fn drop(&mut self) {
-        self.future.take();
-        self.completion.take();
-    }
-}
-
-struct TaskCompletionGuard {
-    state: Arc<Mutex<TaskExecutorState>>,
-}
-
-impl Drop for TaskCompletionGuard {
-    fn drop(&mut self) {
-        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.active = state.active.saturating_sub(1);
-        let completed = Instant::now();
-        state.last_completed = Some(state.last_completed.map_or(completed, |latest| latest.max(completed)));
     }
 }
 
