@@ -717,6 +717,128 @@ async fn run_http2_shutdown_with_pending_body() {
     drop(service);
 }
 
+async fn run_http2_abort_with_pending_handler() {
+    let entered = Arc::new(Notify::new());
+    let handler_entered = entered.clone();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let handler_dropped = dropped.clone();
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let app = Router::new().route(
+        "/pending",
+        get(move || {
+            let entered = handler_entered.clone();
+            let dropped = handler_dropped.clone();
+            async move {
+                let _drop_signal = DropSignal(dropped);
+                entered.notify_one();
+                pending::<&'static str>().await
+            }
+        }),
+    );
+    let serving = spawn(server.serve(app, pending::<()>()));
+    let mut service = AbortOnDrop(serving);
+    let mut builder = Client::builder(TokioExecutor::new());
+    builder.http2_only(true);
+    let client = builder.build_http::<Body>();
+    let request_client = client.clone();
+    let request = spawn(async move {
+        let uri = format!("http://{address}/pending").parse().unwrap();
+        request_client.get(uri).await
+    });
+    let mut request = AbortOnDrop(request);
+
+    timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("HTTP/2 handler should enter before serve is aborted");
+    service.0.abort();
+    let error = timeout(Duration::from_secs(2), &mut service.0)
+        .await
+        .expect("aborted serve must stop")
+        .expect_err("serve was aborted");
+    assert!(error.is_cancelled());
+    timeout(Duration::from_secs(2), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("server HTTP/2 handler must be released while client is retained");
+
+    drop(client);
+    request.0.abort();
+    let _ = timeout(Duration::from_secs(1), &mut request.0).await;
+}
+
+async fn run_http2_abort_with_pending_body() {
+    let body_polled = Arc::new(Notify::new());
+    let handler_polled = body_polled.clone();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let body_dropped = dropped.clone();
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let app = Router::new().route(
+        "/pending-body",
+        get(move || {
+            let polled = handler_polled.clone();
+            let dropped = body_dropped.clone();
+            async move {
+                let stream = PendingHttp2Body {
+                    _drop_signal: DropSignal(dropped),
+                    polled,
+                };
+                axum::response::Response::new(Body::from_stream(stream))
+            }
+        }),
+    );
+    let serving = spawn(server.serve(app, pending::<()>()));
+    let mut service = AbortOnDrop(serving);
+    let mut builder = Client::builder(TokioExecutor::new());
+    builder.http2_only(true);
+    let client = builder.build_http::<Body>();
+    let request_client = client.clone();
+    let (headers_tx, headers_rx) = oneshot::channel();
+    let request = spawn(async move {
+        let uri = format!("http://{address}/pending-body").parse().unwrap();
+        let response = request_client.get(uri).await.unwrap();
+        let _ = headers_tx.send(response.status());
+        let mut body = response.into_body();
+        let _ = poll_fn(|context| Pin::new(&mut body).poll_frame(context)).await;
+        pending::<()>().await;
+    });
+    let mut request = AbortOnDrop(request);
+
+    let status = timeout(Duration::from_secs(2), headers_rx)
+        .await
+        .expect("HTTP/2 response headers should arrive")
+        .unwrap();
+    assert_eq!(status, axum::http::StatusCode::OK);
+    timeout(Duration::from_secs(2), body_polled.notified())
+        .await
+        .expect("HTTP/2 response body should be polled before serve is aborted");
+    service.0.abort();
+    let error = timeout(Duration::from_secs(2), &mut service.0)
+        .await
+        .expect("aborted serve must stop")
+        .expect_err("serve was aborted");
+    assert!(error.is_cancelled());
+    timeout(Duration::from_secs(2), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("server HTTP/2 body must be released while client is retained");
+
+    drop(client);
+    request.0.abort();
+    let _ = timeout(Duration::from_secs(1), &mut request.0).await;
+}
+
 #[tokio_test]
 async fn test_http2_shutdown_reaps_pending_handler_before_return() {
     run_http2_shutdown_with_pending_handler().await;
@@ -735,4 +857,24 @@ async fn test_http2_shutdown_reaps_pending_body_before_return() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_http2_shutdown_reaps_pending_body_before_return_multi_thread() {
     run_http2_shutdown_with_pending_body().await;
+}
+
+#[tokio_test]
+async fn test_http2_abort_releases_pending_handler() {
+    run_http2_abort_with_pending_handler().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_http2_abort_releases_pending_handler_multi_thread() {
+    run_http2_abort_with_pending_handler().await;
+}
+
+#[tokio_test]
+async fn test_http2_abort_releases_pending_body() {
+    run_http2_abort_with_pending_body().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_http2_abort_releases_pending_body_multi_thread() {
+    run_http2_abort_with_pending_body().await;
 }
