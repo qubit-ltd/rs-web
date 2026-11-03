@@ -141,7 +141,7 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the f
 
 ## Contributing
 
-Contributions are welcome. Run `./.infra/bin/style-check.sh` for style checks and `./.infra/bin/ci-check.sh` for the crate's full acceptance checks before submitting a pull request. The manual WebSocket workflow checks this crate only; it does not check downstream crates. Please open an [issue](https://github.com/qubit-ltd/rs-web/issues) to discuss a change or submit a [pull request](https://github.com/qubit-ltd/rs-web/pulls).
+Contributions are welcome. Run `./.infra/bin/style-check.sh` for style checks and `./.infra/bin/ci-check.sh` for the crate's full acceptance checks before submitting a pull request. The [WebSocket interoperability workflow](.github/workflows/downstream-interop.yml) tests this crate's WebSocket contracts and a fixed rs-websocket consumer against the current rs-web source. Please open an [issue](https://github.com/qubit-ltd/rs-web/issues) to discuss a change or submit a [pull request](https://github.com/qubit-ltd/rs-web/pulls).
 
 ## Author
 

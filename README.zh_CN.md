@@ -141,7 +141,7 @@ cargo test -p qubit-web --no-default-features --features ws --test websocket_tes
 
 ## 贡献
 
-欢迎参与贡献。提交 Pull Request 前，可用 `./.infra/bin/style-check.sh` 检查代码风格，并用 `./.infra/bin/ci-check.sh` 完成本 crate 的验收检查。手动 WebSocket workflow 也只检查当前 crate，不会检查下游 crate。提出改进前可先到 [Issues](https://github.com/qubit-ltd/rs-web/issues) 讨论，也可直接提交 [Pull Request](https://github.com/qubit-ltd/rs-web/pulls)。
+欢迎参与贡献。提交 Pull Request 前，可用 `./.infra/bin/style-check.sh` 检查代码风格，并用 `./.infra/bin/ci-check.sh` 完成本 crate 的验收检查。[WebSocket 互操作 workflow](.github/workflows/downstream-interop.yml) 会检查当前 crate 的 WebSocket 合同，并将固定版本的 rs-websocket 下游与当前 rs-web 源码进行互操作测试。提出改进前可先到 [Issues](https://github.com/qubit-ltd/rs-web/issues) 讨论，也可直接提交 [Pull Request](https://github.com/qubit-ltd/rs-web/pulls)。
 
 ## 作者
 
