@@ -1,0 +1,15 @@
+[package]
+name = "macro-consumer-impl-cfg"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[features]
+impl-enabled = []
+
+[dependencies]
+qubit-web = { path = "../../../..", default-features = false }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1.54", features = ["macros", "rt"] }
+tower = { version = "0.5", features = ["util"] }

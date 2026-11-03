@@ -5,6 +5,8 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 
 use qubit_web::ControllerRoutes;
@@ -112,6 +114,35 @@ fn test_macro_crate_documentation_example_compiles() {
         .expect("add Health controller")
         .finish();
     let _ = router;
+}
+
+#[test]
+fn impl_cfg_macro_consumer_compiles_with_feature_disabled_and_enabled() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = repository.join("tests/fixtures/macro_consumers/impl_cfg/Cargo.toml");
+    let target_dir = repository.join("target/macro-impl-cfg");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+
+    for feature in [None, Some("impl-enabled")] {
+        let mut command = Command::new(&cargo);
+        command
+            .arg("test")
+            .arg("--locked")
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .arg("--target-dir")
+            .arg(&target_dir)
+            .env("CARGO_TARGET_DIR", &target_dir);
+        if let Some(feature) = feature {
+            command.arg("--features").arg(feature);
+        }
+        let output = command.output().expect("run the impl cfg consumer fixture");
+        assert!(
+            output.status.success(),
+            "impl cfg consumer failed with feature {feature:?}:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[tokio::test]
