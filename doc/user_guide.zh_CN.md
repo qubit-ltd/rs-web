@@ -79,7 +79,7 @@ let server = WebServer::bind_http(server_options).await?;
 
 ## 装配普通接口与长连接
 
-Controller 短路由默认使用每个请求体 1 MiB、每个 builder 共享 256 个并发请求、handler 工作及响应体传输 30 秒的预算。添加 Controller 前调用 `with_http_limits` 可替换该策略。原生 Axum 路由不会继承 Controller 限额，需在选定的普通短路由分支显式安装 `RequestLimitLayer`。`WebServer` 按原样服务调用方提供的 Router，不会添加路由 layer。限额约束被读取的请求体数据、处理中的 handler 并发数和所选分支的请求期限。handler 超过期限时 layer 返回 `504 Gateway Timeout`。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，layer 返回 HTTP 500 和代码 `invalid_configuration`。若响应头已经发出，期限到达会立即丢弃应用响应体并归还短请求许可，但无法更改状态码；下一次轮询响应体时才会报告一次超时错误。慢客户端或传输背压可能推迟客户端观察到该错误的时间。此期限不会关闭 TCP 或 HTTP/2 连接，连接仍由独立的传输策略管理。对于没有超限 `Content-Length` 的分块短请求，handler 可能先产生副作用，之后读取到超限帧才返回 413；该响应不会回滚副作用。若业务要求先验证完整请求体再产生副作用，应先完整读取并验证 body。
+Controller 短路由默认使用每个请求体 1 MiB、每个 builder 共享 256 个并发请求、handler 工作及响应体传输 30 秒的预算。添加 Controller 前调用 `with_http_limits` 可替换该策略。原生 Axum 路由不会继承 Controller 限额，需在选定的普通短路由分支显式安装 `RequestLimitLayer`。`WebServer` 按原样服务调用方提供的 Router，不会添加路由 layer。限额约束被读取的请求体数据、处理中的 handler 并发数和所选分支的请求期限。handler 超过期限时 layer 返回 `504 Gateway Timeout`。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，layer 返回 HTTP 500 和代码 `invalid_configuration`。若响应头已经发出，期限到达会立即丢弃应用响应体并归还短请求许可，但无法更改状态码。启用响应体诊断时，即使传输不再轮询响应体，期限触发时也会发出超时事件；body error 本身仍要等之后再次轮询才会观察到。慢客户端或传输背压可能推迟客户端观察到该错误的时间。此期限不会关闭 TCP 或 HTTP/2 连接，连接仍由独立的传输策略管理。对于没有超限 `Content-Length` 的分块短请求，handler 可能先产生副作用，之后读取到超限帧才返回 413；该响应不会回滚副作用。若业务要求先验证完整请求体再产生副作用，应先完整读取并验证 body。
 
 ```rust
 use std::time::Duration;
@@ -321,7 +321,7 @@ let server = WebServer::bind_https(options, tls).await?;
 
 服务端通过现有 `tracing` subscriber 发出采样后的连接失败事件。将 `qubit_web::transport` target 的级别设为 `DEBUG`（例如过滤器 `qubit_web::transport=debug`），即可观测 `tls_handshake_timeout`、`tls_handshake_failed` 和 `http_connection_failed`。每次 `serve` 调用、每种失败类别分别累计 `failure_count`；计数为 1、2、4、8 及后续 2 的幂时输出事件，字段 `sampling="powers_of_two"`。这种采样用于限制日志量，不是逐次失败审计日志，也不保证严格的每秒速率。事件只含固定失败类别和计数，不含底层错误、请求数据、对端地址或 TLS 秘密信息。本 crate 不安装全局 subscriber。
 
-在需要观测的 Router 分支上使用 `DiagnosticLayer::new()` 安装请求诊断层。构造器不再接受类型参数；已有调用请删除 `::<...>` turbofish。这不会改变 Router 的 `AppState`，也无需修改状态类型。
+在需要观测的 Router 分支上使用 `DiagnosticLayer::new()` 安装请求诊断层，保留现有响应头日志行为。若还要记录响应体终止事件，请在选定分支显式使用 `DiagnosticLayer::with_body_diagnostics()`，并将它放在 `RequestLimitLayer` 外侧，以共享请求的终止观察状态。`response_body_end` 事件的结果为 `complete`、`timeout`、`body_error` 或 `dropped` 之一；`status` 是响应头状态，耗时在响应体进入终止状态时结束。`dropped` 不能证明客户端断连，`complete` 也不代表网络已确认送达。事件只包含允许列表中的请求元数据，不记录响应体字节或错误文本。若 Controller Router 已输出相同的响应头诊断，不要再包一层，除非有意接受重复的响应头事件。构造器不再接受类型参数；已有调用请删除 `::<...>` turbofish。两个入口都不会改变 Router 的 `AppState`，也无需修改状态类型。
 
 在把 server 移入服务任务前复制一份 `ServerContext`。通过 context-aware 入口创建的 SSE 和 WebSocket 会登记到活跃会话数。应用可以自行添加诊断路由：
 
@@ -407,7 +407,7 @@ assert!(WsUpgradePolicy::new()
 | 过载时客户端等待或连接失败 | 检查该实例的 transport 额度和系统 backlog。accept 之前不会有保证的 503。 |
 | 请求体超过上限但仍成功 | 对 Controller `short` 路由，确认 handler/extractor 实际读取请求体，并检查是否用 `with_http_limits` 替换成了更大的预算。对原生 Axum 路由，在该分支安装 `RequestLimitLayer`，并确认请求体被读取。 |
 | SSE 在普通请求期限到达时关闭 | 从该流式分支移除 `RequestLimitLayer`，改用 `SseConnectionPolicy` 的连接策略。 |
-| 慢客户端没有立即观察到短响应超时 | 响应头发出后，期限会释放应用响应体和短请求许可；只有传输再次轮询时才能报告 body error。它不会更改响应状态或关闭连接；传输连接由独立策略管理。 |
+| 慢客户端没有立即观察到短响应超时 | 响应头发出后，期限会释放应用响应体和短请求许可；只有传输再次轮询时才能返回 body error。启用的响应体诊断事件会在期限到达时发出，无需等待再次轮询。它不会更改响应状态或关闭连接；传输连接由独立策略管理。 |
 | WS 建立后 `active_sessions()` 仍为 0 | 调用 `WsUpgradePolicy::on_upgrade` 并传入服务的 `ServerContext`；原生 Axum upgrade 不属于受管会话统计。 |
 | `WsUpgradePolicy::validate()` 报告连接数或入站队列配置无效 | 检查最终的 `max_connections` 和 `inbound_queue_limits`：零值对应 `WsPolicyError::ZeroLimit`；连接数超上限对应 `ConnectionLimitTooLarge`；入站条数超 `tokio::sync::Semaphore::MAX_PERMITS` 对应 `InboundQueueLimitTooLarge`；入站字节预算必须为正。修正设置后重新校验；无效策略不能升级。 |
 | 入站负载下 WebSocket 以 `1013` 关闭 | 应用可能没有及时调用 `WsSession::recv()`，也可能已用尽累计入站 payload 预算。默认每连接最多排队 64 条消息和 1 MiB；通道满时等待至 `idle_timeout`，字节预算不足时立即关闭。使用 `inbound_queue_limits` 调整字节预算，持续读取消息，并在接收后将较长处理交给应用任务。 |
