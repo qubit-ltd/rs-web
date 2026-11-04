@@ -10,15 +10,30 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-/// Tracks consecutive accept failures and retains a terminal failure.
+/// Tracks consecutive accept failures, their next retry deadline, and a
+/// terminal failure.
+///
+/// Transient failures schedule at most eight retries with exponential backoff.
+/// A fatal error, or a ninth consecutive failure, is retained for the server to
+/// report.
 #[derive(Default)]
 pub(super) struct AcceptRetry {
+    /// Number of consecutive transient failures since the last successful
+    /// accept.
     failures: u32,
+    /// Fatal error or error from the ninth consecutive failure, awaiting
+    /// consumption.
     terminal_error: Option<io::Error>,
+    /// Absolute Tokio instant at which the next retry may be attempted.
     retry_at: Option<Instant>,
 }
 
 impl AcceptRetry {
+    /// Records an accept error and returns the absolute deadline for a
+    /// scheduled retry.
+    ///
+    /// Fatal errors and errors after eight already scheduled retries are
+    /// retained as terminal errors and return `None`.
     pub(super) fn record_error(&mut self, error: io::Error) -> Option<Instant> {
         if is_fatal_accept_error(&error) || self.failures == 8 {
             self.terminal_error = Some(error);
@@ -31,25 +46,33 @@ impl AcceptRetry {
         Some(retry_at)
     }
 
+    /// Resets the consecutive failure count and clears any scheduled retry
+    /// deadline.
     pub(super) fn record_success(&mut self) {
         self.failures = 0;
         self.retry_at = None;
     }
 
+    /// Returns the absolute deadline for a pending retry, if one is scheduled.
     pub(super) fn retry_at(&self) -> Option<Instant> {
         self.retry_at
     }
 
+    /// Returns the consecutive failure count for tests.
     #[cfg(test)]
     pub(super) fn consecutive_failures(&self) -> u32 {
         self.failures
     }
 
+    /// Takes the retained terminal error, leaving no error stored in this
+    /// tracker.
     pub(super) fn take_terminal_error(&mut self) -> Option<io::Error> {
         self.terminal_error.take()
     }
 }
 
+/// Reports whether an accept error should terminate the accept loop
+/// immediately.
 fn is_fatal_accept_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -60,6 +83,8 @@ fn is_fatal_accept_error(error: &io::Error) -> bool {
     )
 }
 
+/// Returns the exponential delay for a retry number in `1..=8`, capped at 1000
+/// ms.
 pub(super) fn accept_retry_delay(retry_number: u32) -> Duration {
     debug_assert!((1..=8).contains(&retry_number));
     Duration::from_millis((10_u64 << (retry_number - 1)).min(1000))
@@ -76,8 +101,8 @@ mod tests {
     use super::super::accept_result::AcceptResult;
     use super::AcceptRetry;
 
-    #[test]
-    fn test_accept_transient_error_then_success_keeps_server_running() {
+    #[tokio::test(start_paused = true)]
+    async fn test_accept_transient_error_then_success_keeps_server_running() {
         let mut retry = AcceptRetry::default();
         let before = Instant::now();
         let retry_at =
@@ -85,21 +110,21 @@ mod tests {
                 AcceptResult::Retry => retry.retry_at().expect("retry state retains its deadline"),
                 _ => panic!("transient failure must schedule retry"),
             };
-        assert!(retry_at.duration_since(before) >= Duration::from_millis(10));
-        assert!(retry_at.duration_since(before) < Duration::from_millis(11));
+        assert_eq!(retry_at, before + Duration::from_millis(10));
         assert!(matches!(
             handle_accept_result(&mut retry, Ok(())),
             AcceptResult::Accepted(())
         ));
         assert!(retry.retry_at().is_none());
+        assert_eq!(retry.consecutive_failures(), 0);
         let before = Instant::now();
         let retry_at =
             match handle_accept_result::<()>(&mut retry, Err(io::Error::from(io::ErrorKind::ConnectionAborted))) {
                 AcceptResult::Retry => retry.retry_at().expect("retry state retains its deadline"),
                 _ => panic!("failure after success starts a new retry series"),
             };
-        assert!(retry_at.duration_since(before) >= Duration::from_millis(10));
-        assert!(retry_at.duration_since(before) < Duration::from_millis(11));
+        assert_eq!(retry_at, before + Duration::from_millis(10));
+        assert_eq!(retry.consecutive_failures(), 1);
     }
 
     #[test]
