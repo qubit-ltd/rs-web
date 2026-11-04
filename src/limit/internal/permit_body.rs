@@ -152,14 +152,25 @@ impl hyper::body::Body for PermitBody {
             }
             std::task::Poll::Ready(Some(Ok(frame))) => {
                 state.waker = None;
-                let event = if state.inner.as_ref().is_some_and(Body::is_end_stream) {
-                    this.observation
+                let ended = state.inner.as_ref().is_some_and(Body::is_end_stream);
+                let (inner, permit, event) = if ended {
+                    state.phase = Phase::Finished;
+                    let inner = state.inner.take();
+                    let permit = state.permit.take();
+                    let event = this
+                        .observation
                         .as_ref()
-                        .and_then(|observation| observation.mark_terminal("complete"))
+                        .and_then(|observation| observation.mark_terminal("complete"));
+                    (inner, permit, event)
                 } else {
-                    None
+                    (None, None, None)
                 };
                 drop(state);
+                if ended {
+                    this.cancel_watcher();
+                }
+                drop(inner);
+                drop(permit);
                 if let Some(observation) = &this.observation {
                     observation.emit(event);
                 }

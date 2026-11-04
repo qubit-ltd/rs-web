@@ -80,7 +80,8 @@ fn is_http_tchar(byte: u8) -> bool {
 ///
 /// # Returns
 ///
-/// `true` only for `charset=utf-8`, allowing matching single or double quotes.
+/// `true` only for a case-insensitive UTF-8 charset value, either unquoted or
+/// enclosed in matching double quotes.
 #[must_use]
 #[inline]
 fn is_utf8_charset(parameter: &str) -> bool {

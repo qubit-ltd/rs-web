@@ -40,6 +40,24 @@ struct ObservedChunks {
     poll_count: Arc<AtomicUsize>,
 }
 
+struct FinalFrameBody(Option<Bytes>);
+
+impl hyper::body::Body for FinalFrameBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        Poll::Ready(self.0.take().map(|data| Ok(hyper::body::Frame::data(data))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
 impl hyper::body::Body for ObservedChunks {
     type Data = Bytes;
     type Error = Infallible;
@@ -421,12 +439,12 @@ async fn short_request_deadline_returns_gateway_timeout() {
 }
 
 #[tokio::test]
-async fn permit_is_held_until_response_body_eof() {
-    async fn reply() -> &'static str {
-        "ok"
-    }
+async fn permit_is_released_after_final_frame() {
     let app = Router::new()
-        .route("/", axum::routing::get(reply))
+        .route(
+            "/",
+            axum::routing::get(|| async { Response::new(Body::new(FinalFrameBody(Some(Bytes::from_static(b"ok"))))) }),
+        )
         .layer(RequestLimitLayer::new(
             HttpLimits::default().with_max_concurrent_requests(1).unwrap(),
         ));
@@ -435,13 +453,6 @@ async fn permit_is_held_until_response_body_eof() {
         .oneshot(Request::get("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
-    let first_body = first.body_mut();
-    let first_frame = std::future::poll_fn(|context| Pin::new(&mut *first_body).poll_frame(context))
-        .await
-        .expect("the response should contain a data frame")
-        .expect("the response frame should be valid");
-    assert_eq!(first_frame.into_data().unwrap(), "ok");
-
     let rejected = app
         .clone()
         .oneshot(Request::get("/").body(Body::empty()).unwrap())
@@ -449,10 +460,12 @@ async fn permit_is_held_until_response_body_eof() {
         .unwrap();
     assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-    while std::future::poll_fn(|context| Pin::new(&mut *first_body).poll_frame(context))
+    let first_frame = std::future::poll_fn(|context| Pin::new(first.body_mut()).poll_frame(context))
         .await
-        .is_some()
-    {}
+        .expect("the response should contain a final data frame")
+        .expect("the response frame should be valid");
+    assert_eq!(first_frame.into_data().unwrap(), "ok");
+
     assert_eq!(first.status(), StatusCode::OK);
 
     let second = app
@@ -461,6 +474,12 @@ async fn permit_is_held_until_response_body_eof() {
         .await
         .unwrap();
     assert_eq!(second.status(), StatusCode::OK);
+    assert!(HttpBody::is_end_stream(first.body()));
+    assert!(
+        std::future::poll_fn(|context| { Pin::new(first.body_mut()).poll_frame(context) })
+            .await
+            .is_none()
+    );
     drop(first);
     drop(second);
     let third = app
@@ -468,6 +487,39 @@ async fn permit_is_held_until_response_body_eof() {
         .await
         .unwrap();
     assert_eq!(third.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn completed_body_stays_finished_after_deadline() {
+    let app = Router::new()
+        .route(
+            "/",
+            axum::routing::get(|| async { Response::new(Body::new(FinalFrameBody(Some(Bytes::from_static(b"ok"))))) }),
+        )
+        .layer(RequestLimitLayer::new(
+            HttpLimits::default()
+                .with_request_timeout(std::time::Duration::from_millis(100))
+                .unwrap(),
+        ));
+    let mut response = app
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    let frame = std::future::poll_fn(|context| Pin::new(response.body_mut()).poll_frame(context))
+        .await
+        .expect("the response should contain a final data frame")
+        .expect("the response frame should be valid");
+    assert_eq!(frame.into_data().unwrap(), "ok");
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    assert!(HttpBody::is_end_stream(response.body()));
+    assert!(
+        std::future::poll_fn(|context| { Pin::new(response.body_mut()).poll_frame(context) })
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]

@@ -99,6 +99,7 @@ async fn test_rejects_non_utf8_duplicate_and_malformed_content_type_parameters()
         "application/json; charset=us-ascii",
         "application/json; profile=example",
         "application/json; charset=utf-8; charset=utf-8",
+        "application/json; charset='utf-8'",
         "application/json; charset=\"utf-8",
         "application/json; charset=utf-8;",
     ] {
