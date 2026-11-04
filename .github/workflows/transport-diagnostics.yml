@@ -1,0 +1,59 @@
+name: Transport backpressure diagnostics
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '37 3 * * 2'
+
+permissions:
+  contents: read
+
+jobs:
+  backpressure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: interop/rs-web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: interop/rs-web
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Prepare local path dependencies
+        run: ./.infra/bin/prepare-local-path-dependencies.sh
+      - name: Run backpressure diagnostics
+        id: diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            rustc -Vv
+            cargo -V
+            cat Cargo.lock
+            cargo test -p qubit-web --locked --test transport_backpressure_tests -- --ignored --nocapture --test-threads=1
+          } 2>&1 | tee transport-backpressure.log
+      - name: Summarize
+        if: always()
+        working-directory: ${{ github.workspace }}
+        env:
+          DIAGNOSTICS_OUTCOME: ${{ steps.diagnostics.outcome }}
+        shell: bash
+        run: |
+          {
+            echo '### Transport backpressure diagnostics'
+            if [[ -f interop/rs-web/transport-backpressure.log ]]; then
+              echo "Test step outcome: ${DIAGNOSTICS_OUTCOME:-not reached}"
+              echo 'The log artifact includes the revision, toolchain, lockfile, and all three scenario results.'
+            else
+              echo 'No diagnostic log was produced. Checkout or local dependency preparation may have failed before the test step.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: transport-backpressure
+          path: interop/rs-web/transport-backpressure.log
+          if-no-files-found: warn
+          retention-days: 14

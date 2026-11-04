@@ -1,5 +1,11 @@
 # WEB-RE03: Backpressure and request-timeout investigation
 
+## Ongoing diagnostic entry point (WEB-RE01)
+
+The [Transport backpressure diagnostics workflow](../.github/workflows/transport-diagnostics.yml) runs every Tuesday at 03:37 UTC and can also be started manually from GitHub Actions. It runs the three ignored scenarios serially, prints the checked-out revision, Rust/Cargo versions, and `Cargo.lock`, and uploads the complete output as a 14-day artifact. A failing test makes the workflow fail; if checkout or local dependency preparation fails before the test step, the summary reports that no diagnostic log was produced. Review the workflow log and artifact to distinguish setup failures from scenario failures, then investigate the recorded revision and locked dependencies. These timing-sensitive loopback experiments are diagnostic signals, not performance thresholds or release gates.
+
+The local equivalent is `cargo test -p qubit-web --locked --test transport_backpressure_tests -- --ignored --nocapture --test-threads=1`.
+
 Date: 2026-11-04. Locked HTTP/2 dependency versions are recorded below.
 
 ## Static lifecycle evidence
