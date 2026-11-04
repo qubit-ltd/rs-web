@@ -5,10 +5,17 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use super::Route;
-use proc_macro2::{Ident, Span, TokenStream};
+use proc_macro2::Ident;
+use proc_macro2::Span;
+use proc_macro2::TokenStream;
+use syn::ItemImpl;
+use syn::LitStr;
+use syn::Meta;
+use syn::Token;
+use syn::Type;
 use syn::punctuated::Punctuated;
-use syn::{ItemImpl, LitStr, Meta, Token, Type};
+
+use super::Route;
 
 /// Raw controller syntax and normalized analysis shared by the three stages.
 pub(in crate::controller) struct ControllerModel {

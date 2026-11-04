@@ -5,16 +5,26 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::collections::HashMap;
+
+use proc_macro2::TokenStream;
+use quote::format_ident;
+use quote::quote;
+use syn::FnArg;
+use syn::ImplItem;
+
 use super::ControllerModel;
 use super::controller_model::ControllerMethod;
-use crate::controller::{
-    cfg_condition, combine_conditions, make_route, parse_options, resolve_self_type, state_extractor_type,
-    validate_method, validate_path, validate_template, validate_websocket_methods,
-};
-use proc_macro2::TokenStream;
-use quote::quote;
-use std::collections::HashMap;
-use syn::{FnArg, ImplItem};
+use crate::controller::cfg_condition;
+use crate::controller::combine_conditions;
+use crate::controller::make_route;
+use crate::controller::parse_options;
+use crate::controller::resolve_self_type;
+use crate::controller::state_extractor_type;
+use crate::controller::validate_method;
+use crate::controller::validate_path;
+use crate::controller::validate_template;
+use crate::controller::validate_websocket_methods;
 
 /// Resolves route declarations and checks method, path, cfg, and state constraints.
 pub(in crate::controller) fn validate(model: &mut ControllerModel) -> syn::Result<()> {
@@ -24,7 +34,7 @@ pub(in crate::controller) fn validate(model: &mut ControllerModel) -> syn::Resul
         .controller_name
         .clone()
         .ok_or_else(|| syn::Error::new_spanned(&model.self_ty, "controller type must be a named struct"))?;
-    model.instance_name = Some(quote::format_ident!("__QubitControllerInstanceFor{}", controller_name));
+    model.instance_name = Some(format_ident!("__QubitControllerInstanceFor{}", controller_name));
     let mut used_routes: HashMap<(String, String), Vec<Vec<TokenStream>>> = HashMap::new();
     for pending in &model.pending {
         let cfg = pending.cfg.as_ref().map_err(|error| error.clone())?;

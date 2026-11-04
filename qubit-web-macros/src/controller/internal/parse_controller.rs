@@ -5,13 +5,26 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use proc_macro2::TokenStream;
+use quote::format_ident;
+use quote::quote;
+use syn::Attribute;
+use syn::ImplItem;
+use syn::ItemImpl;
+use syn::LitStr;
+use syn::Type;
+use syn::parse2;
+use syn::spanned::Spanned;
+
 use super::MappingArgs;
 use super::RouteArgs;
-use super::controller_model::{ControllerModel, PendingMethod, PendingRoute};
+use super::controller_model::ControllerModel;
+use super::controller_model::PendingMethod;
+use super::controller_model::PendingRoute;
 use super::resolve_runtime_path;
-use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
-use syn::{Attribute, ImplItem, ItemImpl, LitStr, Type, parse2};
+use crate::controller::cfg_attr_contains_mapping;
+use crate::controller::effective_cfg;
+use crate::controller::marker_verb;
 
 /// Reads controller syntax and preserves its declaration and cfg order.
 pub(in crate::controller) fn parse(args: TokenStream, input: TokenStream) -> syn::Result<ControllerModel> {
@@ -106,6 +119,3 @@ fn parse_mapping_attribute(attr: &Attribute) -> syn::Result<Option<PendingRoute>
     }
     Ok(None)
 }
-
-use crate::controller::{cfg_attr_contains_mapping, effective_cfg, marker_verb};
-use syn::spanned::Spanned;

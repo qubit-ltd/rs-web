@@ -5,13 +5,17 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use super::ControllerModel;
-use super::controller_model::ControllerMethod;
-use crate::controller::{cfg_attribute, make_handler, method_filter, route_kind};
 use proc_macro2::TokenStream;
 use quote::format_ident;
 use quote::quote;
 use syn::ImplItem;
+
+use super::ControllerModel;
+use super::controller_model::ControllerMethod;
+use crate::controller::cfg_attribute;
+use crate::controller::make_handler;
+use crate::controller::method_filter;
+use crate::controller::route_kind;
 
 /// Generates handlers, route metadata, and controller registration implementations.
 pub(in crate::controller) fn generate(model: ControllerModel) -> syn::Result<TokenStream> {
