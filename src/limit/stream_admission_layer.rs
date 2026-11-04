@@ -35,6 +35,10 @@ pub type StreamAdmissionMiddleware = fn(State<StreamAdmissionState>, Request<Bod
 /// Creates middleware that buffers request bodies before invoking a long-lived
 /// route handler. The deadline ends when response headers are produced; it
 /// does not cover streaming the response body or a WebSocket session.
+/// The deadline uses cooperative Tokio cancellation. Synchronous work that
+/// does not yield can delay timeout checks and cleanup, and may finish
+/// successfully after the deadline. Cancelling a wait does not stop an
+/// already running `spawn_blocking` task or application-spawned work.
 ///
 /// # Example
 ///

@@ -5,7 +5,9 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Complete JSON response encoder and problem response helper.
+//! Complete JSON response encoder and problem response helper. Byte and
+//! structure budgets do not guarantee a CPU time bound for user-provided
+//! `Serialize` implementations; encoding is synchronous.
 
 use axum::body::Body;
 use axum::http::StatusCode;

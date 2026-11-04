@@ -149,3 +149,5 @@ Contributions are welcome. Run `./.infra/bin/style-check.sh` for style checks an
 ## Author
 
 **Haixing Hu** — [Qubit Co. Ltd.](https://github.com/qubit-ltd)
+
+Deadlines use cooperative Tokio cancellation, so non-yielding synchronous work can delay checks and cleanup. HTTP and HTTPS handlers can extract the direct TCP peer through Axum `ConnectInfo<SocketAddr>`; see the [user guide](doc/user_guide.md) for proxy and execution boundaries.

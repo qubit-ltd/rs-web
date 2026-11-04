@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::Request;
 use axum::http::header;
 use axum::routing::get;
@@ -39,6 +40,110 @@ use tokio::sync::oneshot;
 use tokio::test as tokio_test;
 use tokio::time;
 use tower::ServiceExt;
+
+async fn peer_address(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> String {
+    peer.to_string()
+}
+
+#[tokio_test]
+async fn test_connect_info_http_matches_each_tcp_peer_and_ignores_proxy_headers() {
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let addr = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let serving = spawn(
+        server.serve(Router::new().route("/peer", get(peer_address)), async move {
+            let _ = shutdown_rx.await;
+        }),
+    );
+    let result: Result<Vec<(SocketAddr, SocketAddr)>, Box<dyn std::error::Error + Send + Sync>> = async {
+        let mut results = Vec::new();
+        for _ in 0..2 {
+            let mut stream = time::timeout(Duration::from_secs(3), TcpStream::connect(addr)).await??;
+            let expected = stream.local_addr()?;
+            time::timeout(Duration::from_secs(3), stream.write_all(b"GET /peer HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nForwarded: for=203.0.113.1\r\nX-Forwarded-For: 203.0.113.1\r\n\r\n")).await??;
+            let mut response = Vec::new();
+            time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response)).await??;
+            let response = String::from_utf8(response)?;
+            let actual = response.rsplit("\r\n\r\n").next().ok_or("HTTP response has no body")?.parse::<SocketAddr>()?;
+            results.push((expected, actual));
+        }
+        Ok(results)
+    }
+    .await;
+    let _ = shutdown_tx.send(());
+    let shutdown = time::timeout(Duration::from_secs(3), serving)
+        .await
+        .expect("server shutdown should complete")
+        .expect("server task should not panic")
+        .expect("server should report shutdown");
+    assert!(shutdown.graceful);
+    for (expected, actual) in result.expect("HTTP requests should return peer addresses") {
+        assert_eq!(actual, expected);
+    }
+}
+
+#[tokio_test]
+async fn test_connect_info_http2_is_shared_by_requests_on_connection() {
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let addr = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let serving = spawn(
+        server.serve(Router::new().route("/peer", get(peer_address)), async move {
+            let _ = shutdown_rx.await;
+        }),
+    );
+    let mut client_driver = None;
+    let result: Result<(SocketAddr, Vec<SocketAddr>), Box<dyn std::error::Error + Send + Sync>> = async {
+        let stream = time::timeout(Duration::from_secs(3), TcpStream::connect(addr)).await??;
+        let expected = stream.local_addr()?;
+        let (mut sender, driver) = time::timeout(
+            Duration::from_secs(3),
+            http2::handshake(TokioExecutor::new(), TokioIo::new(stream)),
+        )
+        .await??;
+        client_driver = Some(spawn(driver));
+        let mut results = Vec::new();
+        for _ in 0..2 {
+            let request = HyperRequest::builder()
+                .uri(format!("http://{addr}/peer"))
+                .body(Empty::<Bytes>::new())?;
+            let response = time::timeout(Duration::from_secs(3), sender.send_request(request)).await??;
+            let body = time::timeout(
+                Duration::from_secs(3),
+                http_body_util::BodyExt::collect(response.into_body()),
+            )
+            .await??
+            .to_bytes();
+            results.push(String::from_utf8(body.to_vec())?.parse::<SocketAddr>()?);
+        }
+        drop(sender);
+        Ok((expected, results))
+    }
+    .await;
+    let _ = shutdown_tx.send(());
+    let shutdown = time::timeout(Duration::from_secs(3), serving)
+        .await
+        .expect("server shutdown should complete")
+        .expect("server task should not panic")
+        .expect("server should report shutdown");
+    assert!(shutdown.graceful);
+    let addresses = result;
+    if let Some(driver) = client_driver {
+        let driver_result = time::timeout(Duration::from_secs(3), driver)
+            .await
+            .expect("HTTP/2 client driver should stop after server shutdown")
+            .expect("HTTP/2 client driver should not panic");
+        assert!(driver_result.is_ok(), "HTTP/2 driver failed: {driver_result:?}");
+    }
+    let (expected, results) = addresses.expect("HTTP/2 requests should return peer addresses");
+    for actual in results {
+        assert_eq!(actual, expected);
+    }
+}
 
 struct PendingEvents;
 

@@ -241,6 +241,26 @@ impl WebServer {
     /// asynchronous draining or return a [`ShutdownReport`]; hosts should
     /// resolve the shutdown future and await this method for graceful shutdown.
     ///
+    /// Deadlines use cooperative Tokio cancellation. Synchronous work that does
+    /// not yield can delay timeout checks and cleanup, and may finish
+    /// successfully after the deadline. Cancelling a wait does not stop an
+    /// already running `spawn_blocking` task or application-spawned work.
+    ///
+    /// Each request received over HTTP or HTTPS includes Axum's
+    /// `ConnectInfo<SocketAddr>` for the accepted TCP peer. This is the direct
+    /// peer (which may be a proxy), not a verified end-user identity; forwarded
+    /// headers are not trusted. A Router invoked on its own, such as with
+    /// `oneshot`, has no transport peer and tests must insert the extension:
+    ///
+    /// ```
+    /// use axum::extract::ConnectInfo;
+    /// use std::net::SocketAddr;
+    ///
+    /// async fn handler(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> String {
+    ///     peer.to_string()
+    /// }
+    /// ```
+    ///
     /// # Type Parameters
     ///
     /// * `F` - Sendable future that resolves when the host requests shutdown.
@@ -310,7 +330,7 @@ impl WebServer {
                     Some((permit, listener.accept().await))
                 }
             },
-            |(stream, _), permit, connections| {
+            |(stream, peer_addr), permit, connections| {
                 let app = app.clone();
                 let watcher = graceful.watcher();
                 let completion = accept_completion.clone();
@@ -347,12 +367,28 @@ impl WebServer {
                                     return;
                                 }
                             };
-                            serve_connection(stream, app, watcher, connection_settings, connection_tasks, diagnostics)
-                                .await;
+                            serve_connection(
+                                stream,
+                                peer_addr,
+                                app,
+                                watcher,
+                                connection_settings,
+                                connection_tasks,
+                                diagnostics,
+                            )
+                            .await;
                             return;
                         }
-                        serve_connection(stream, app, watcher, connection_settings, connection_tasks, diagnostics)
-                            .await;
+                        serve_connection(
+                            stream,
+                            peer_addr,
+                            app,
+                            watcher,
+                            connection_settings,
+                            connection_tasks,
+                            diagnostics,
+                        )
+                        .await;
                     }
                     .instrument(tracing::Span::current())
                     .with_subscriber(connection_dispatch),
@@ -431,6 +467,7 @@ struct ConnectionSettings {
 /// * `diagnostics` - Per-serve sampled failure counters.
 async fn serve_connection<S>(
     stream: S,
+    peer_addr: SocketAddr,
     app: Router<()>,
     watcher: hyper_util::server::graceful::Watcher,
     settings: ConnectionSettings,
@@ -455,6 +492,7 @@ async fn serve_connection<S>(
             let lease = connection_activity::request_lease(&activity);
             let (mut parts, body) = request.into_parts();
             parts.extensions.insert(connection_id);
+            parts.extensions.insert(axum::extract::ConnectInfo(peer_addr));
             app.oneshot(hyper::Request::from_parts(parts, Body::new(body)))
                 .await
                 .map(|response| response.map(|body| connection_activity::retain_response_activity(body, lease)))

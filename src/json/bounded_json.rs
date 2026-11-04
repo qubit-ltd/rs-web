@@ -5,7 +5,9 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-//! Strict JSON request extractor.
+//! Strict JSON request extractor. Input byte and structure budgets do not
+//! guarantee a CPU time bound for user-provided `Deserialize` implementations;
+//! decoding is synchronous and does not yield to Tokio while it runs.
 
 use axum::body::to_bytes;
 use axum::extract::FromRequest;

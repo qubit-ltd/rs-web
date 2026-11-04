@@ -39,6 +39,10 @@ pub type LimitMiddleware = fn(State<LimitState>, Request<Body>, Next) -> LimitFu
 
 /// Creates the request limit middleware for a selected Axum router branch.
 ///
+/// The deadline uses cooperative Tokio cancellation. Synchronous work that
+/// does not yield can delay timeout checks and cleanup, and may finish
+/// successfully after the deadline. Cancelling a wait does not stop an
+/// already running `spawn_blocking` task or application-spawned work.
 /// # Examples
 ///
 /// ```

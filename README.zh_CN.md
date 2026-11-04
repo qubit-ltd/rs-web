@@ -149,3 +149,5 @@ cargo test -p qubit-web --no-default-features --features ws --test websocket_tes
 ## 作者
 
 **Haixing Hu** — [Qubit Co. Ltd.](https://github.com/qubit-ltd)
+
+期限采用 Tokio 协作式取消，不让出执行权的同步工作会延迟检查和清理。HTTP/HTTPS handler 可通过 Axum `ConnectInfo<SocketAddr>` 提取直接 TCP 对端；代理与执行边界见[用户指南](doc/user_guide.zh_CN.md)。

@@ -47,3 +47,7 @@ WebSocket 发送队列的所有克隆共享关闭状态。对端或会话关闭�
 `WebServerError` 会保留 socket 绑定、本地地址查询和 accept 故障的 `io::Error` source，调用方可通过 `std::error::Error::source()` 主动诊断。默认 `Display` 和 `Debug` 不输出底层操作系统错误文本；TLS 与配置错误也不会暴露可能包含敏感信息的 source 链。
 
 历史说明：0.2.0 曾引入以下破坏性变更：移除只接收 token 的 WebSocket 升级入口，统一使用 `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)`；WebSocket 停服期限统一通过 `ServerOptions` 配置并由 `ServerContext` 提供；`WebServerError` 不再是可复制、无 source 的枚举；SSE 接纳错误区分容量耗尽和停服拒绝。
+
+## 协作式取消边界
+
+期限依赖 Tokio 获得调度机会。不让出执行权的同步工作会延迟超时检查和清理，也可能在期限之后完成。取消等待不会停止已经运行的 `spawn_blocking` 任务或应用自行启动的工作。应用应为 CPU 密集或阻塞任务设置独立并发预算，需要强制终止时使用进程隔离。字节和结构限额不限制用户 JSON `Serialize` 或 `Deserialize` 实现的 CPU 时间；取消配合和业务副作用仍由应用负责。

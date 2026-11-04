@@ -74,3 +74,9 @@ On shutdown, the server stops accepting sockets, closes managed-session admissio
 | Shutdown | Uses one deadline for HTTP connections and managed sessions; reports remaining managed sessions. | Stop or supervise application background jobs and decide what to do when the report is not graceful. Native Axum upgrades and arbitrary jobs are outside managed-session accounting. |
 
 The [lifecycle summary](2026-10-09-rs-web-lifecycle-design.en.md) is the concise reference for current session and shutdown guarantees; the [user guide](user_guide.md) covers concrete integration.
+
+## Cooperative deadlines and transport peer
+
+Request, stream-admission, and shutdown deadlines rely on Tokio scheduling and cooperative cancellation. Synchronous work that does not yield can delay timeout checks and cleanup, and may complete successfully after its deadline. Cancelling a wait does not stop an already running `spawn_blocking` task or application-spawned work. JSON byte and structure budgets do not bound CPU time in user serialization or deserialization implementations. Applications should budget CPU-heavy or blocking work separately; use process isolation when forced termination is required. Applications own cancellation cooperation and business side effects.
+
+The accept loop injects Axum `ConnectInfo<SocketAddr>` into every HTTP and HTTPS request, including every stream on an HTTP/2 connection. It identifies the direct TCP peer, which may be a reverse proxy, and is not a verified user identity. Forwarded headers are not trusted; proxy resolution belongs to application policy.

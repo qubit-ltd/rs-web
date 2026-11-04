@@ -47,3 +47,7 @@ An ordinary write stops waiting for its flush when server shutdown is cancelled.
 `WebServerError` retains socket bind, local-address, and accept failures as `io::Error` sources. Callers can inspect `std::error::Error::source()` for diagnostics. Default `Display` and `Debug` output omit the underlying OS error text; TLS and configuration errors do not expose potentially sensitive source chains.
 
 Historical note — version 0.2.0 introduced these intentional breaking changes: token-only WebSocket upgrades are removed in favor of `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)`, WebSocket shutdown timing is configured only through `ServerOptions` and `ServerContext`, `WebServerError` is no longer a copyable source-free enum, and SSE admission distinguishes capacity exhaustion from shutdown rejection.
+
+## Cooperative cancellation boundary
+
+Deadlines depend on Tokio getting scheduled. Non-yielding synchronous work can delay timeout checks and cleanup and can finish after a deadline. Cancelling the wait does not stop an already running `spawn_blocking` task or application-spawned work. Applications should give CPU-heavy or blocking jobs a separate concurrency budget and use process isolation when forced termination is required. Byte and structure budgets do not bound CPU time in user JSON `Serialize` or `Deserialize` implementations; cancellation cooperation and business side effects remain application responsibilities.

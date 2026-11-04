@@ -30,6 +30,7 @@ use std::sync::mpsc::channel;
 use std::time::Duration;
 
 use axum::Router;
+use axum::extract::ConnectInfo;
 #[cfg(all(feature = "tls", feature = "ws"))]
 use axum::extract::ws::Message;
 #[cfg(all(feature = "tls", feature = "ws"))]
@@ -49,6 +50,69 @@ use tokio::sync::oneshot;
 use tokio::task::spawn_blocking;
 use tokio::test as tokio_test;
 use tokio::time;
+use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls;
+use tokio_rustls::rustls::pki_types::pem::PemObject;
+
+async fn peer_address(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> String {
+    peer.to_string()
+}
+
+#[tokio_test]
+async fn test_connect_info_https_matches_tcp_peer() {
+    let tls = TlsConfig::from_pem_files(fixture("https-h2-cert.pem"), fixture("https-h2-key.pem"))
+        .await
+        .unwrap();
+    let server = WebServer::bind_https(ServerOptions::new("127.0.0.1:0".parse().unwrap()), tls)
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = spawn(server.serve(Router::new().route("/peer", get(peer_address)), async {
+        let _ = shutdown_rx.await;
+    }));
+    let result: Result<(SocketAddr, SocketAddr), Box<dyn std::error::Error + Send + Sync>> = async {
+        let tcp = time::timeout(Duration::from_secs(3), TokioTcpStream::connect(address)).await??;
+        let expected = tcp.local_addr()?;
+        let certificate_pem = std::fs::read(fixture("https-h2-cert.pem"))?;
+        let certificate = rustls::pki_types::CertificateDer::pem_slice_iter(&certificate_pem)
+            .next()
+            .ok_or("fixture has no certificate")??;
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate)?;
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let name = rustls::pki_types::ServerName::try_from("localhost")?.to_owned();
+        let mut stream = time::timeout(
+            Duration::from_secs(3),
+            TlsConnector::from(Arc::new(config)).connect(name, tcp),
+        )
+        .await??;
+        time::timeout(Duration::from_secs(3), stream.write_all(b"GET /peer HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nForwarded: for=203.0.113.1\r\nX-Forwarded-For: 203.0.113.1\r\n\r\n"))
+            .await??;
+        let mut response = Vec::new();
+        time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response)).await??;
+        let response = String::from_utf8(response)?;
+        let actual = response
+            .rsplit("\r\n\r\n")
+            .next()
+            .ok_or("HTTPS response has no body")?
+            .trim()
+            .parse::<SocketAddr>()?;
+        Ok((expected, actual))
+    }
+    .await;
+    let _ = shutdown_tx.send(());
+    let shutdown = time::timeout(Duration::from_secs(3), serving)
+        .await
+        .expect("server shutdown should complete")
+        .expect("server task should not panic")
+        .expect("server should report shutdown");
+    assert!(shutdown.graceful);
+    let (expected, actual) = result.expect("trusted HTTPS request should return its peer address");
+    assert_eq!(actual, expected);
+}
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

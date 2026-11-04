@@ -79,7 +79,7 @@ let server = WebServer::bind_http(server_options).await?;
 
 ## 装配普通接口与长连接
 
-Controller 短路由默认使用每个请求体 1 MiB、每个 builder 共享 256 个并发请求、handler 工作及响应体传输 30 秒的预算。添加 Controller 前调用 `with_http_limits` 可替换该策略。原生 Axum 路由不会继承 Controller 限额，需在选定的普通短路由分支显式安装 `RequestLimitLayer`。`WebServer` 按原样服务调用方提供的 Router，不会添加路由 layer。限额约束被读取的请求体数据、处理中的 handler 并发数和所选分支的请求期限。handler 超过期限时 layer 返回 `504 Gateway Timeout`。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，layer 返回 HTTP 500 和代码 `invalid_configuration`。若响应头已经发出，期限到达会立即丢弃应用响应体并归还短请求许可，但无法更改状态码。启用响应体诊断时，即使传输不再轮询响应体，期限触发时也会发出超时事件；body error 本身仍要等之后再次轮询才会观察到。慢客户端或传输背压可能推迟客户端观察到该错误的时间。此期限不会关闭 TCP 或 HTTP/2 连接，连接仍由独立的传输策略管理。对于没有超限 `Content-Length` 的分块短请求，handler 可能先产生副作用，之后读取到超限帧才返回 413；该响应不会回滚副作用。若业务要求先验证完整请求体再产生副作用，应先完整读取并验证 body。
+Controller 短路由默认使用每个请求体 1 MiB、每个 builder 共享 256 个并发请求、handler 工作及响应体传输 30 秒的预算。添加 Controller 前调用 `with_http_limits` 可替换该策略。原生 Axum 路由不会继承 Controller 限额，需在选定的普通短路由分支显式安装 `RequestLimitLayer`。`WebServer` 按原样服务调用方提供的 Router，不会添加路由 layer。限额约束被读取的请求体数据、处理中的 handler 并发数和所选分支的请求期限。handler 超过期限时 layer 返回 `504 Gateway Timeout`。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，layer 返回 HTTP 500 和代码 `invalid_configuration`。期限执行依赖 Tokio 调度：不让出执行权的同步工作会延迟检查和清理，也可能在期限后成功完成。响应头已经发出时，只有超时被观察到后 layer 才会丢弃应用响应体并归还短请求许可，且无法更改状态码。启用响应体诊断时，即使传输不再轮询响应体，期限触发时也会发出超时事件；body error 本身仍要等之后再次轮询才会观察到。慢客户端或传输背压可能推迟客户端观察到该错误的时间。此期限不会关闭 TCP 或 HTTP/2 连接，连接仍由独立的传输策略管理。对于没有超限 `Content-Length` 的分块短请求，handler 可能先产生副作用，之后读取到超限帧才返回 413；该响应不会回滚副作用。若业务要求先验证完整请求体再产生副作用，应先完整读取并验证 body。
 
 ```rust
 use std::time::Duration;
@@ -418,3 +418,17 @@ assert!(WsUpgradePolicy::new()
 `WebServerError` 通过 `std::error::Error::source()` 暴露保留的 socket 错误。默认 `Display` 和 `Debug` 只显示错误类别；需要排查绑定或 accept 故障时，再由调用方显式检查 `source()`。
 
 继续阅读[英文指南](user_guide.md)、[中文版 README](../README.zh_CN.md)、[API 文档](https://docs.rs/qubit-web)、[历史中文设计记录](2026-10-08-rs-web-design.md)和[当前中文生命周期设计摘要](2026-10-09-rs-web-lifecycle-design.zh_CN.md)。
+
+## 期限与对端地址
+
+本 crate 的超时使用 Tokio 协作式取消。不让出执行权的同步操作会延迟超时检查和清理，handler 也可能在期限之后仍成功完成。取消等待不会停止已经运行的 `spawn_blocking` 任务或应用自行启动的工作。JSON 字节和结构限额不限制用户 `Serialize` 或 `Deserialize` 实现的 CPU 时间。CPU 密集或阻塞工作应由应用设置独立并发预算，并放到合适的执行资源；需要强制终止时使用进程隔离。取消配合、业务副作用和脱离请求的任务由应用负责。
+
+每个 HTTP/HTTPS 请求都带有 Axum `ConnectInfo<SocketAddr>`，值为 accept 得到的 TCP 对端；同一 HTTP/2 连接上的流共享该地址。使用反向代理时，对端会是代理。服务不会信任或转换 Forwarded 等请求头，该地址也不是经过认证的用户身份。只有应用配置了可信代理策略后，才应解析转发地址。通过 `oneshot` 直接调用 Router 时没有传输层对端，因此测试要显式插入扩展：
+
+```rust
+let mut request = axum::http::Request::new(axum::body::Body::empty());
+let peer: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+request.extensions_mut().insert(axum::extract::ConnectInfo(peer));
+```
+
+handler 可通过 `async fn handler(axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>) -> String { peer.to_string() }` 提取地址。
