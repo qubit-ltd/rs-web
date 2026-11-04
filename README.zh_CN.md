@@ -118,6 +118,7 @@ Controller 路径捕获使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧�
 - 认证、授权、业务状态，以及流式数据的保存和重放由应用负责。WebSocket 升级前必须先完成认证；Origin 检查只限制浏览器来源。示例 token 和无认证停服入口仅供 loopback 演示。
 - `DiagnosticLayer::new()` 记录请求及响应头元数据。需要响应体终止结果时，在 `RequestLimitLayer` 外侧显式安装 `DiagnosticLayer::with_body_diagnostics()`；事件使用允许列表字段，不含正文或错误文本，也不声称客户端已断连或网络已送达。
 - WebSocket 的 `queue_limits` 配置出站队列；`inbound_queue_limits` 单独配置入站预算，默认每连接最多排队 64 条消息和累计 1 MiB payload。通道满时最多等待至 `idle_timeout`，字节预算不足则立即以 `1013` 关闭。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，另有每个活跃连接最多一条 1 MiB 协议重组消息；该估算不含分配开销和应用自有内存，也不是 I/O 结束后仍被 handler 或 session 保留的内存上限。
+- `WsSendError::MessageTooLarge` 表示出站消息永久超出预算；错误处理与迁移说明见[用户指南](doc/user_guide.zh_CN.md)。
 - 启用 HTTPS 需要 `tls` 与有效证书，也可由部署方配置可信反向代理。停服由应用发起，并遵守服务端配置的截止时间。
 - `serve` 已开始运行后，丢弃其 future 或 abort 所在任务会关闭受管会话登记并通知现有会话，但无法等待异步排空或生成停服报告；后续清理需要 Tokio runtime 继续运行。优雅停服请完成 shutdown future 并等待 `serve` 返回。
 

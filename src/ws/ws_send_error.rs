@@ -17,7 +17,7 @@
 /// use qubit_web::ws::WsSendError;
 ///
 /// fn enqueue() -> Result<(), Box<dyn std::error::Error>> {
-///     let queue = qubit_web::ws::WsSendQueue::new(0, 1);
+///     let queue = qubit_web::ws::WsSendQueue::new(0, 1024);
 ///     queue.try_send(axum::extract::ws::Message::text("private-payload"))?;
 ///     Ok(())
 /// }
@@ -29,8 +29,10 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[must_use]
 pub enum WsSendError {
-    /// The queue reached either its item or byte limit.
+    /// The queue lacks item or remaining byte capacity for the message.
     Backpressure,
+    /// The message payload exceeds the configured total outbound byte budget.
+    MessageTooLarge,
     /// The send queue is closed or the session has started shutting down.
     Closed,
 }
@@ -39,6 +41,7 @@ impl std::fmt::Display for WsSendError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Backpressure => "WebSocket send queue capacity exceeded",
+            Self::MessageTooLarge => "WebSocket message exceeds the outbound limit",
             Self::Closed => "WebSocket send queue is closed",
         })
     }

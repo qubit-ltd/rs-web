@@ -113,7 +113,7 @@ impl WsSendQueue {
         self.len() == 0
     }
 
-    /// Enqueues a message without waiting; full queues return backpressure.
+    /// Enqueues a message without waiting.
     ///
     /// # Parameters
     ///
@@ -125,15 +125,20 @@ impl WsSendQueue {
     ///
     /// # Errors
     ///
-    /// Returns [`WsSendError::Closed`] after the queue is closed, or
-    /// [`WsSendError::Backpressure`] when either capacity bound would be
-    /// exceeded. A message accepted before closure may be discarded if it is
-    /// still pending when the queue closes.
+    /// Returns [`WsSendError::Closed`] if the queue is closed,
+    /// [`WsSendError::MessageTooLarge`] if the message exceeds the total byte
+    /// budget, or [`WsSendError::Backpressure`] if the queue lacks message
+    /// count or remaining byte capacity. These checks occur in that order.
+    /// Success means only that the message entered the queue, not that it was
+    /// delivered; a message still pending at closure may be discarded.
     pub fn try_send(&self, message: Message) -> Result<(), WsSendError> {
         let bytes = message_size(&message);
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.closed {
             return Err(WsSendError::Closed);
+        }
+        if bytes > self.max_bytes {
+            return Err(WsSendError::MessageTooLarge);
         }
         if state.messages.len() + state.in_flight_messages >= self.max_messages
             || bytes > self.max_bytes.saturating_sub(state.queued_bytes)
@@ -217,6 +222,69 @@ mod tests {
     use super::WsSendQueue;
     use super::message_size;
     use crate::ws::ws_send_error::WsSendError;
+
+    #[test]
+    fn oversized_message_is_not_temporary_backpressure() {
+        let queue = WsSendQueue::new(4, 3);
+        assert_eq!(queue.try_send(Message::text("four")), Err(WsSendError::MessageTooLarge));
+        assert!(queue.is_empty());
+        queue.try_send(Message::text("123")).unwrap();
+        assert_eq!(queue.try_send(Message::text("x")), Err(WsSendError::Backpressure));
+        let message = queue.take_next().unwrap();
+        queue.finish_message(message_size(&message));
+        queue.try_send(Message::text("123")).unwrap();
+    }
+
+    #[test]
+    fn oversized_message_precedes_capacity_checks_without_changing_accounting() {
+        let full = WsSendQueue::new(1, 3);
+        full.try_send(Message::text("123")).unwrap();
+        assert_eq!(full.try_send(Message::text("four")), Err(WsSendError::MessageTooLarge));
+        assert_eq!(full.len(), 1);
+        let in_flight = full.take_next().unwrap();
+        full.finish_message(message_size(&in_flight));
+
+        let closed = WsSendQueue::new(0, 3);
+        closed.close();
+        assert_eq!(closed.try_send(Message::text("four")), Err(WsSendError::Closed));
+
+        let count_limited = WsSendQueue::new(0, 4);
+        assert_eq!(
+            count_limited.try_send(Message::text("1234")),
+            Err(WsSendError::Backpressure)
+        );
+        assert_eq!(
+            count_limited.try_send(Message::text("12345")),
+            Err(WsSendError::MessageTooLarge)
+        );
+    }
+
+    #[test]
+    fn message_size_boundaries_use_utf8_payload_bytes_and_support_zero_budget() {
+        let five_bytes = WsSendQueue::new(1, 5);
+        assert_eq!(
+            five_bytes.try_send(Message::text("你好")),
+            Err(WsSendError::MessageTooLarge)
+        );
+        assert!(five_bytes.is_empty());
+
+        let six_bytes = WsSendQueue::new(1, 6);
+        six_bytes.try_send(Message::text("你好")).unwrap();
+        assert_eq!(six_bytes.len(), 1);
+
+        let zero_bytes = WsSendQueue::new(1, 0);
+        zero_bytes.try_send(Message::text("")).unwrap();
+        assert_eq!(
+            zero_bytes.try_send(Message::text("x")),
+            Err(WsSendError::MessageTooLarge)
+        );
+
+        let zero_messages = WsSendQueue::new(0, 1);
+        assert_eq!(
+            zero_messages.try_send(Message::text("x")),
+            Err(WsSendError::Backpressure)
+        );
+    }
 
     #[test]
     fn test_in_flight_messages_keep_queue_capacity_until_send_finishes() {

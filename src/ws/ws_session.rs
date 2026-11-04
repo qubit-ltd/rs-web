@@ -151,10 +151,13 @@ impl WsSession {
     ///
     /// # Errors
     ///
-    /// Returns [`WsSendError::Closed`] after shutdown or
-    /// [`WsSendError::Backpressure`] when queue capacity is exhausted. A
-    /// message accepted before shutdown may be discarded if it is still
-    /// pending when the session closes.
+    /// Returns [`WsSendError::Closed`] after shutdown,
+    /// [`WsSendError::MessageTooLarge`] if the message exceeds the total byte
+    /// budget, or [`WsSendError::Backpressure`] if the queue lacks message
+    /// count or remaining byte capacity. A message accepted before shutdown
+    /// may be discarded if it is still pending when the session closes;
+    /// queue checks follow the order listed, after the session shutdown check.
+    /// Success does not confirm network delivery.
     #[inline]
     pub fn try_send(&self, message: Message) -> Result<(), WsSendError> {
         if self.shutdown.is_cancelled() {
@@ -222,6 +225,7 @@ mod tests {
     use std::task::Poll;
     use std::time::Duration;
 
+    use axum::extract::ws::Message;
     use tokio::sync::mpsc;
     use tokio::sync::oneshot;
     use tokio::task::yield_now;
@@ -231,6 +235,7 @@ mod tests {
     use super::InboundMessage;
     use super::InboundState;
     use super::WsSession;
+    use crate::ws::WsSendError;
     use crate::ws::WsSendQueue;
 
     fn session(writer: tokio::task::JoinHandle<()>, reader: tokio::task::JoinHandle<()>) -> WsSession {
@@ -247,6 +252,22 @@ mod tests {
             writer: Some(writer),
             reader: Some(reader),
         }
+    }
+
+    #[tokio::test]
+    async fn try_send_forwards_queue_error_and_prefers_session_shutdown() {
+        let closed = session(tokio::spawn(pending::<()>()), tokio::spawn(pending::<()>()));
+        closed.queue.close();
+        assert_eq!(closed.try_send(Message::text("oversized")), Err(WsSendError::Closed));
+
+        let mut active = session(tokio::spawn(pending::<()>()), tokio::spawn(pending::<()>()));
+        active.queue = WsSendQueue::new(1, 3);
+        assert_eq!(
+            active.try_send(Message::text("four")),
+            Err(WsSendError::MessageTooLarge)
+        );
+        active.shutdown.cancel();
+        assert_eq!(active.try_send(Message::text("four")), Err(WsSendError::Closed));
     }
 
     #[tokio::test]

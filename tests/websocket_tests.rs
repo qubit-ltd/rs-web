@@ -572,7 +572,7 @@ async fn test_queue_rejects_message_count_and_byte_overflow() {
     let byte_limited = WsUpgradePolicy::new().queue_limits(4, 3).send_queue();
     assert_eq!(
         byte_limited.try_send(Message::text("four")),
-        Err(WsSendError::Backpressure)
+        Err(WsSendError::MessageTooLarge)
     );
     byte_limited.try_send(Message::text("123")).unwrap();
     assert_eq!(
@@ -589,7 +589,13 @@ fn test_ws_errors_implement_standard_error() {
     }
 
     fn full_queue() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let queue = qubit_web::WsSendQueue::new(0, 1);
+        let queue = qubit_web::WsSendQueue::new(0, 1024);
+        queue.try_send(Message::text("private-payload"))?;
+        Ok(())
+    }
+
+    fn oversized_message() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let queue = qubit_web::WsSendQueue::new(1, 0);
         queue.try_send(Message::text("private-payload"))?;
         Ok(())
     }
@@ -620,6 +626,17 @@ fn test_ws_errors_implement_standard_error() {
         "WebSocket inbound queue limit exceeds the supported maximum"
     );
     assert_eq!(WsSendError::Closed.to_string(), "WebSocket send queue is closed");
+    assert_eq!(
+        WsSendError::MessageTooLarge.to_string(),
+        "WebSocket message exceeds the outbound limit"
+    );
+    let too_large = oversized_message().unwrap_err();
+    assert_eq!(too_large.to_string(), "WebSocket message exceeds the outbound limit");
+    assert!(std::error::Error::source(too_large.as_ref()).is_none());
+    assert_eq!(
+        too_large.downcast_ref::<WsSendError>(),
+        Some(&WsSendError::MessageTooLarge)
+    );
 }
 
 #[test]
@@ -638,7 +655,7 @@ fn test_zero_byte_queue_payload_boundaries() {
     }
     assert_eq!(
         qubit_web::WsSendQueue::new(1, 0).try_send(Message::text("x")),
-        Err(WsSendError::Backpressure)
+        Err(WsSendError::MessageTooLarge)
     );
     assert_eq!(
         qubit_web::WsSendQueue::new(0, 0).try_send(Message::text("")),
