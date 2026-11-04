@@ -51,6 +51,12 @@ pub struct ServerOptions {
     pub(crate) max_transport_connections: NonZeroUsize,
     /// Maximum concurrent HTTP/2 streams on each connection.
     pub(crate) http2_max_concurrent_streams: NonZeroU32,
+    /// Optional maximum HTTP/1 parser buffer size. `None` keeps Hyper's
+    /// default.
+    pub(crate) http1_max_buffer_bytes: Option<usize>,
+    /// Optional HTTP/2 decoded header-list budget. `None` keeps Hyper's
+    /// default.
+    pub(crate) http2_max_header_list_bytes: Option<u32>,
 }
 
 impl ServerOptions {
@@ -72,6 +78,8 @@ impl ServerOptions {
             transport_idle_timeout: Duration::from_secs(30),
             max_transport_connections: NonZeroUsize::new(1024).expect("default transport limit is non-zero"),
             http2_max_concurrent_streams: NonZeroU32::new(200).expect("default HTTP/2 stream limit is non-zero"),
+            http1_max_buffer_bytes: None,
+            http2_max_header_list_bytes: None,
         }
     }
 
@@ -123,6 +131,75 @@ impl ServerOptions {
     #[inline]
     pub const fn http2_max_concurrent_streams(&self) -> u32 {
         self.http2_max_concurrent_streams.get()
+    }
+
+    /// Returns the optional maximum HTTP/1 parser buffer size in bytes.
+    /// This bounds parser buffering, not an exact HTTP header-list byte count.
+    ///
+    /// # Returns
+    ///
+    /// `Some(bytes)` when an explicit parser-buffer limit is configured, or
+    /// `None` when Hyper's default is preserved.
+    #[must_use]
+    #[inline]
+    pub fn http1_max_buffer_bytes(&self) -> Option<usize> {
+        self.http1_max_buffer_bytes
+    }
+
+    /// Returns the optional HTTP/2 decoded header-list limit in bytes.
+    /// This is independent of connection count, stream count, dynamic-table
+    /// state, and body limits.
+    ///
+    /// # Returns
+    ///
+    /// `Some(bytes)` when an explicit header-list limit is configured, or
+    /// `None` when Hyper's default is preserved.
+    #[must_use]
+    #[inline]
+    pub fn http2_max_header_list_bytes(&self) -> Option<u32> {
+        self.http2_max_header_list_bytes
+    }
+
+    /// Sets the HTTP/1 parser buffer limit. Values below 8192 are invalid.
+    ///
+    /// # Parameters
+    ///
+    /// * `bytes` - Maximum parser-buffer size in bytes, at least 8192.
+    ///
+    /// # Returns
+    ///
+    /// Updated server options containing the explicit buffer limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WebServerError::InvalidConfig`] when `bytes` is below 8192.
+    pub fn with_http1_max_buffer_bytes(mut self, bytes: usize) -> Result<Self, WebServerError> {
+        if bytes < 8192 {
+            return Err(WebServerError::InvalidConfig);
+        }
+        self.http1_max_buffer_bytes = Some(bytes);
+        Ok(self)
+    }
+
+    /// Sets the HTTP/2 decoded header-list limit in bytes.
+    ///
+    /// # Parameters
+    ///
+    /// * `bytes` - Positive decoded header-list limit in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Updated server options containing the explicit header-list limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WebServerError::InvalidConfig`] when `bytes` is zero.
+    pub fn with_http2_max_header_list_bytes(mut self, bytes: u32) -> Result<Self, WebServerError> {
+        if bytes == 0 {
+            return Err(WebServerError::InvalidConfig);
+        }
+        self.http2_max_header_list_bytes = Some(bytes);
+        Ok(self)
     }
 
     /// Sets the maximum number of concurrent HTTP/2 streams per connection.
@@ -253,6 +330,10 @@ impl ServerOptions {
         if self.max_transport_connections.get() > tokio::sync::Semaphore::MAX_PERMITS {
             return Err(WebServerError::InvalidConfig);
         }
+        if self.http1_max_buffer_bytes.is_some_and(|bytes| bytes < 8192) || self.http2_max_header_list_bytes == Some(0)
+        {
+            return Err(WebServerError::InvalidConfig);
+        }
         Ok(())
     }
 }
@@ -272,6 +353,8 @@ mod tests {
         assert_eq!(defaults.request_header_timeout(), Duration::from_secs(10));
         assert_eq!(defaults.transport_idle_timeout(), Duration::from_secs(30));
         assert_eq!(defaults.max_transport_connections(), 1024);
+        assert_eq!(defaults.http1_max_buffer_bytes(), None);
+        assert_eq!(defaults.http2_max_header_list_bytes(), None);
         defaults.validate().unwrap();
 
         let configured = defaults
@@ -335,6 +418,30 @@ mod tests {
                 .with_http2_max_concurrent_streams(0)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn optional_protocol_header_budgets_validate_and_expose_values() {
+        let address = "127.0.0.1:8080".parse().unwrap();
+        let defaults = ServerOptions::new(address);
+        assert_eq!(defaults.http1_max_buffer_bytes(), None);
+        assert_eq!(defaults.http2_max_header_list_bytes(), None);
+        assert!(defaults.clone().with_http1_max_buffer_bytes(8191).is_err());
+        assert!(defaults.clone().with_http2_max_header_list_bytes(0).is_err());
+        let mut invalid = defaults.clone();
+        invalid.http1_max_buffer_bytes = Some(8191);
+        assert!(matches!(invalid.validate(), Err(crate::WebServerError::InvalidConfig)));
+        let mut invalid = defaults.clone();
+        invalid.http2_max_header_list_bytes = Some(0);
+        assert!(matches!(invalid.validate(), Err(crate::WebServerError::InvalidConfig)));
+        let configured = defaults
+            .with_http1_max_buffer_bytes(8192)
+            .unwrap()
+            .with_http2_max_header_list_bytes(1)
+            .unwrap();
+        assert_eq!(configured.http1_max_buffer_bytes(), Some(8192));
+        assert_eq!(configured.http2_max_header_list_bytes(), Some(1));
+        configured.validate().unwrap();
     }
 
     #[test]

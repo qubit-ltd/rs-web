@@ -102,3 +102,27 @@ impl TlsConfig {
         self.inner.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TlsConfig;
+
+    #[tokio::test]
+    async fn wraps_and_clones_an_existing_rustls_config() {
+        let certificate = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls/cert.pem");
+        let key = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls/key.pem");
+        let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(certificate, key)
+            .await
+            .expect("test TLS fixture should load");
+
+        let tls = TlsConfig::from_rustls(rustls);
+        let cloned = tls.rustls_config();
+        let server = crate::WebServer::bind_https(
+            crate::ServerOptions::new("127.0.0.1:0".parse().unwrap()),
+            TlsConfig::from_rustls(cloned),
+        )
+        .await
+        .expect("cloned TLS config should bind an HTTPS listener");
+        assert!(server.local_addr().ip().is_loopback());
+    }
+}

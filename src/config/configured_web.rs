@@ -57,9 +57,13 @@ impl ConfiguredWeb {
     /// `transport.max_connections` defaults to 1024, and
     /// `transport.idle_timeout_ms` defaults to 30 seconds, and
     /// `transport.http2_max_concurrent_streams` defaults to 200 per HTTP/2
-    /// connection. HTTP limits are returned separately so they can be installed
-    /// only on appropriate short routes. This function does not discover or
-    /// load a global configuration source.
+    /// connection. Optional `transport.http1_max_buffer_bytes` and
+    /// `transport.http2_max_header_list_bytes` preserve Hyper's defaults when
+    /// omitted; explicit values must be at least 8192 and positive,
+    /// respectively. HTTP/1's value limits parser buffering, while HTTP/2's
+    /// value limits decoded header-list accounting. HTTP limits are returned
+    /// separately so they can be installed only on appropriate short routes.
+    /// This function does not discover or load a global configuration source.
     ///
     /// # Parameters
     ///
@@ -94,6 +98,12 @@ impl ConfiguredWeb {
             .get_optional::<u64>("transport.http2_max_concurrent_streams")
             .map_err(|_| ConfigOptionsError::new("transport.http2_max_concurrent_streams"))?
             .unwrap_or(200);
+        let http1_max_buffer_bytes = config
+            .get_optional::<u64>("transport.http1_max_buffer_bytes")
+            .map_err(|_| ConfigOptionsError::new("transport.http1_max_buffer_bytes"))?;
+        let http2_max_header_list_bytes = config
+            .get_optional::<u64>("transport.http2_max_header_list_bytes")
+            .map_err(|_| ConfigOptionsError::new("transport.http2_max_header_list_bytes"))?;
         let transport_idle_timeout_ms = config
             .get_optional::<u64>("transport.idle_timeout_ms")
             .map_err(|_| ConfigOptionsError::new("transport.idle_timeout_ms"))?
@@ -138,7 +148,7 @@ impl ConfiguredWeb {
                 .map_err(|_| ConfigOptionsError::new("http.request_timeout_ms"))?;
         }
 
-        let server_options = ServerOptions::new(address)
+        let mut server_options = ServerOptions::new(address)
             .with_shutdown_timeout(Duration::from_millis(shutdown_timeout_ms))
             .with_transport_idle_timeout(transport_idle_timeout)
             .with_max_transport_connections(
@@ -151,6 +161,21 @@ impl ConfiguredWeb {
                     .map_err(|_| ConfigOptionsError::new("transport.http2_max_concurrent_streams"))?,
             )
             .map_err(|_| ConfigOptionsError::new("transport.http2_max_concurrent_streams"))?;
+        if let Some(bytes) = http1_max_buffer_bytes {
+            server_options = server_options
+                .with_http1_max_buffer_bytes(
+                    usize::try_from(bytes).map_err(|_| ConfigOptionsError::new("transport.http1_max_buffer_bytes"))?,
+                )
+                .map_err(|_| ConfigOptionsError::new("transport.http1_max_buffer_bytes"))?;
+        }
+        if let Some(bytes) = http2_max_header_list_bytes {
+            server_options = server_options
+                .with_http2_max_header_list_bytes(
+                    u32::try_from(bytes)
+                        .map_err(|_| ConfigOptionsError::new("transport.http2_max_header_list_bytes"))?,
+                )
+                .map_err(|_| ConfigOptionsError::new("transport.http2_max_header_list_bytes"))?;
+        }
         server_options.validate().map_err(|error| match error {
             WebServerError::InvalidConfig => ConfigOptionsError::new("shutdown_timeout_ms"),
             WebServerError::BindFailed { .. }

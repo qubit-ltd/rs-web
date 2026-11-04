@@ -122,9 +122,10 @@ fn fixture(name: &str) -> PathBuf {
 
 #[tokio_test]
 async fn test_serves_the_same_router_over_a_real_https_connection() {
-    let tls = TlsConfig::from_pem_files(fixture("cert.pem"), fixture("key.pem"))
+    let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(fixture("cert.pem"), fixture("key.pem"))
         .await
         .expect("valid test certificate and key");
+    let tls = TlsConfig::from_rustls(rustls);
     let server = WebServer::bind_https(ServerOptions::new("127.0.0.1:0".parse().unwrap()), tls)
         .await
         .expect("HTTPS listener binds");
@@ -143,6 +144,104 @@ async fn test_serves_the_same_router_over_a_real_https_connection() {
     assert!(report.graceful);
     assert!(response.starts_with("HTTP/1.1 200"), "unexpected response: {response}");
     assert!(response.ends_with("tls-ok"), "unexpected response: {response}");
+}
+
+#[tokio_test]
+async fn test_https_http1_buffer_budget_rejects_large_field_and_recovers() {
+    let handled = Arc::new(AtomicUsize::new(0));
+    let route_count = Arc::clone(&handled);
+    let app = Router::new().route(
+        "/health",
+        get(move || {
+            let handled = Arc::clone(&route_count);
+            async move {
+                handled.fetch_add(1, Ordering::SeqCst);
+                "tls-ok"
+            }
+        }),
+    );
+    let tls = TlsConfig::from_pem_files(fixture("https-h2-cert.pem"), fixture("https-h2-key.pem"))
+        .await
+        .unwrap();
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_http1_max_buffer_bytes(8192)
+        .unwrap();
+    let server = WebServer::bind_https(options, tls).await.unwrap();
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = spawn(server.serve(app, async {
+        let _ = shutdown_rx.await;
+    }));
+    let certificate_pem = std::fs::read(fixture("https-h2-cert.pem")).unwrap();
+    let certificate = rustls::pki_types::CertificateDer::pem_slice_iter(&certificate_pem)
+        .next()
+        .unwrap()
+        .unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certificate).unwrap();
+    let tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(tls_config));
+
+    async fn exchange(connector: &TlsConnector, address: SocketAddr, request: Vec<u8>) -> Vec<u8> {
+        let tcp = time::timeout(Duration::from_secs(3), TokioTcpStream::connect(address))
+            .await
+            .unwrap()
+            .unwrap();
+        let name = rustls::pki_types::ServerName::try_from("localhost").unwrap().to_owned();
+        let mut stream = time::timeout(Duration::from_secs(3), connector.connect(name, tcp))
+            .await
+            .unwrap()
+            .unwrap();
+        time::timeout(Duration::from_secs(3), stream.write_all(&request))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut response = Vec::new();
+        time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        response
+    }
+
+    let small = exchange(
+        &connector,
+        address,
+        b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&small).starts_with("HTTP/1.1 200"));
+    let mut large = b"GET /health HTTP/1.1\r\nHost: localhost\r\nX-Large: ".to_vec();
+    large.extend(std::iter::repeat_n(b'a', 16 * 1024));
+    large.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+    let rejected = exchange(&connector, address, large).await;
+    assert!(
+        !rejected.is_empty(),
+        "Hyper should close or respond when the parser buffer is exceeded"
+    );
+    let recovered = exchange(
+        &connector,
+        address,
+        b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&recovered).starts_with("HTTP/1.1 200"));
+    assert_eq!(
+        handled.load(Ordering::SeqCst),
+        2,
+        "oversized request must not enter the handler"
+    );
+    let _ = shutdown_tx.send(());
+    assert!(
+        time::timeout(Duration::from_secs(3), serving)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .graceful
+    );
 }
 
 #[tokio_test]

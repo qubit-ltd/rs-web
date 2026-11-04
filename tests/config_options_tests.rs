@@ -40,6 +40,8 @@ async fn maps_loopback_address_and_accepts_a_valid_shutdown_timeout() {
     assert_eq!(options.address(), "127.0.0.1:0".parse().unwrap());
     assert_eq!(options.max_transport_connections(), 3);
     assert_eq!(options.http2_max_concurrent_streams(), 200);
+    assert_eq!(options.http1_max_buffer_bytes(), None);
+    assert_eq!(options.http2_max_header_list_bytes(), None);
     assert_eq!(options.transport_idle_timeout(), std::time::Duration::from_millis(900));
     assert_eq!(options.shutdown_timeout(), std::time::Duration::from_millis(2500));
     assert_eq!(limits.max_body_bytes(), 4096);
@@ -54,6 +56,52 @@ async fn maps_loopback_address_and_accepts_a_valid_shutdown_timeout() {
         server.context().shutdown_timeout(),
         std::time::Duration::from_millis(2500)
     );
+}
+
+#[test]
+fn parses_optional_protocol_header_budgets_and_reports_field_errors() {
+    let mut config = Config::new();
+    config.set("address", "127.0.0.1:0").unwrap();
+    config.set("transport.http1_max_buffer_bytes", 8192u64).unwrap();
+    config.set("transport.http2_max_header_list_bytes", 17u64).unwrap();
+    let options = ConfiguredWeb::from_config(&config).unwrap().into_parts().0;
+    assert_eq!(options.http1_max_buffer_bytes(), Some(8192));
+    assert_eq!(options.http2_max_header_list_bytes(), Some(17));
+
+    for (field, value) in [
+        ("transport.http1_max_buffer_bytes", 8191u64),
+        ("transport.http2_max_header_list_bytes", 0u64),
+        ("transport.http2_max_header_list_bytes", u64::from(u32::MAX) + 1),
+    ] {
+        let mut config = Config::new();
+        config.set("address", "127.0.0.1:0").unwrap();
+        config.set(field, value).unwrap();
+        let error = ConfiguredWeb::from_config(&config).unwrap_err();
+        assert_eq!(error.field(), field);
+        assert!(!error.to_string().contains(&value.to_string()));
+    }
+
+    for field in [
+        "transport.http1_max_buffer_bytes",
+        "transport.http2_max_header_list_bytes",
+    ] {
+        let mut config = Config::new();
+        config.set("address", "127.0.0.1:0").unwrap();
+        config.set(field, "private-header-budget").unwrap();
+        let error = ConfiguredWeb::from_config(&config).unwrap_err();
+        assert_eq!(error.field(), field);
+        assert!(!error.to_string().contains("private-header-budget"));
+    }
+
+    let too_large_usize = u64::MAX;
+    if usize::try_from(too_large_usize).is_err() {
+        let mut config = Config::new();
+        config.set("address", "127.0.0.1:0").unwrap();
+        config.set("transport.http1_max_buffer_bytes", too_large_usize).unwrap();
+        let error = ConfiguredWeb::from_config(&config).unwrap_err();
+        assert_eq!(error.field(), "transport.http1_max_buffer_bytes");
+        assert!(!error.to_string().contains(&too_large_usize.to_string()));
+    }
 }
 
 #[tokio::test]
@@ -71,6 +119,40 @@ async fn configured_http_limits_apply_when_attached_to_a_router_branch() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn configured_http1_buffer_budget_is_applied_by_the_server() {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
+    use tokio::sync::oneshot;
+
+    let mut config = config_with("127.0.0.1:0", 2500);
+    config.set("transport.http1_max_buffer_bytes", 8192u64).unwrap();
+    let options = ConfiguredWeb::from_config(&config).unwrap().into_parts().0;
+    let server = WebServer::bind_http(options).await.unwrap();
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(server.serve(Router::new(), async {
+        let _ = shutdown_rx.await;
+    }));
+
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    let mut request = b"GET / HTTP/1.1\r\nHost: localhost\r\nX-Large: ".to_vec();
+    request.extend(std::iter::repeat_n(b'a', 16 * 1024));
+    request.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+    stream.write_all(&request).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    assert!(!response.is_empty(), "oversized headers must be rejected");
+    assert!(
+        !String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"),
+        "oversized headers must not reach the default route"
+    );
+
+    let _ = shutdown_tx.send(());
+    assert!(serving.await.unwrap().unwrap().graceful);
 }
 
 #[tokio::test]

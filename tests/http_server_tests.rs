@@ -46,6 +46,84 @@ async fn peer_address(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> String {
 }
 
 #[tokio_test]
+async fn test_http1_buffer_budget_rejects_large_field_and_recovers() {
+    let handled = Arc::new(AtomicUsize::new(0));
+    let route_count = Arc::clone(&handled);
+    let app = Router::new().route(
+        "/health",
+        get(move || {
+            let handled = Arc::clone(&route_count);
+            async move {
+                handled.fetch_add(1, Ordering::SeqCst);
+                "ok"
+            }
+        }),
+    );
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_http1_max_buffer_bytes(8192)
+        .unwrap();
+    let server = WebServer::bind_http(options).await.unwrap();
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = spawn(server.serve(app, async {
+        let _ = shutdown_rx.await;
+    }));
+
+    async fn exchange(address: SocketAddr, request: Vec<u8>) -> Vec<u8> {
+        let mut stream = time::timeout(Duration::from_secs(3), TcpStream::connect(address))
+            .await
+            .unwrap()
+            .unwrap();
+        time::timeout(Duration::from_secs(3), stream.write_all(&request))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut response = Vec::new();
+        time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        response
+    }
+
+    let small = exchange(
+        address,
+        b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&small).starts_with("HTTP/1.1 200"));
+    let mut large = b"GET /health HTTP/1.1\r\nHost: localhost\r\nX-Large: ".to_vec();
+    large.extend(std::iter::repeat_n(b'a', 16 * 1024));
+    large.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+    let rejected = exchange(address, large).await;
+    assert!(
+        !rejected.is_empty(),
+        "Hyper should close or respond when the parser buffer is exceeded"
+    );
+    let recovered = exchange(
+        address,
+        b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&recovered).starts_with("HTTP/1.1 200"));
+    assert_eq!(
+        handled.load(Ordering::SeqCst),
+        2,
+        "oversized request must not enter the handler"
+    );
+
+    let _ = shutdown_tx.send(());
+    assert!(
+        time::timeout(Duration::from_secs(3), serving)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .graceful
+    );
+}
+
+#[tokio_test]
 async fn test_connect_info_http_matches_each_tcp_peer_and_ignores_proxy_headers() {
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await

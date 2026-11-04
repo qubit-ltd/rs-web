@@ -10,6 +10,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::Router;
@@ -156,6 +158,65 @@ async fn test_https_negotiates_h2_and_serves_complete_response() {
     let report = finish_server(shutdown, serving).await;
     assert!(report.graceful);
     finish_client(sender, driver).await;
+}
+
+#[tokio::test]
+async fn test_https_h2_header_list_budget_rejects_large_field_and_recovers() {
+    let handled = Arc::new(AtomicUsize::new(0));
+    let route_count = Arc::clone(&handled);
+    let app = Router::new().route(
+        "/health",
+        get(move || {
+            let handled = Arc::clone(&route_count);
+            async move {
+                handled.fetch_add(1, Ordering::SeqCst);
+                "tls-ok"
+            }
+        }),
+    );
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_http2_max_header_list_bytes(1024)
+        .unwrap();
+    let (address, shutdown, serving) = start_server(options, app).await;
+    let (mut sender, driver) = connect_h2(address).await;
+    let response = request(&mut sender).await;
+    assert_eq!(response.status(), hyper::StatusCode::OK);
+    assert_eq!(response_body(response).await.as_ref(), b"tls-ok");
+
+    let large_request = Request::builder()
+        .method("GET")
+        .uri("https://localhost/health")
+        .header("x-large", "a".repeat(4096))
+        .body(Empty::<Bytes>::new())
+        .expect("build oversized but syntactically valid HTTP/2 headers");
+    let rejected = time::timeout(Duration::from_secs(3), sender.send_request(large_request))
+        .await
+        .expect("oversized header processing should be bounded");
+    if let Ok(response) = rejected {
+        assert_ne!(
+            response.status(),
+            hyper::StatusCode::OK,
+            "oversized headers must not reach a successful handler response"
+        );
+        let _ = time::timeout(Duration::from_secs(3), response_body(response)).await;
+    }
+    drop(sender);
+    let _ = time::timeout(Duration::from_secs(3), driver).await;
+    assert_eq!(
+        handled.load(Ordering::SeqCst),
+        1,
+        "oversized headers must not enter the handler"
+    );
+
+    let (mut recovered_sender, recovered_driver) = connect_h2(address).await;
+    let recovered = request(&mut recovered_sender).await;
+    assert_eq!(recovered.status(), hyper::StatusCode::OK);
+    assert_eq!(response_body(recovered).await.as_ref(), b"tls-ok");
+    assert_eq!(handled.load(Ordering::SeqCst), 2);
+
+    let report = finish_server(shutdown, serving).await;
+    assert!(report.graceful);
+    finish_client(recovered_sender, recovered_driver).await;
 }
 
 #[tokio::test]

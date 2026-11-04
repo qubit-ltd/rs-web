@@ -301,6 +301,8 @@ impl WebServer {
             request_header_timeout: options.request_header_timeout,
             transport_idle_timeout: options.transport_idle_timeout,
             http2_max_concurrent_streams: options.http2_max_concurrent_streams.get(),
+            http1_max_buffer_bytes: options.http1_max_buffer_bytes,
+            http2_max_header_list_bytes: options.http2_max_header_list_bytes,
         };
         let connection_limit = Arc::new(Semaphore::new(options.max_transport_connections.get()));
         let graceful = GracefulShutdown::new();
@@ -448,6 +450,10 @@ struct ConnectionSettings {
     transport_idle_timeout: Duration,
     /// Maximum concurrent HTTP/2 streams on this connection.
     http2_max_concurrent_streams: u32,
+    /// Optional maximum HTTP/1 parser buffer size.
+    http1_max_buffer_bytes: Option<usize>,
+    /// Optional HTTP/2 decoded header-list limit.
+    http2_max_header_list_bytes: Option<u32>,
 }
 
 /// Adapts one TCP or TLS stream into an HTTP connection with upgrades enabled.
@@ -480,6 +486,8 @@ async fn serve_connection<S>(
         request_header_timeout,
         transport_idle_timeout,
         http2_max_concurrent_streams,
+        http1_max_buffer_bytes,
+        http2_max_header_list_bytes,
     } = settings;
     static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
     let connection_id = crate::diagnostic::ConnectionId(NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed));
@@ -503,9 +511,15 @@ async fn serve_connection<S>(
         .http1()
         .timer(TokioTimer::new())
         .header_read_timeout(Some(request_header_timeout));
+    if let Some(bytes) = http1_max_buffer_bytes {
+        builder.http1().max_buf_size(bytes);
+    }
     builder
         .http2()
         .max_concurrent_streams(Some(http2_max_concurrent_streams));
+    if let Some(bytes) = http2_max_header_list_bytes {
+        builder.http2().max_header_list_size(bytes);
+    }
     let connection = builder
         .serve_connection_with_upgrades(TokioIo::new(stream), service)
         .into_owned();
