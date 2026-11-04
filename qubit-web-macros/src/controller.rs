@@ -5,7 +5,6 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
-use std::collections::HashMap;
 use std::collections::HashSet;
 
 use proc_macro2::Span;
@@ -17,25 +16,18 @@ use syn::Expr;
 use syn::ExprLit;
 use syn::FnArg;
 use syn::GenericArgument;
-use syn::ImplItem;
 use syn::ImplItemFn;
-use syn::ItemImpl;
 use syn::Lit;
 use syn::LitStr;
 use syn::Meta;
 use syn::PathArguments;
 use syn::Token;
 use syn::Type;
-use syn::parse2;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 
 mod internal;
-use internal::MappingArgs;
-use internal::Method;
 use internal::Route;
-use internal::RouteArgs;
-use internal::resolve_runtime_path;
 use internal::resolve_self_type;
 
 /// Expands a controller attribute into its implementation and route definition.
@@ -54,265 +46,9 @@ pub fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
 /// The input must be a non-generic inherent implementation with valid route
 /// attributes and compatible state extractor types.
 fn expand_inner(args: TokenStream, input: TokenStream) -> syn::Result<TokenStream> {
-    let runtime = resolve_runtime_path()?;
-    let axum = quote! { #runtime::__private::axum };
-    let prefix = parse2::<LitStr>(args)?;
-    let mut implementation = parse2::<ItemImpl>(input)?;
-    if implementation.trait_.is_some() {
-        return Err(syn::Error::new_spanned(
-            implementation,
-            "rest_controller only supports inherent impl blocks",
-        ));
-    }
-    if !implementation.generics.params.is_empty() || implementation.generics.where_clause.is_some() {
-        return Err(syn::Error::new_spanned(
-            &implementation.generics,
-            "generic Controller impl blocks are not supported",
-        ));
-    }
-    validate_path(&prefix.value(), true, prefix.span())?;
-    validate_template(&prefix.value(), prefix.span())?;
-
-    let self_ty = (*implementation.self_ty).clone();
-    let mut controller_name = None;
-    if let Type::Path(path) = &self_ty
-        && let Some(segment) = path.path.segments.last()
-    {
-        controller_name = Some(segment.ident.clone());
-    }
-    let controller_name =
-        controller_name.ok_or_else(|| syn::Error::new_spanned(&self_ty, "controller type must be a named struct"))?;
-    let instance_name = format_ident!("__QubitControllerInstanceFor{}", controller_name);
-
-    let mut methods = Vec::new();
-    let mut declarations = Vec::new();
-    let mut used_routes: HashMap<(String, String), Vec<Vec<TokenStream>>> = HashMap::new();
-    let mut controller_states: Vec<(Type, Vec<TokenStream>)> = Vec::new();
-    let mut conditional_errors = Vec::new();
-    for item in &mut implementation.items {
-        let ImplItem::Fn(method) = item else { continue };
-        let cfg = effective_cfg(&method.attrs)?;
-        let attrs = std::mem::take(&mut method.attrs);
-        let mut routes = Vec::new();
-        for attr in attrs {
-            let Some(name) = attr.path().segments.last().map(|segment| segment.ident.to_string()) else {
-                method.attrs.push(attr);
-                continue;
-            };
-            if let Some(verb) = marker_verb(&name) {
-                let mapping = parse2::<MappingArgs>(attr.meta.require_list()?.tokens.clone())?;
-                let (_, kind) = parse_options(mapping.options, false)?;
-                let route = make_route(&prefix.value(), mapping.path, vec![verb.to_owned()], kind)?;
-                validate_websocket_methods(&route.methods, &route.kind, attr.span())?;
-                routes.push(route);
-            } else if name == "route" {
-                let route = parse2::<RouteArgs>(attr.meta.require_list()?.tokens.clone())?;
-                let (verbs, kind) = parse_options(route.options, true)?;
-                if verbs.is_empty() {
-                    return Err(syn::Error::new(
-                        attr.span(),
-                        "route requires at least one method = \"...\"",
-                    ));
-                }
-                let route = make_route(&prefix.value(), route.path, verbs, kind)?;
-                validate_websocket_methods(&route.methods, &route.kind, attr.span())?;
-                routes.push(route);
-            } else if name == "cfg_attr" {
-                if cfg_attr_contains_mapping(&attr)? {
-                    return Err(syn::Error::new_spanned(
-                        attr,
-                        "route mapping attributes inside cfg_attr are not supported",
-                    ));
-                }
-                method.attrs.push(attr);
-            } else {
-                method.attrs.push(attr);
-            }
-        }
-        if routes.is_empty() {
-            continue;
-        }
-        validate_method(method)?;
-        for input in method.sig.inputs.iter().skip(1) {
-            let FnArg::Typed(argument) = input else {
-                continue;
-            };
-            let resolved_ty = resolve_self_type(&argument.ty, &self_ty);
-            let Some(state) = state_extractor_type(&resolved_ty) else {
-                continue;
-            };
-            if let Some((_, conditions)) = controller_states
-                .iter_mut()
-                .find(|(existing, _)| quote!(#existing).to_string() == quote!(#state).to_string())
-            {
-                conditions.push(cfg_condition(&cfg));
-            } else {
-                controller_states.push((state, vec![cfg_condition(&cfg)]));
-            }
-        }
-        for route in &routes {
-            for verb in &route.methods {
-                let key = (verb.clone(), route.path.clone());
-                if let Some(previous_conditions) = used_routes.get_mut(&key) {
-                    for previous_cfg in previous_conditions.iter() {
-                        if previous_cfg.is_empty() && cfg.is_empty() {
-                            return Err(syn::Error::new_spanned(
-                                method,
-                                format!("duplicate controller route: {verb} {}", route.path),
-                            ));
-                        }
-                        conditional_errors.push((
-                            combine_conditions(previous_cfg, &cfg),
-                            format!("duplicate controller route: {verb} {}", route.path),
-                        ));
-                    }
-                    previous_conditions.push(cfg.clone());
-                } else {
-                    used_routes.insert(key, vec![cfg.clone()]);
-                }
-            }
-        }
-        let handler_name = controller_name.to_string().to_lowercase();
-        let handler = format_ident!("__qubit_controller_handler_{}_{}", handler_name, methods.len());
-        let cfg_attr = cfg_attribute(&cfg);
-        let handler_tokens = make_handler(method, &handler, &instance_name, &self_ty, &axum);
-        declarations.push(quote! { #cfg_attr #handler_tokens });
-        methods.push(Method { routes, handler, cfg });
-    }
-
-    let metadata: Vec<_> = methods
-        .iter()
-        .flat_map(|method| {
-            method.routes.iter().flat_map(|route| {
-                route.methods.iter().map(|verb| {
-                    let path = &route.path;
-                    let kind = route_kind(&route.kind, &runtime);
-                    let cfg_attr = cfg_attribute(&method.cfg);
-                    quote! { #cfg_attr #runtime::mvc::RouteMetadata::new(#verb, #path, #kind) }
-                })
-            })
-        })
-        .collect();
-    let mut state_impls = Vec::new();
-    let all_state_conditions: Vec<_> = controller_states
-        .iter()
-        .flat_map(|(_, conditions)| conditions.clone())
-        .collect();
-    let generic_cfg = cfg_attribute(&[quote! { not(any(#(#all_state_conditions),*)) }]);
-    let mut impl_specs = vec![(
-        generic_cfg,
-        quote! { <__QubitControllerState> },
-        quote! { __QubitControllerState },
-    )];
-    for (index, (state, conditions)) in controller_states.iter().enumerate() {
-        let other_conditions: Vec<_> = controller_states
-            .iter()
-            .enumerate()
-            .filter(|(other_index, _)| *other_index != index)
-            .flat_map(|(_, (_, conditions))| conditions.clone())
-            .collect();
-        let cfg_attr = cfg_attribute(&[quote! {
-            all(any(#(#conditions),*), not(any(#(#other_conditions),*)))
-        }]);
-        impl_specs.push((cfg_attr, quote! {}, quote! { #state }));
-    }
-    for left in 0..controller_states.len() {
-        for right in (left + 1)..controller_states.len() {
-            let (_, left_conditions) = &controller_states[left];
-            let (_, right_conditions) = &controller_states[right];
-            let overlap = quote! { all(any(#(#left_conditions),*), any(#(#right_conditions),*)) };
-            conditional_errors.push((
-                vec![overlap],
-                "all State extractors in one Controller must use the same state type".to_owned(),
-            ));
-        }
-    }
-    let instance_name_ref = &instance_name;
-    let runtime_ref = &runtime;
-    let axum_ref = &axum;
-    for (cfg_attr, impl_generics, state_type) in impl_specs {
-        let state_type_ref = &state_type;
-        let registrations = methods
-            .iter()
-            .flat_map(|method| {
-                let handler = &method.handler;
-                method.routes.iter().map(move |route| {
-                    let path = &route.path;
-                    let strategy_layers = if route.kind == "short" {
-                        quote! {
-                            let route = route
-                                .layer(#runtime_ref::RequestLimitLayer::from_state(limit_state.clone()))
-                                .layer(#runtime_ref::diagnostic::DiagnosticLayer::new());
-                        }
-                    } else {
-                        quote! {
-                            let route = route
-                                .layer(#runtime_ref::StreamAdmissionLayer::from_state(stream_state.clone()))
-                                .layer(#runtime_ref::diagnostic::DiagnosticLayer::new());
-                        }
-                    };
-                    let filters = route.methods.iter().map(|verb| method_filter(verb, axum_ref));
-                    let mut filters = filters.collect::<Vec<_>>().into_iter();
-                    let first = filters.next().expect("route has methods");
-                    let filter = filters.fold(first, |combined, next| quote! { #combined.or(#next) });
-                    let method_cfg = cfg_attribute(&method.cfg);
-                    quote! {
-                        #method_cfg
-                        {
-                            let route = #axum_ref::Router::<#state_type_ref>::new()
-                                .route(#path, #axum_ref::routing::on(#filter, #handler))
-                                .layer(#axum_ref::Extension(#instance_name_ref(self.clone())));
-                            #strategy_layers
-                            router = router.merge(route);
-                        }
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        state_impls.push(quote! {
-            #cfg_attr
-            impl #impl_generics #runtime::mvc::ControllerDefinition<#state_type> for #self_ty
-            where
-                #state_type: Clone + Send + Sync + 'static,
-            {
-                fn route_metadata() -> &'static [#runtime::mvc::RouteMetadata] {
-                    static __QUBIT_ROUTES: &[#runtime::mvc::RouteMetadata] = &[#(#metadata),*];
-                    __QUBIT_ROUTES
-                }
-
-                fn register(
-                    self: ::std::sync::Arc<Self>,
-                    mut router: #axum::Router<#state_type>,
-                    limit_state: #runtime::limit::LimitState,
-                    stream_state: #runtime::limit::StreamAdmissionState,
-                ) -> #axum::Router<#state_type> {
-                    #(#registrations)*
-                    router
-                }
-            }
-        });
-    }
-    let conditional_errors = conditional_errors.into_iter().map(|(conditions, message)| {
-        let cfg_attr = cfg_attribute(&conditions);
-        quote! { #cfg_attr compile_error!(#message); }
-    });
-    let item_impl = implementation;
-    Ok(quote! {
-        #item_impl
-
-        const _: () = {
-            #[doc(hidden)]
-            struct #instance_name<__Controller>(::std::sync::Arc<__Controller>);
-            impl<__Controller> ::std::clone::Clone for #instance_name<__Controller> {
-                fn clone(&self) -> Self { Self(self.0.clone()) }
-            }
-
-            #(#declarations)*
-
-            #(#conditional_errors)*
-            #(#state_impls)*
-        };
-    })
+    let mut model = internal::parse_controller::parse(args, input)?;
+    internal::validate_controller::validate(&mut model)?;
+    internal::generate_controller::generate(model)
 }
 
 /// Returns the state type when `ty` is an Axum `State<T>` extractor.

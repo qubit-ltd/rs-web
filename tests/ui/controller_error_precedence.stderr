@@ -1,0 +1,5 @@
+error: mapped controller methods must be async
+  --> tests/ui/controller_error_precedence.rs:16:5
+   |
+16 |     fn first(&self) -> &'static str {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
