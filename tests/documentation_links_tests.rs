@@ -70,11 +70,11 @@ fn link_to_heading_inside_fenced_or_indented_code_is_rejected() {
     let fixture = LinkFixture::new();
     fixture.write(
         "index.md",
-        "[fenced](target.md#fake)\n[still fenced](target.md#still-fake)\n[indented](target.md#indented-code)\n",
+        "[fenced](target.md#fake)\n[still fenced](target.md#still-fake)\n[indented](target.md#indented-code)\n[real](target.md#real)\n",
     );
     fixture.write(
         "target.md",
-        "```md\n# Fake\n    ```\n# Still fake\n```\n    # Indented code\n",
+        "```md\n# Fake\n```not-closed\n# Still fake\n```\n# Real\n    # Indented code\n",
     );
 
     let failures = check_markdown_links(&fixture.root, &[fixture.root.join("index.md")]);
@@ -82,6 +82,7 @@ fn link_to_heading_inside_fenced_or_indented_code_is_rejected() {
     assert!(failures[0].contains("#fake"), "{}", failures[0]);
     assert!(failures[1].contains("#still-fake"), "{}", failures[1]);
     assert!(failures[2].contains("#indented-code"), "{}", failures[2]);
+    assert!(failures.iter().all(|failure| !failure.contains("#real")));
 }
 
 #[test]
@@ -152,17 +153,14 @@ fn heading_anchors(source: &str) -> HashSet<String> {
             index += 1;
             continue;
         };
-        let fence = trimmed
-            .chars()
-            .take_while(|ch| *ch == '`' || *ch == '~')
-            .collect::<String>();
-        if fence.len() >= 3 {
-            let ch = fence.chars().next().unwrap();
+        if let Some((ch, fence_len_for_line, trailing)) = markdown_fence(trimmed) {
             if !in_fence {
-                in_fence = true;
-                fence_char = ch;
-                fence_len = fence.len();
-            } else if ch == fence_char && fence.len() >= fence_len {
+                if ch != '`' || !trailing.contains('`') {
+                    in_fence = true;
+                    fence_char = ch;
+                    fence_len = fence_len_for_line;
+                }
+            } else if ch == fence_char && fence_len_for_line >= fence_len && trailing.trim().is_empty() {
                 in_fence = false;
             }
             index += 1;
@@ -217,6 +215,15 @@ fn markdown_line_content(line: &str) -> Option<&str> {
         return None;
     }
     Some(&line[spaces..])
+}
+
+fn markdown_fence(line: &str) -> Option<(char, usize, &str)> {
+    let fence_char = line.chars().next()?;
+    if fence_char != '`' && fence_char != '~' {
+        return None;
+    }
+    let fence_len = line.chars().take_while(|ch| *ch == fence_char).count();
+    (fence_len >= 3).then_some((fence_char, fence_len, &line[fence_len..]))
 }
 
 fn visible_heading_text(title: &str) -> String {
