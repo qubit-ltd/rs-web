@@ -154,6 +154,13 @@ impl WebServer {
     }
 
     /// Binds an HTTPS socket after validating options and TLS credentials.
+    /// The underlying rustls configuration is snapshotted while constructing
+    /// the bound server. A reload completed before this method finishes can
+    /// be observed by this binding, but a reload afterward does not update the
+    /// server's handshakes. Concurrent reload and binding operations have no
+    /// guaranteed ordering and must be coordinated by the application. Apply
+    /// a new configuration by coordinating shutdown and a new bind; seamless
+    /// rebinding of the same address is not guaranteed.
     ///
     /// # Parameters
     ///

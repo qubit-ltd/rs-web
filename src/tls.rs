@@ -86,6 +86,16 @@ impl TlsConfig {
     /// # Returns
     ///
     /// A wrapper that can be passed to the HTTPS server constructor.
+    ///
+    /// This wrapper retains the supplied configuration handle. The HTTPS
+    /// server takes a snapshot of its underlying rustls configuration when
+    /// [`crate::WebServer::bind_https`] constructs the server. Reloads made
+    /// before that construction completes can be observed by the binding;
+    /// reloads made afterward do not update an already bound server. A reload
+    /// concurrent with binding has no guaranteed ordering, so applications
+    /// must coordinate those operations. To apply a new configuration,
+    /// coordinate shutting down the old server and binding a new one; rebinding
+    /// the same address is not guaranteed to be seamless.
     #[inline]
     pub fn from_rustls(config: RustlsConfig) -> Self {
         Self { inner: config }

@@ -54,6 +54,8 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
 
+type TestError = Box<dyn std::error::Error + Send + Sync>;
+
 async fn peer_address(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> String {
     peer.to_string()
 }
@@ -118,6 +120,104 @@ fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/tls")
         .join(name)
+}
+
+async fn tls_snapshot_configs() -> Result<(axum_server::tls_rustls::RustlsConfig, Arc<rustls::ClientConfig>), TestError>
+{
+    let base =
+        axum_server::tls_rustls::RustlsConfig::from_pem_file(fixture("https-h2-cert.pem"), fixture("https-h2-key.pem"))
+            .await
+            .expect("trusted TLS fixture should load");
+    let mut initial = (*base.get_inner()).clone();
+    initial.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let external = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(initial));
+
+    let certificate_pem = std::fs::read(fixture("https-h2-cert.pem"))?;
+    let certificate = rustls::pki_types::CertificateDer::pem_slice_iter(&certificate_pem)
+        .next()
+        .expect("fixture should contain a certificate")?;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certificate)?;
+    let mut client = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    client.resumption = rustls::client::Resumption::disabled();
+    Ok((external, Arc::new(client)))
+}
+
+fn reloaded_h2_config(config: &axum_server::tls_rustls::RustlsConfig) -> Arc<rustls::ServerConfig> {
+    let mut updated = (*config.get_inner()).clone();
+    updated.alpn_protocols = vec![b"h2".to_vec()];
+    Arc::new(updated)
+}
+
+async fn negotiated_alpn(address: SocketAddr, client: Arc<rustls::ClientConfig>) -> Result<Option<Vec<u8>>, TestError> {
+    let tcp = time::timeout(Duration::from_secs(3), TokioTcpStream::connect(address)).await??;
+    let name = rustls::pki_types::ServerName::try_from("localhost")?.to_owned();
+    let connector = TlsConnector::from(client);
+    let stream = time::timeout(Duration::from_secs(3), connector.connect(name, tcp)).await??;
+    let protocol = stream.get_ref().1.alpn_protocol().map(ToOwned::to_owned);
+    drop(stream);
+    Ok(protocol)
+}
+
+#[tokio_test]
+async fn tls_reload_before_bind_is_observed() {
+    let (external, client) = tls_snapshot_configs().await.expect("TLS configs should build");
+    external.reload_from_config(reloaded_h2_config(&external));
+    let tls = TlsConfig::from_rustls(external);
+    let server = WebServer::bind_https(ServerOptions::new("127.0.0.1:0".parse().unwrap()), tls)
+        .await
+        .expect("HTTPS listener binds");
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = spawn(server.serve(Router::new(), async {
+        let _ = shutdown_rx.await;
+    }));
+
+    let result = negotiated_alpn(address, client).await;
+    let _ = shutdown_tx.send(());
+    let shutdown = time::timeout(Duration::from_secs(3), serving)
+        .await
+        .expect("server shutdown should complete")
+        .expect("server task should not panic")
+        .expect("server should report shutdown");
+    assert!(shutdown.graceful);
+    assert_eq!(result.expect("TLS handshake should succeed"), Some(b"h2".to_vec()));
+}
+
+#[tokio_test]
+async fn tls_reload_after_bind_keeps_bound_snapshot() {
+    let (external, client) = tls_snapshot_configs().await.expect("TLS configs should build");
+    let tls = TlsConfig::from_rustls(external.clone());
+    let server = WebServer::bind_https(ServerOptions::new("127.0.0.1:0".parse().unwrap()), tls)
+        .await
+        .expect("HTTPS listener binds");
+    external.reload_from_config(reloaded_h2_config(&external));
+    assert_eq!(external.get_inner().alpn_protocols, vec![b"h2".to_vec()]);
+
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = spawn(server.serve(Router::new(), async {
+        let _ = shutdown_rx.await;
+    }));
+    let result = async {
+        let first = negotiated_alpn(address, Arc::clone(&client)).await?;
+        let second = negotiated_alpn(address, client).await?;
+        Ok::<_, TestError>((first, second))
+    }
+    .await;
+    let _ = shutdown_tx.send(());
+    let shutdown = time::timeout(Duration::from_secs(3), serving)
+        .await
+        .expect("server shutdown should complete")
+        .expect("server task should not panic")
+        .expect("server should report shutdown");
+    assert!(shutdown.graceful);
+    let (first, second) = result.expect("both TLS handshakes should succeed");
+    assert_eq!(first, Some(b"http/1.1".to_vec()));
+    assert_eq!(second, Some(b"http/1.1".to_vec()));
 }
 
 #[tokio_test]
