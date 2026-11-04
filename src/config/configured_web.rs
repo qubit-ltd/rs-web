@@ -53,9 +53,11 @@ impl ConfiguredWeb {
     /// Parses listener settings and route limit defaults from explicit values.
     ///
     /// The required `address` value is a socket address. The optional
-    /// `shutdown_timeout_ms` value defaults to 30 seconds,
-    /// `transport.max_connections` defaults to 1024, and
-    /// `transport.idle_timeout_ms` defaults to 30 seconds, and
+    /// `shutdown_timeout_ms`, `transport.max_connections`,
+    /// `transport.idle_timeout_ms`, and `transport.request_header_timeout_ms`
+    /// values default to 30 seconds, 1024, 30 seconds, and 10 seconds,
+    /// respectively. The request header timeout applies to HTTP/1 request
+    /// headers and TLS handshakes, not HTTP/2 request headers.
     /// `transport.http2_max_concurrent_streams` defaults to 200 per HTTP/2
     /// connection. Optional `transport.http1_max_buffer_bytes` and
     /// `transport.http2_max_header_list_bytes` preserve Hyper's defaults when
@@ -116,6 +118,18 @@ impl ConfiguredWeb {
         {
             return Err(ConfigOptionsError::new("transport.idle_timeout_ms"));
         }
+        let request_header_timeout_ms = config
+            .get_optional::<u64>("transport.request_header_timeout_ms")
+            .map_err(|_| ConfigOptionsError::new("transport.request_header_timeout_ms"))?
+            .unwrap_or(10_000);
+        let request_header_timeout = Duration::from_millis(request_header_timeout_ms);
+        if request_header_timeout.is_zero()
+            || tokio::time::Instant::now()
+                .checked_add(request_header_timeout)
+                .is_none()
+        {
+            return Err(ConfigOptionsError::new("transport.request_header_timeout_ms"));
+        }
 
         let max_body_bytes = config
             .get_optional::<u64>("http.max_body_bytes")
@@ -150,6 +164,7 @@ impl ConfiguredWeb {
 
         let mut server_options = ServerOptions::new(address)
             .with_shutdown_timeout(Duration::from_millis(shutdown_timeout_ms))
+            .with_request_header_timeout(request_header_timeout)
             .with_transport_idle_timeout(transport_idle_timeout)
             .with_max_transport_connections(
                 usize::try_from(max_transport_connections)

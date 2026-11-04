@@ -190,6 +190,57 @@ fn uses_the_standard_shutdown_timeout_when_omitted() {
 }
 
 #[test]
+fn configures_request_header_timeout_from_milliseconds() {
+    let mut config = Config::new();
+    config.set("address", "127.0.0.1:0").unwrap();
+    config.set("transport.request_header_timeout_ms", 2500u64).unwrap();
+
+    let options = ConfiguredWeb::from_config(&config).unwrap().into_parts().0;
+
+    assert_eq!(options.request_header_timeout(), std::time::Duration::from_millis(2500));
+}
+
+#[test]
+fn rejects_zero_or_malformed_request_header_timeout_by_field() {
+    for malformed in [false, true] {
+        let mut config = Config::new();
+        config.set("address", "127.0.0.1:0").unwrap();
+        if malformed {
+            config
+                .set("transport.request_header_timeout_ms", "private-timeout-sentinel")
+                .unwrap();
+        } else {
+            config.set("transport.request_header_timeout_ms", 0u64).unwrap();
+        }
+
+        let error = ConfiguredWeb::from_config(&config).unwrap_err();
+
+        assert_eq!(error.field(), "transport.request_header_timeout_ms");
+        assert!(!error.to_string().contains("private-timeout-sentinel"));
+    }
+}
+
+#[test]
+fn reports_unrepresentable_request_header_timeout_by_field() {
+    let timeout = std::time::Duration::from_millis(u64::MAX);
+    let representable = tokio::time::Instant::now().checked_add(timeout).is_some();
+    let mut config = Config::new();
+    config.set("address", "127.0.0.1:0").unwrap();
+    config.set("transport.request_header_timeout_ms", u64::MAX).unwrap();
+
+    match (representable, ConfiguredWeb::from_config(&config)) {
+        (true, Ok(configured)) => {
+            assert_eq!(configured.server_options().request_header_timeout(), timeout);
+        }
+        (false, Err(error)) => {
+            assert_eq!(error.field(), "transport.request_header_timeout_ms");
+        }
+        (true, Err(error)) => panic!("representable timeout was rejected: {error}"),
+        (false, Ok(_)) => panic!("unrepresentable timeout was accepted"),
+    }
+}
+
+#[test]
 fn rejects_an_invalid_address_without_echoing_its_value() {
     let config = config_with("private-address-sentinel", 1000);
 
@@ -205,7 +256,12 @@ fn rejects_configuration_values_with_the_wrong_type() {
     config.set("address", 123u64).unwrap();
     assert_eq!(ConfiguredWeb::from_config(&config).unwrap_err().field(), "address");
 
-    for field in ["shutdown_timeout_ms", "http.max_body_bytes", "http.request_timeout_ms"] {
+    for field in [
+        "shutdown_timeout_ms",
+        "http.max_body_bytes",
+        "http.request_timeout_ms",
+        "transport.request_header_timeout_ms",
+    ] {
         let mut config = Config::new();
         config.set("address", "127.0.0.1:0").unwrap();
         config.set(field, "private-value-sentinel").unwrap();
