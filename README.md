@@ -123,33 +123,39 @@ Controller path captures use Axum syntax such as `/{id}` and `/{*rest}`; legacy 
 
 See the [English user guide](doc/user_guide.md) or [Chinese user guide](doc/user_guide.zh_CN.md) for limits, TLS setup, lifecycle behavior, and troubleshooting. See the [API documentation](https://docs.rs/qubit-web), [historical Chinese design record](doc/2026-10-08-rs-web-design.md), and [lifecycle design summary](doc/2026-10-09-rs-web-lifecycle-design.en.md) for more.
 
+Deadlines use cooperative Tokio cancellation, so non-yielding synchronous work can delay checks and cleanup. HTTP and HTTPS handlers can extract the direct TCP peer through Axum `ConnectInfo<SocketAddr>`; see the [user guide](doc/user_guide.md) for proxy and execution boundaries.
+
+The [fixed interoperability workflow](.github/workflows/downstream-interop.yml) preserves the pinned consumer baseline. The separate [current-consumer WS/WSS workflow](.github/workflows/downstream-current-interop.yml) checks rs-websocket `main` weekly or on manual dispatch, including current-consumer TLS WebSocket scenarios.
+
 ## Testing
 
-Run the current crate checks with:
-
-```sh
+```bash
+# Run tests with the default feature set
 cargo test
+
+# Run tests with all declared features
 cargo test --all-features
+
+# Project CI checks
 ./.infra/bin/ci-check.sh
+
+# Check code coverage
 ./.infra/bin/coverage.sh
-```
-
-For a focused WebSocket contract check, run:
-
-```sh
-cargo test -p qubit-web --no-default-features --features ws --test websocket_tests --locked
 ```
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
+Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the
+full license text.
 
 ## Contributing
 
-Contributions are welcome. Run `./.infra/bin/style-check.sh` for style checks and `./.infra/bin/ci-check.sh` for the crate's full acceptance checks before submitting a pull request. The [fixed interoperability workflow](.github/workflows/downstream-interop.yml) preserves the pinned consumer baseline. The separate [current-consumer WS/WSS workflow](.github/workflows/downstream-current-interop.yml) checks rs-websocket `main` weekly or on manual dispatch, including current-consumer TLS WebSocket scenarios. Please open an [issue](https://github.com/qubit-ltd/rs-web/issues) to discuss a change or submit a [pull request](https://github.com/qubit-ltd/rs-web/pulls).
+Contributions are welcome. Please follow the Rust API guidelines, keep public API documentation and tests current, and run `./.infra/bin/align-ci.sh` to format code and `./.infra/bin/ci-check.sh` to satisfy CI requirements before submitting a pull request.
 
 ## Author
 
-**Haixing Hu** — [Qubit Co. Ltd.](https://github.com/qubit-ltd)
+**Haixing Hu** - *Qubit Co. Ltd.*
 
-Deadlines use cooperative Tokio cancellation, so non-yielding synchronous work can delay checks and cleanup. HTTP and HTTPS handlers can extract the direct TCP peer through Axum `ConnectInfo<SocketAddr>`; see the [user guide](doc/user_guide.md) for proxy and execution boundaries.
+Repository: [https://github.com/qubit-ltd/rs-web](https://github.com/qubit-ltd/rs-web)

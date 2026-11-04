@@ -123,33 +123,39 @@ Controller 路径捕获使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧�
 
 限额细节、TLS 配置、生命周期行为和排障方法见[中文用户指南](doc/user_guide.zh_CN.md)或[英文用户指南](doc/user_guide.md)。更多背景可查阅 [API 文档](https://docs.rs/qubit-web)、[历史中文设计记录](doc/2026-10-08-rs-web-design.md)和[生命周期设计摘要](doc/2026-10-09-rs-web-lifecycle-design.en.md)。
 
+期限采用 Tokio 协作式取消，不让出执行权的同步工作会延迟检查和清理。HTTP/HTTPS handler 可通过 Axum `ConnectInfo<SocketAddr>` 提取直接 TCP 对端；代理与执行边界见[用户指南](doc/user_guide.zh_CN.md)。
+
+[固定互操作 workflow](.github/workflows/downstream-interop.yml) 保留固定消费者基线；独立的[当前消费者 WS/WSS workflow](.github/workflows/downstream-current-interop.yml) 每周或手动检查 rs-websocket `main`，也覆盖当前消费者的 TLS WebSocket 场景。
+
 ## 测试
 
-运行当前 crate 的检查：
-
-```sh
+```bash
+# 使用默认 feature 集运行测试
 cargo test
+
+# 使用项目声明的全部 feature 运行测试
 cargo test --all-features
+
+# 运行项目 CI 检查
 ./.infra/bin/ci-check.sh
+
+# 检查代码覆盖率
 ./.infra/bin/coverage.sh
-```
-
-如需单独检查 WebSocket 合同，可运行：
-
-```sh
-cargo test -p qubit-web --no-default-features --features ws --test websocket_tests --locked
 ```
 
 ## 许可证
 
-本项目采用 Apache License 2.0 授权，完整条款见 [LICENSE](LICENSE)。
+Copyright (c) 2025 - 2026. Haixing Hu. All rights reserved.
+
+本项目基于 Apache License 2.0 授权。完整许可证文本请参阅
+[LICENSE](LICENSE)。
 
 ## 贡献
 
-欢迎参与贡献。提交 Pull Request 前，可用 `./.infra/bin/style-check.sh` 检查代码风格，并用 `./.infra/bin/ci-check.sh` 完成本 crate 的验收检查。[固定互操作 workflow](.github/workflows/downstream-interop.yml) 保留固定消费者基线；独立的[当前消费者 WS/WSS workflow](.github/workflows/downstream-current-interop.yml) 每周或手动检查 rs-websocket `main`，也覆盖当前消费者的 TLS WebSocket 场景。提出改进前可先到 [Issues](https://github.com/qubit-ltd/rs-web/issues) 讨论，也可直接提交 [Pull Request](https://github.com/qubit-ltd/rs-web/pulls)。
+欢迎贡献。请遵循 Rust API 指南，及时更新公共 API 文档与测试，并在提交 Pull Request 前运行 `./.infra/bin/align-ci.sh` 格式化代码，运行 `./.infra/bin/ci-check.sh` 对齐 CI 要求。
 
 ## 作者
 
-**Haixing Hu** — [Qubit Co. Ltd.](https://github.com/qubit-ltd)
+**Haixing Hu** - *Qubit Co. Ltd.*
 
-期限采用 Tokio 协作式取消，不让出执行权的同步工作会延迟检查和清理。HTTP/HTTPS handler 可通过 Axum `ConnectInfo<SocketAddr>` 提取直接 TCP 对端；代理与执行边界见[用户指南](doc/user_guide.zh_CN.md)。
+仓库地址：[https://github.com/qubit-ltd/rs-web](https://github.com/qubit-ltd/rs-web)
