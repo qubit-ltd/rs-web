@@ -18,7 +18,10 @@ use super::activity_lease::ActivityLease;
 
 /// Response body retaining a request lease through EOF, error, or drop.
 pub(super) struct ActivityBody {
+    /// The response body whose frames are forwarded unchanged.
     inner: Body,
+    /// The request activity lease, released after EOF or an error is observed,
+    /// or when this wrapper is dropped while the lease is still held.
     lease: Option<ActivityLease>,
 }
 

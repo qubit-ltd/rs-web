@@ -120,7 +120,8 @@ fn test_macro_crate_documentation_example_compiles() {
 fn impl_cfg_macro_consumer_compiles_with_feature_disabled_and_enabled() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest = repository.join("tests/fixtures/macro_consumers/impl_cfg/Cargo.toml");
-    let target_dir = repository.join("target/macro-impl-cfg");
+    // Keep nested Cargo builds under the parent test's isolated target directory.
+    let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("macro-impl-cfg");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
 
     for feature in [None, Some("impl-enabled")] {

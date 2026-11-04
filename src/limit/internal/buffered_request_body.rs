@@ -20,12 +20,25 @@ use hyper::body::SizeHint;
 
 /// Buffered data followed by its original trailers.
 pub(in crate::limit) struct BufferedRequestBody {
+    /// The buffered data frame until it is consumed; `None` means it was
+    /// consumed, and empty data is skipped.
     data: Option<Bytes>,
+    /// The trailers frame until it is consumed after the data frame; `None`
+    /// means the trailers were consumed.
     trailers: Option<HeaderMap>,
 }
 
 impl BufferedRequestBody {
-    /// Creates a replay body from collected data and trailers.
+    /// Creates a body that replays buffered data followed by its trailers.
+    ///
+    /// # Parameters
+    ///
+    /// - `data`: The buffered data bytes to replay before the trailers.
+    /// - `trailers`: The trailers to replay after the data.
+    ///
+    /// # Returns
+    ///
+    /// A body containing the data and trailers for replay.
     pub(in crate::limit) fn new(data: Bytes, trailers: HeaderMap) -> Self {
         Self {
             data: Some(data),
@@ -38,6 +51,13 @@ impl Body for BufferedRequestBody {
     type Data = Bytes;
     type Error = Infallible;
 
+    /// Returns the next buffered frame, skipping empty data and replaying
+    /// trailers after data has been consumed.
+    ///
+    /// # Returns
+    ///
+    /// A data frame, then a trailers frame, or `Poll::Ready(None)` after both
+    /// have been consumed. This body returns a ready result on every call.
     fn poll_frame(
         mut self: Pin<&mut Self>,
         _: &mut Context<'_>,
@@ -53,10 +73,14 @@ impl Body for BufferedRequestBody {
         Poll::Ready(None)
     }
 
+    /// Reports whether both the buffered data and trailers have been consumed.
     fn is_end_stream(&self) -> bool {
         self.data.is_none() && self.trailers.is_none()
     }
 
+    /// Returns an exact size hint for the remaining data bytes, excluding
+    /// trailers. A zero size hint does not imply end of stream because trailers
+    /// may still remain.
     fn size_hint(&self) -> SizeHint {
         let remaining = self.data.as_ref().map_or(0, Bytes::len) as u64;
         SizeHint::with_exact(remaining)

@@ -19,7 +19,8 @@ const FIXTURES: &[&str] = &[
 #[test]
 fn macro_consumers_compile_with_dependency_names() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let target_dir = repository.join("target/macro-consumers");
+    // Keep nested Cargo builds under the parent test's isolated target directory.
+    let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("macro-consumers");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
 
     for fixture in FIXTURES {
