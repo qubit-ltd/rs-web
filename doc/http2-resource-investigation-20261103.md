@@ -34,3 +34,30 @@ The active-SSE test reported `SSE_DATA_WHILE_SECOND_HEADER_BLOCK_INCOMPLETE=true
 The experiment disproves the narrow claim that this valid incomplete block necessarily stops SSE progress on this connection under the tested stack. It does not establish that an attacker cannot consume bounded per-connection memory or keep parser state allocated indefinitely; neither duration-based retention nor RSS was measured. The existing header-list and frame/continuation bounds constrain the data accumulated, but do not impose a wall-clock deadline on a client that pauses between valid frames.
 
 Accordingly, WEB-004 remains **unconfirmed**, rather than “fixed.” WEB-001's per-connection stream budget is useful capacity control, but this experiment does not show that it is necessary to resolve a reproduced incomplete-header/SSE failure. A dedicated HTTP/2 header deadline would need a separate design and evidence about the correct connection-level behavior, especially because one incomplete header block can hold up later frames on that connection.
+
+## Bounded resource experiment (2026-11-04)
+
+This section appends the WEB-R05 resource measurements. The 2026-11-03 frame results and conclusions above are retained unchanged.
+
+### Method and reproducibility
+
+The explicit ignored matrix launched each server in a separate child process, so sampled RSS excludes the Cargo test runner and clients. The matrix crossed two HTTP/2 received-header-list settings (Hyper default and explicit 16 KiB), 1/8/32 HTTP/2 connections, and four states: SETTINGS handshake with no stream, completed short request, active SSE, and a valid HPACK header block left incomplete. Every cell ran for 60 seconds and sampled at 0, 5, …, 60 seconds. The child had a 33-transport permit limit (32 measured clients plus one health probe); every cell closed its clients, then the child opened 33 health connections concurrently to verify permit reuse before graceful shutdown.
+
+The maximum request-header frame data in any cell was 992 bytes, below the 8 MiB per-cell cap. Each sample recorded child-process `VmRSS`, established server-side connection count, SSE event progress, and bounded `/health` probe result. Sampling stops at 512 MiB RSS or a failed health probe; neither condition occurred. The raw, incrementally flushed measurements are in [`http2-resource-experiment-20261104.csv`](http2-resource-experiment-20261104.csv).
+
+Environment: Linux `mas-server`, kernel `6.8.0-147-generic` x86_64; `rustc 1.94.0 (4a4ef493e 2026-03-02)`; locked Hyper 1.12.0 and h2 0.4.20; source baseline commit `2ab1cb41e316d456e26636b6cb222075c619a7fc`.
+
+Commands, run from the `rs-web` worktree:
+
+```text
+cargo test --locked --test http2_resource_tests
+RS_WEB_RESOURCE_CSV=/data/working/qubit/rust-common/.worktrees/rs-web/web-r01-r05-20261104/doc/http2-resource-experiment-20261104.csv cargo test --locked --test http2_resource_tests -- --ignored --nocapture
+```
+
+The regular command passed: 3 passed, 2 ignored, 0 failed. The explicit experiment passed: 2 passed, 0 failed, 0 ignored, in 1,462.51 seconds. The CSV contains 312 measurement rows (24 cells × 13 samples) plus its header. All 24 groups ended at 60 seconds with `responsive=true` and `stop_reason=duration`; the 24 child recovery checks and graceful shutdowns passed. The temporary experiment directory was removed after completion.
+
+### Measurements and conclusion
+
+Across the full matrix, child RSS ranged from 7,132 to 7,944 KiB (about 7.0–7.8 MiB), with no 512 MiB stop. Server-side connection counts matched 1, 8, and 32 in the measured cells. All active SSE cases advanced: final counters were 591/4,788/19,344 events at 1/8/32 connections under default settings and 592/4,788/19,385 with the 16 KiB setting. Incomplete-header cases remained responsive for all 60 seconds; after the test clients closed, all 33 configured transport permits served a health request concurrently.
+
+**Conclusion: branch 1, no resource defect confirmed in the tested bound.** The tested incomplete blocks remained responsive and their transports were recyclable with both header-list settings. This supports leaving production behavior unchanged for WEB-R05. It does not prove behavior beyond 60 seconds, under larger or different header blocks, or on other systems; a long-lived parser state still is not, by itself, evidence of a leak. No new HTTP/2 header deadline is proposed by this experiment.
