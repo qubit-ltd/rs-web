@@ -836,6 +836,109 @@ fn manually_declared_legacy_and_nonabsolute_paths_are_rejected_before_register()
     assert_rejected!(RelativePath, "users");
 }
 
+#[test]
+fn route_parameter_limit_accepts_twenty_five_and_final_catch_all() {
+    const PARAMS: &str = "/{p00}/{p01}/{p02}/{p03}/{p04}/{p05}/{p06}/{p07}/{p08}/{p09}/{p10}/{p11}/{p12}/{p13}/{p14}/{p15}/{p16}/{p17}/{p18}/{p19}/{p20}/{p21}/{p22}/{p23}/{p24}";
+    // Each successful boundary is passed through ControllerRoutes::add, which
+    // invokes matchit.
+    static ROUTES: [qubit_web::mvc::RouteMetadata; 1] = [qubit_web::mvc::RouteMetadata::new(
+        "GET",
+        PARAMS,
+        qubit_web::RouteKind::Short,
+    )];
+    static CATCH_ALL_ROUTES: [qubit_web::mvc::RouteMetadata; 1] = [qubit_web::mvc::RouteMetadata::new(
+        "GET",
+        "/{p00}/{p01}/{p02}/{p03}/{p04}/{p05}/{p06}/{p07}/{p08}/{p09}/{p10}/{p11}/{p12}/{p13}/{p14}/{p15}/{p16}/{p17}/{p18}/{p19}/{p20}/{p21}/{p22}/{p23}/{p24}/{*tail}",
+        qubit_web::RouteKind::Short,
+    )];
+    struct Boundary;
+    struct BoundaryWithCatchAll;
+    impl qubit_web::mvc::ControllerDefinition<()> for BoundaryWithCatchAll {
+        fn route_metadata() -> &'static [qubit_web::mvc::RouteMetadata] {
+            &CATCH_ALL_ROUTES
+        }
+        fn register(
+            self: Arc<Self>,
+            router: Router<()>,
+            _: qubit_web::limit::LimitState,
+            _: qubit_web::limit::StreamAdmissionState,
+        ) -> Router<()> {
+            router
+        }
+    }
+    impl qubit_web::mvc::ControllerDefinition<()> for Boundary {
+        fn route_metadata() -> &'static [qubit_web::mvc::RouteMetadata] {
+            &ROUTES
+        }
+        fn register(
+            self: Arc<Self>,
+            router: Router<()>,
+            _: qubit_web::limit::LimitState,
+            _: qubit_web::limit::StreamAdmissionState,
+        ) -> Router<()> {
+            router
+        }
+    }
+    assert!(ControllerRoutes::new().add(Arc::new(Boundary)).is_ok());
+    assert!(ControllerRoutes::new().add(Arc::new(BoundaryWithCatchAll)).is_ok());
+}
+
+#[test]
+fn manually_declared_too_many_route_parameters_are_rejected_before_register() {
+    static ROUTES: [qubit_web::mvc::RouteMetadata; 1] = [qubit_web::mvc::RouteMetadata::new(
+        "GET",
+        "/{p00}/{p01}/{p02}/{p03}/{p04}/{p05}/{p06}/{p07}/{p08}/{p09}/{p10}/{p11}/{p12}/{p13}/{p14}/{p15}/{p16}/{p17}/{p18}/{p19}/{p20}/{p21}/{p22}/{p23}/{p24}/{p25}",
+        qubit_web::RouteKind::Short,
+    )];
+    struct TooMany;
+    impl qubit_web::mvc::ControllerDefinition<()> for TooMany {
+        fn route_metadata() -> &'static [qubit_web::mvc::RouteMetadata] {
+            &ROUTES
+        }
+        fn register(
+            self: Arc<Self>,
+            _: Router<()>,
+            _: qubit_web::limit::LimitState,
+            _: qubit_web::limit::StreamAdmissionState,
+        ) -> Router<()> {
+            panic!("register must not run for too many parameters")
+        }
+    }
+    let result = ControllerRoutes::new().add(Arc::new(TooMany));
+    let Err(ControllerRouteError::InvalidPath { reason, .. }) = result else {
+        panic!("expected InvalidPath");
+    };
+    assert!(reason.contains("at most 25 non-wildcard parameters"), "{reason}");
+}
+
+#[test]
+fn route_parameter_precheck_handles_escaped_braces_prefixes_and_unicode() {
+    static ROUTES: [qubit_web::mvc::RouteMetadata; 3] = [
+        qubit_web::mvc::RouteMetadata::new("GET", "/日本語/{{literal}}/{id}", qubit_web::RouteKind::Short),
+        qubit_web::mvc::RouteMetadata::new(
+            "GET",
+            "/{{literal0}}/{{literal1}}/{{literal2}}/{{literal3}}/{{literal4}}/{{literal5}}/{{literal6}}/{{literal7}}/{{literal8}}/{{literal9}}/{{literal10}}/{{literal11}}/{{literal12}}/{{literal13}}/{{literal14}}/{{literal15}}/{{literal16}}/{{literal17}}/{{literal18}}/{{literal19}}/{{literal20}}/{{literal21}}/{{literal22}}/{{literal23}}/{{literal24}}/{{literal25}}/{{literal26}}/{{literal27}}/{{literal28}}/{{literal29}}/{id}",
+            qubit_web::RouteKind::Short,
+        ),
+        qubit_web::mvc::RouteMetadata::new("GET", "/static{prefix}/{id}", qubit_web::RouteKind::Short),
+    ];
+    struct Valid;
+    impl qubit_web::mvc::ControllerDefinition<()> for Valid {
+        fn route_metadata() -> &'static [qubit_web::mvc::RouteMetadata] {
+            &ROUTES
+        }
+        fn register(
+            self: Arc<Self>,
+            router: Router<()>,
+            _: qubit_web::limit::LimitState,
+            _: qubit_web::limit::StreamAdmissionState,
+        ) -> Router<()> {
+            router
+        }
+    }
+    assert!(ControllerRoutes::new().add(Arc::new(Valid)).is_ok());
+}
+
 #[tokio::test]
 async fn controller_routes_keep_first_and_last_routes_after_multiple_adds() {
     struct Middle;

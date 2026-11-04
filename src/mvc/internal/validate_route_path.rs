@@ -6,6 +6,9 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 
+/// Maximum supported count of named parameters in one route path.
+const MAX_NON_WILDCARD_PARAMETERS: usize = 25;
+
 /// Checks route path constraints shared by all manually declared controllers.
 pub(in crate::mvc) fn validate_route_path(path: &str) -> Result<(), &'static str> {
     if path.is_empty() {
@@ -13,6 +16,9 @@ pub(in crate::mvc) fn validate_route_path(path: &str) -> Result<(), &'static str
     }
     if !path.starts_with('/') {
         return Err("route path must be absolute");
+    }
+    if has_too_many_non_wildcard_parameters(path) {
+        return Err("route path supports at most 25 non-wildcard parameters");
     }
     if path
         .split('/')
@@ -23,4 +29,29 @@ pub(in crate::mvc) fn validate_route_path(path: &str) -> Result<(), &'static str
         );
     }
     Ok(())
+}
+
+/// Counts unescaped named parameters without slicing at potentially non-UTF-8
+/// boundaries.
+fn has_too_many_non_wildcard_parameters(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let mut index = 0;
+    let mut count = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' if bytes.get(index + 1) == Some(&b'{') => index += 2,
+            b'}' if bytes.get(index + 1) == Some(&b'}') => index += 2,
+            b'{' => {
+                if bytes.get(index + 1) != Some(&b'*') {
+                    count += 1;
+                    if count > MAX_NON_WILDCARD_PARAMETERS {
+                        return true;
+                    }
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    false
 }

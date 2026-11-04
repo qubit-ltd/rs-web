@@ -299,6 +299,7 @@ fn validate_path(path: &str, prefix: bool, span: Span) -> syn::Result<()> {
 /// Validates path parameter segments, uniqueness, and final wildcard placement.
 fn validate_template(path: &str, span: Span) -> syn::Result<()> {
     let mut names = HashSet::new();
+    let mut non_wildcard_parameters = 0;
     let segments: Vec<_> = path.split('/').collect();
     for (index, segment) in segments.iter().enumerate() {
         if segment.is_empty() {
@@ -325,6 +326,15 @@ fn validate_template(path: &str, span: Span) -> syn::Result<()> {
         let (wildcard, name) = parameter
             .strip_prefix('*')
             .map_or((false, parameter), |name| (true, name));
+        if !wildcard {
+            non_wildcard_parameters += 1;
+            if non_wildcard_parameters > 25 {
+                return Err(syn::Error::new(
+                    span,
+                    "route path supports at most 25 non-wildcard parameters",
+                ));
+            }
+        }
         let valid_name = !name.is_empty() && !name.chars().any(|character| matches!(character, '{' | '}' | '*' | '/'));
         if !valid_name {
             return Err(syn::Error::new(

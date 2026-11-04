@@ -139,8 +139,10 @@ where
     /// Returns [`ControllerRouteError::DuplicateMethod`] for an exact duplicate
     /// method and path, [`ControllerRouteError::PatternConflict`] for distinct
     /// templates that match the same paths, or
-    /// [`ControllerRouteError::InvalidPath`] for an invalid route template.
-    /// No routes are registered unless every declaration passes preflight.
+    /// [`ControllerRouteError::InvalidPath`] for an invalid route template,
+    /// including a route with more than 25 non-wildcard parameters. Catch-all
+    /// parameters do not count toward that limit. No routes are registered
+    /// unless every declaration passes preflight.
     #[allow(clippy::should_implement_trait)]
     pub fn add<C>(mut self, controller: Arc<C>) -> Result<Self, ControllerRouteError>
     where
