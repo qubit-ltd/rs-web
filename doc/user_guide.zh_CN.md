@@ -104,6 +104,23 @@ let app = Router::new()
 
 片段中的 `submit`、`progress` 和 `websocket` 是应用自己的 handler；完整组合可参考 [`examples/prompt_stream.rs`](../examples/prompt_stream.rs)。Controller 短路由已有默认限额；调用 `ControllerRoutes::with_http_limits` 可替换默认策略。Controller 的 `sse` 和 `ws` 路由使用独立的流式接纳 layer；`with_http_limits` 只改变短路由策略。原生 SSE/WS 分支不要套用 `RequestLimitLayer`：它的期限还会覆盖响应流。宏把 `kind` 作为限额策略分类，`ws` 只允许 `GET`，但不会验证 handler 是否真正实现了对应协议。
 
+若要让多个原生 Axum 短请求分支共享并发额度，创建一个 `LimitState` 并将其克隆传给各个 layer。每次调用 `RequestLimitLayer::new` 都会创建独立额度域，即使传入相同的 `HttpLimits`：
+
+```rust,ignore
+use axum::{Router, routing::get};
+use qubit_web::{HttpLimits, RequestLimitLayer};
+use qubit_web::limit::LimitState;
+
+let shared = LimitState::new(HttpLimits::default());
+let app: Router = Router::new()
+    .route("/a", get(|| async { "a" })
+        .layer(RequestLimitLayer::from_state(shared.clone())))
+    .route("/b", get(|| async { "b" })
+        .layer(RequestLimitLayer::from_state(shared)));
+```
+
+共享额度只约束使用该状态克隆的 layer，不会自动成为整个进程的上限；Controller builder 保持自己的状态域。
+
 `ControllerRoutes::add` 会在注册前检查当前 Controller 的全部路由声明。重复的 method/path、无效路径、超过 25 个普通参数或匹配模板冲突（例如参数别名和重叠通配符）会返回 `ControllerRouteError`；末尾 catch-all 不计入数量。不同 method 可以共用同一模板，`finish()` 直接返回 `Router`。路径捕获请使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧式 `/:id`、`/*rest` 会被拒绝。检查范围是 builder 收集的声明；之后与原生 Axum Router 合并仍遵循 Axum 自身行为。`rest_controller` 也支持在同一模块中装配末段名称相同、但实际类型不同的 Controller。
 
 ### Controller 使用单一根状态
@@ -324,6 +341,8 @@ let server = WebServer::bind_https(options, tls).await?;
 ```
 
 部署时应使用客户端信任的证书，或在可信边缘终止 TLS 并由应用明确处理相关配置。仓库测试证书是自签名 fixture，不能直接作为部署凭据。同一个 Router 可用于 HTTPS；其 WebSocket 升级自然使用 WSS。
+
+`WebServer::bind_https` 构造 HTTPS server 时会取得底层 rustls 配置快照。若外部 `RustlsConfig` 的重载在绑定完成前结束，且没有与绑定并发，该次 server 可以看到新配置。在 `bind_https` 完成后再重载，不会刷新该 server 后续握手使用的配置。要应用新证书或 TLS 配置，应用应协调关闭并重新创建 server；不保证同一地址可以无缝重绑。若重载与绑定并发，使用哪一版配置没有确定保证，应用应自行排序。
 
 ## 运行、观察和关闭
 

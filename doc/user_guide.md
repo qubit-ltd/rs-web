@@ -90,6 +90,23 @@ let app = Router::new()
 
 The example fragments assume application handlers `submit`, `progress`, and `websocket`; the full runnable composition is in [`examples/prompt_stream.rs`](../examples/prompt_stream.rs). Controller routes already receive default limits; call `ControllerRoutes::with_http_limits` before adding them to replace those limits. Controller `sse` and `ws` routes use a separate stream-admission layer; `with_http_limits` only changes short-route limits. Keep native SSE and WebSocket branches outside `RequestLimitLayer`: its deadline also covers response streaming. The macro treats `kind` as a limit-policy classification, requires `GET` for `ws`, and does not verify that the handler implements the declared wire protocol.
 
+To share short-request concurrency across native Axum branches, create one `LimitState` and pass clones to each layer. Each `RequestLimitLayer::new` call creates an independent capacity domain, even when its `HttpLimits` values match:
+
+```rust,ignore
+use axum::{Router, routing::get};
+use qubit_web::{HttpLimits, RequestLimitLayer};
+use qubit_web::limit::LimitState;
+
+let shared = LimitState::new(HttpLimits::default());
+let app: Router = Router::new()
+    .route("/a", get(|| async { "a" })
+        .layer(RequestLimitLayer::from_state(shared.clone())))
+    .route("/b", get(|| async { "b" })
+        .layer(RequestLimitLayer::from_state(shared)));
+```
+
+The shared allowance applies only to layers using clones of this state. It is not an automatic process-wide cap, and Controller builders keep their own state domain.
+
 `ControllerRoutes::add` checks the complete set of Controller route declarations before registering them. It returns `ControllerRouteError` for duplicate method/path pairs, invalid paths, more than 25 non-wildcard parameters, or matching-template conflicts such as parameter aliases and overlapping wildcards. A final catch-all parameter does not count toward the limit. Different methods can share one template, and `finish()` returns the `Router` directly. Use Axum capture syntax such as `/{id}` and `/{*rest}`; legacy `/:id` and `/*rest` segments are rejected. This check covers declarations collected by the builder; later merges with native Axum routers retain Axum's own behavior. `rest_controller` also supports distinct Controller types with the same terminal type name in one module.
 
 ### Give Controllers one root state type
@@ -331,6 +348,8 @@ let server = WebServer::bind_https(options, tls).await?;
 ```
 
 Use a certificate trusted by clients, or terminate TLS at a trusted edge and configure the application accordingly. Repository test fixtures are self-signed test material, not deployment credentials. HTTPS uses the same Router; WebSocket upgrades on it use WSS.
+
+When `WebServer::bind_https` constructs the HTTPS server, it captures the underlying rustls configuration. A reload on the external `RustlsConfig` completed before binding, without racing the bind, can be observed by that server. A reload after `bind_https` completes does not refresh the configuration used by that server's later handshakes. Coordinate shutting down and recreating the server to apply a new certificate or TLS configuration; rebinding the same address is not guaranteed to be seamless. If reload and bind run concurrently, the selected configuration version is unspecified, so order them in the application.
 
 ## Run, observe, and stop the service
 
