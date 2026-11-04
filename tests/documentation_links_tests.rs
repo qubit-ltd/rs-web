@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 
 #[test]
@@ -27,6 +28,7 @@ fn heading_anchors_match_markdown_heading_rules() {
         assert!(anchors.contains(expected), "missing anchor {expected:?}");
     }
     assert!(!anchors.contains("fake"));
+    assert!(!heading_anchors("    # Indented code heading\n").contains("indented-code-heading"));
 }
 
 #[test]
@@ -40,22 +42,46 @@ fn validates_fragments_after_percent_decoding() {
 
 #[test]
 fn validates_local_document_links_and_reports_source_line() {
-    let target = "# Transport budgets\n";
-    assert!(validate_fragment(target, "transport-budgets").is_ok());
-    let error = validate_fragment(target, "missing").unwrap_err();
-    assert!(error.contains("missing"));
+    let fixture = LinkFixture::new();
+    fixture.write("index.md", "first\n[bad](target.md#missing)\n");
+    fixture.write("target.md", "# Present\n");
 
-    let links = markdown_links("first\n[ok](target.md#transport-budgets)\n[bad](target.md#missing)\n");
-    assert_eq!(links[1].0, 3);
-    assert_eq!(links[1].1, "target.md#missing");
+    let failures = check_markdown_links(&fixture.root, &[fixture.root.join("index.md")]);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].contains("index.md:2:"), "{}", failures[0]);
+    assert!(failures[0].contains("#missing"), "{}", failures[0]);
 }
 
 #[test]
 fn empty_or_absent_fragments_and_external_urls_are_distinguished() {
-    let parsed = ["target.md#", "target.md", "https://example.com/#ignored"];
-    assert_eq!(parsed[0].split_once('#'), Some(("target.md", "")));
-    assert_eq!(parsed[1].split_once('#'), None);
-    assert!(parsed[2].contains("://"));
+    let fixture = LinkFixture::new();
+    fixture.write(
+        "index.md",
+        "[empty](target.md#)\n[plain](target.md)\n[external](https://example.com/#ignored)\n",
+    );
+    fixture.write("target.md", "# Present\n");
+
+    let failures = check_markdown_links(&fixture.root, &[fixture.root.join("index.md")]);
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn link_to_heading_inside_fenced_or_indented_code_is_rejected() {
+    let fixture = LinkFixture::new();
+    fixture.write(
+        "index.md",
+        "[fenced](target.md#fake)\n[still fenced](target.md#still-fake)\n[indented](target.md#indented-code)\n",
+    );
+    fixture.write(
+        "target.md",
+        "```md\n# Fake\n    ```\n# Still fake\n```\n    # Indented code\n",
+    );
+
+    let failures = check_markdown_links(&fixture.root, &[fixture.root.join("index.md")]);
+    assert_eq!(failures.len(), 3, "{failures:?}");
+    assert!(failures[0].contains("#fake"), "{}", failures[0]);
+    assert!(failures[1].contains("#still-fake"), "{}", failures[1]);
+    assert!(failures[2].contains("#indented-code"), "{}", failures[2]);
 }
 
 #[test]
@@ -77,7 +103,9 @@ fn markdown_links(source: &str) -> Vec<(usize, String)> {
     let mut in_fence = false;
 
     for (line_index, line) in source.lines().enumerate() {
-        let trimmed = line.trim_start();
+        let Some(trimmed) = markdown_line_content(line) else {
+            continue;
+        };
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_fence = !in_fence;
             continue;
@@ -120,7 +148,10 @@ fn heading_anchors(source: &str) -> HashSet<String> {
 
     while index < lines.len() {
         let line = lines[index];
-        let trimmed = line.trim_start();
+        let Some(trimmed) = markdown_line_content(line) else {
+            index += 1;
+            continue;
+        };
         let fence = trimmed
             .chars()
             .take_while(|ch| *ch == '`' || *ch == '~')
@@ -178,6 +209,14 @@ fn heading_anchors(source: &str) -> HashSet<String> {
         index += 1;
     }
     anchors
+}
+
+fn markdown_line_content(line: &str) -> Option<&str> {
+    let spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+    if spaces >= 4 || line.starts_with('\t') {
+        return None;
+    }
+    Some(&line[spaces..])
 }
 
 fn visible_heading_text(title: &str) -> String {
@@ -248,11 +287,25 @@ fn percent_decode(fragment: &str) -> Result<String, String> {
 #[test]
 fn test_documentation_local_markdown_links_exist() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut pending = VecDeque::from([
+    let entries = [
         root.join("README.md"),
         root.join("README.zh_CN.md"),
         root.join("doc/README.md"),
-    ]);
+    ];
+    let failures = check_markdown_links(&root, &entries);
+
+    assert!(
+        failures.is_empty(),
+        "broken documentation links:\n{}",
+        failures.join("\n")
+    );
+}
+
+fn check_markdown_links(root: &Path, entries: &[PathBuf]) -> Vec<String> {
+    let Ok(root) = root.canonicalize() else {
+        return vec![format!("{}: root directory does not exist", root.display())];
+    };
+    let mut pending = VecDeque::from(entries.to_vec());
     let mut visited = HashSet::new();
     let mut anchor_cache = HashMap::new();
     let mut failures = Vec::new();
@@ -327,9 +380,29 @@ fn test_documentation_local_markdown_links_exist() {
         }
     }
 
-    assert!(
-        failures.is_empty(),
-        "broken documentation links:\n{}",
-        failures.join("\n")
-    );
+    failures
+}
+
+struct LinkFixture {
+    root: PathBuf,
+}
+
+impl LinkFixture {
+    fn new() -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("qubit-web-link-test-{}-{id}", std::process::id()));
+        fs::create_dir_all(&root).expect("create Markdown link fixture directory");
+        Self { root }
+    }
+
+    fn write(&self, name: &str, contents: &str) {
+        fs::write(self.root.join(name), contents).expect("write Markdown link fixture");
+    }
+}
+
+impl Drop for LinkFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
 }
