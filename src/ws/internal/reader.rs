@@ -32,10 +32,16 @@ use crate::ws::internal::CloseQueueOnDrop;
 use crate::ws::ws_send_queue::WsSendQueue;
 
 enum ReaderWaitResult {
+    /// A wait with a representable deadline; the nested result distinguishes
+    /// timeout, stream end, received frame, and stream read error.
     Timed(Result<Option<Result<Message, Error>>, Elapsed>),
+    /// No idle deadline could be represented by Tokio's clock. This is a
+    /// clock-range condition, not evidence that the deadline elapsed.
     IdleDeadlineUnrepresentable,
 }
 
+/// Selects the shutdown deadline when present, otherwise computes an idle
+/// deadline. `None` means the idle deadline overflowed and was not created.
 fn reader_deadline(
     shutdown_deadline: Option<tokio::time::Instant>,
     idle_timeout: Duration,

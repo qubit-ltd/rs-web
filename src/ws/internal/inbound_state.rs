@@ -77,6 +77,10 @@ impl InboundState {
         self.read_error.lock().unwrap_or_else(PoisonError::into_inner).take()
     }
 
+    /// Discards the retained read error without making it available to a later
+    /// consumer. Explicit close handling calls this when the close handshake
+    /// takes precedence over an earlier read failure; subsequent reads then
+    /// observe no retained error.
     pub(in crate::ws) fn clear_read_error(&self) {
         let _ = self.read_error.lock().unwrap_or_else(PoisonError::into_inner).take();
     }

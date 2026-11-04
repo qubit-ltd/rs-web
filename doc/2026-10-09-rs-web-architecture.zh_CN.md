@@ -36,6 +36,7 @@ accept 遇到可重试的 socket I/O 错误时，最多连续重试 8 次，等�
 | --- | --- | --- |
 | 已接收的传输连接 | 每个 `WebServer` 1,024 个 | 配置值必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。包含 TLS 握手和 HTTP connection future。达到上限时 accept 循环暂停接收；客户端可能等待操作系统 backlog，也可能连接失败；不会生成 HTTP 503。 |
 | HTTP/2 并发流 | 每条连接 200 个 | 可通过 `ServerOptions::with_http2_max_concurrent_streams` 或 `config` 的 `transport.http2_max_concurrent_streams`（`1..=u32::MAX`）设置。这是每连接的协议上限，与传输连接、路由和会话额度独立；不是进程级请求数、header 字节或内存预算。 |
+| HTTP 请求头缓冲 | 未配置时使用 Hyper 默认值 | 可选 `http1_max_buffer_bytes`（至少 8192 字节）限制 HTTP/1 解析缓冲区，不是精确的 header list 字节数；可选 `http2_max_header_list_bytes`（正 `u32`）限制解压后的 HTTP/2 header list。启用 `config` 时使用 `transport.http1_max_buffer_bytes` 和 `transport.http2_max_header_list_bytes`。两者是不同的协议预算，不是整个进程的内存上限。 |
 | Controller 短请求 | 每个 `ControllerRoutes` builder 同时 256 个 | 配置值必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。`ControllerRoutes::new()` 默认采用 `HttpLimits::default()`：每个请求体 1 MiB，handler/响应体期限 30 秒。期限到达时会主动释放应用响应体和短请求许可，无需等待再次轮询。响应头发出后，超时只能在传输再次轮询时通过 body error 体现，不会关闭连接。`with_http_limits` 替换这些默认值，应在添加 Controller 前调用。每个 builder 的路由共享自己的状态。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 不安装路由限额。容量耗尽时返回容量拒绝。 |
 | SSE 连接 | 每个 `SseConnectionPolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。容量耗尽与停服拒绝分别报告。 |
 | WebSocket 连接 | 每个 `WsUpgradePolicy` 默认 128 个 | 每次 `new`/`default` 都建立独立容量域；克隆共享其容量域。策略按最终字段值校验；`max_connections` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`，零值对应 `WsPolicyError::ZeroLimit`，超上限对应 `ConnectionLimitTooLarge`。`inbound_queue_limits` 的消息条数接受 `1..=Semaphore::MAX_PERMITS`，字节数必须为正；条数超上限返回 `WsPolicyError::InboundQueueLimitTooLarge`。穷尽匹配该枚举的调用方需增加此分支。接纳失败会在会话纳入管理前拒绝。 |
@@ -57,11 +58,11 @@ SSE 和 WebSocket 都是长连接路由，不应套用短请求并发/期限中�
 
 ## 超时、停服与配置
 
-`ServerOptions` 默认每条连接最多同时开启 200 个 HTTP/2 流，HTTP/1 请求头及 TLS 握手期限为 10 秒，传输空闲期限和优雅停服期限各为 30 秒。HTTP/1 请求头期限不是 HTTP/2 header block 的期限。WEB-004 协议实验中，第二条流的合法请求头尚未结束时 SSE 仍继续发送；实验未测量长期资源保留情况。版本化源码检查和实验见[核查报告](http2-resource-investigation-20261103.md)。仅在没有活跃请求 handler 或响应体时，空闲期限才会关闭 TCP/TLS 连接；它不会限制已经开始但停滞的活跃请求。长连接响应体活跃期间，传输空闲计时暂停。
+`ServerOptions` 默认每条连接最多同时开启 200 个 HTTP/2 流，HTTP/1 请求头及 TLS 握手期限为 10 秒，传输空闲期限和优雅停服期限各为 30 秒。HTTP/1 解析缓冲区和 HTTP/2 解压后 header list 可选设置预算；省略时沿用 Hyper 默认值。HTTP/1 请求头期限不是 HTTP/2 header block 的期限。WEB-004 协议实验中，第二条流的合法请求头尚未结束时 SSE 仍继续发送；独立资源调查报告会记录有界场景下的资源观测与回收结果。版本化源码检查和证据见[核查报告](http2-resource-investigation-20261103.md)。仅在没有活跃请求 handler 或响应体时，空闲期限才会关闭 TCP/TLS 连接；它不会限制已经开始但停滞的活跃请求。长连接响应体活跃期间，传输空闲计时暂停。
 
 停服开始时，服务停止接收 socket、关闭受管会话登记入口、通知已有会话，并使用同一个绝对期限等待 HTTP connection task 和受管 SSE/WS 会话。期限由 `ServerOptions` 设置，并由 `ServerContext` 提供给 WebSocket 会话；`WsUpgradePolicy` 不再单独设置停服期限。无法表示的停服期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，服务会先取消会话并回收连接任务，再返回错误。只有两组任务都按期结束，`ShutdownReport::graceful` 才为 `true`。报告记录未结束的受管会话，但不保证任意应用后台工作也已停止。`WebServer` 拥有并跟踪连接任务，Hyper/hyper-util 驱动各连接。本实现尚不提供具有明确定义且可证明的强制关闭连接计数，因此 `forced_connections` 为 `None`。
 
-`ConfiguredWeb` 解析应用显式传入的配置对象，并分别返回 `ServerOptions` 与 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；把配置值传给 `with_http_limits` 可替换该策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。启用 `config` 时，传输配置默认值为 `transport.max_connections = 1024`、`transport.idle_timeout_ms = 30000` 和每条 HTTP/2 连接 `transport.http2_max_concurrent_streams = 200`；流数值须为正 u32。HTTP 策略键包括 `http.max_body_bytes`、`http.max_concurrent_requests` 和 `http.request_timeout_ms`。两个并发配置键的有效范围都是 `1..=tokio::sync::Semaphore::MAX_PERMITS`；无效值通过 `ConfigOptionsError::field()` 指向原配置键。TLS 是可选项，通过独立的 `TlsConfig` 配置；PEM 加载失败会归并为 `TlsInvalid`，不会暴露密钥材料或路径。
+`ConfiguredWeb` 解析应用显式传入的配置对象，并分别返回 `ServerOptions` 与 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；把配置值传给 `with_http_limits` 可替换该策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。启用 `config` 时，传输配置默认值为 `transport.max_connections = 1024`、`transport.idle_timeout_ms = 30000` 和每条 HTTP/2 连接 `transport.http2_max_concurrent_streams = 200`；流数值须为正 u32。可选的 `transport.http1_max_buffer_bytes` 和 `transport.http2_max_header_list_bytes` 省略时沿用 Hyper 默认值，显式值分别至少为 8192 和正 u32。HTTP 策略键包括 `http.max_body_bytes`、`http.max_concurrent_requests` 和 `http.request_timeout_ms`。两个并发配置键的有效范围都是 `1..=tokio::sync::Semaphore::MAX_PERMITS`；无效值通过 `ConfigOptionsError::field()` 指向原配置键。TLS 是可选项，通过独立的 `TlsConfig` 配置；PEM 加载失败会归并为 `TlsInvalid`，不会暴露密钥材料或路径。
 
 ## 失败阶段与应用责任
 

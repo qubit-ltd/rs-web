@@ -22,8 +22,13 @@ use super::body_observation::BodyObservation;
 
 /// Body wrapper that forwards frames and records exactly one terminal outcome.
 pub(crate) struct DiagnosticBody {
+    /// Response body whose frames and size hint are forwarded unchanged.
     inner: Body,
+    /// Shared observation state that records one terminal outcome across the
+    /// body wrapper and its owning request context.
     observation: Arc<BodyObservation>,
+    /// Whether completion or a body error has already been reported. This
+    /// prevents `Drop` from reporting a second outcome after polling ends.
     terminal: bool,
 }
 
@@ -40,6 +45,8 @@ impl DiagnosticBody {
 
 impl Drop for DiagnosticBody {
     fn drop(&mut self) {
+        // Dropping an unfinished response is terminal too; the shared
+        // observation makes this idempotent with other lifecycle observers.
         if !self.terminal {
             self.observation.terminate("dropped");
         }
@@ -50,10 +57,18 @@ impl HttpBody for DiagnosticBody {
     type Data = Bytes;
     type Error = axum::Error;
 
+    /// Polls and forwards one body frame while observing terminal outcomes.
+    ///
+    /// A completed body and a body error are recorded once before their
+    /// original result is returned. `Pending` is forwarded without marking
+    /// the body terminal.
     fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
         let this = self.as_mut().get_mut();
         match Pin::new(&mut this.inner).poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => {
+                // Some bodies signal their final data frame before returning
+                // `None`; observe that terminal state without consuming the
+                // frame or waiting for another poll.
                 if this.inner.is_end_stream() {
                     this.terminal = true;
                     this.observation.terminate("complete");
@@ -61,6 +76,8 @@ impl HttpBody for DiagnosticBody {
                 Poll::Ready(Some(Ok(frame)))
             }
             Poll::Ready(Some(Err(error))) => {
+                // Forward the original error after recording the terminal
+                // outcome; the observation does not replace body semantics.
                 this.terminal = true;
                 this.observation.terminate("body_error");
                 Poll::Ready(Some(Err(error)))
@@ -74,9 +91,13 @@ impl HttpBody for DiagnosticBody {
         }
     }
 
+    /// Reports whether the wrapped body has no more frames, as reported by
+    /// the inner body.
     fn is_end_stream(&self) -> bool {
         self.inner.is_end_stream()
     }
+
+    /// Returns the inner body's size hint without altering its bounds.
     fn size_hint(&self) -> SizeHint {
         self.inner.size_hint()
     }

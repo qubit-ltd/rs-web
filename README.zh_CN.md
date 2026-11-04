@@ -80,6 +80,8 @@ curl -i -X POST http://127.0.0.1:3000/admin/shutdown
 
 每条 HTTP/2 连接默认允许同时开启 200 个流。可通过 `ServerOptions::with_http2_max_concurrent_streams` 设置每连接上限，也可在启用 `config` 时使用 `transport.http2_max_concurrent_streams`。该协议流上限不是进程级请求数、连接数或内存上限。
 
+`ServerOptions` 还可选限制 HTTP/1 解析缓冲区（最小 8192 字节）和 HTTP/2 解压后 header list（正 `u32` 字节）；两项默认沿用 Hyper 默认值。启用 `config` 时，对应配置键为 `transport.http1_max_buffer_bytes` 和 `transport.http2_max_header_list_bytes`。两种协议计量不同，也都不是进程内存上限。详细边界与拒绝行为见[用户指南](doc/user_guide.zh_CN.md#传输与协议请求头预算)。WebSocket 写入失败会发出脱敏的 `websocket_io_failure` tracing 事件；成功入队仍不表示消息已通过网络送达。
+
 另一个独立的内存 CRUD 示例可用 `cargo run --example controller_crud --all-features` 启动。`/users` 属于该示例，并不存在于上面的最小服务中；创建用户会返回 `201 Created`。在 [`examples/controller_crud.rs`](examples/controller_crud.rs) 可查看如何用 `ControllerRoutes::with_http_limits` 替换 Controller 短路由的默认限额。原生 Axum 路由需要在选定的短路由分支安装 `RequestLimitLayer::new(http_limits)`，并在 SSE/WS 分支安装 `StreamAdmissionLayer`。Controller 的 `sse` 和 `ws` 路由使用独立的流式接纳预算。
 
 启用 `config` feature 后，`ConfiguredWeb::from_config` 会分别返回 `ServerOptions` 和 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；将配置所得限额传给 `with_http_limits` 可替换默认策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`，并在 SSE/WS 分支安装 `StreamAdmissionLayer`；`WebServer` 不会替 Router 应用限额。

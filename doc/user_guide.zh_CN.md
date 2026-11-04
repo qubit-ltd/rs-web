@@ -67,6 +67,12 @@ let options = ServerOptions::new("127.0.0.1:3001".parse()?)
 
 启用 `config` 后，`transport.http2_max_concurrent_streams` 接受 `1..=u32::MAX`，缺省为 200。该值只控制每条 HTTP/2 连接的流数，与传输连接、路由并发和会话限额相互独立；它不是进程级请求数、header 字节或内存上限。`request_header_timeout` 仅适用于 HTTP/1 请求头和 TLS 握手，不为 HTTP/2 header block 计时。
 
+## 传输与协议请求头预算
+
+除非显式设置可选预算，否则继续使用 Hyper 的协议默认值。`ServerOptions::with_http1_max_buffer_bytes` 接受至少 8192 字节，`http1_max_buffer_bytes()` 默认返回 `None`。该值限制 HTTP/1 解析缓冲区，不是精确的 header list 字节数。`ServerOptions::with_http2_max_header_list_bytes` 接受正 `u32`，`http2_max_header_list_bytes()` 默认也为 `None`；Hyper 将它用于解压后的 HTTP/2 header list。它不限制动态表状态、流数、连接数、请求体或整个进程内存。这两项预算都适用于 HTTP 与 HTTPS。超出预算时 Hyper 可能拒绝请求或连接，不保证使用同一种应用层 HTTP 状态码。
+
+启用 `config` 时，可设置可选键 `transport.http1_max_buffer_bytes`（至少 `8192`）和 `transport.http2_max_header_list_bytes`（正 `u32` 字节）。构造 Hyper builder 前会校验数值；配置无效时指出字段且不回显输入值。
+
 启用 `config` feature 后，可以拆分监听设置和路由限额：
 
 ```rust,ignore
@@ -75,7 +81,7 @@ let (server_options, http_limits) = configured.into_parts();
 let server = WebServer::bind_http(server_options).await?;
 ```
 
-配置必须包含 `address`；`shutdown_timeout_ms` 缺省为 30000，`transport.max_connections`、`transport.idle_timeout_ms` 和 `transport.http2_max_concurrent_streams` 分别缺省为 1024、30000 和 200。HTTP/2 流数必须是正的 u32。`transport.max_connections` 和 `http.max_concurrent_requests` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。`http.*` 配置只生成 `HttpLimits`，不会自动装到 Router：Controller 短路由已有 `HttpLimits::default()`，将配置值传给 `with_http_limits` 可替换该策略。原生 Axum 短路由需在选定分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。解析错误可通过 `ConfigOptionsError::field()` 定位字段；无效限额会指出对应原键，错误不会回显输入值。
+配置必须包含 `address`；`shutdown_timeout_ms` 缺省为 30000，`transport.max_connections`、`transport.idle_timeout_ms` 和 `transport.http2_max_concurrent_streams` 分别缺省为 1024、30000 和 200。HTTP/2 流数必须是正的 u32。可选键 `transport.http1_max_buffer_bytes` 和 `transport.http2_max_header_list_bytes` 缺省时沿用 Hyper 默认值。`transport.max_connections` 和 `http.max_concurrent_requests` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。`http.*` 配置只生成 `HttpLimits`，不会自动装到 Router：Controller 短路由已有 `HttpLimits::default()`，将配置值传给 `with_http_limits` 可替换该策略。原生 Axum 短路由需在选定分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。解析错误可通过 `ConfigOptionsError::field()` 定位字段；无效限额会指出对应原键，错误不会回显输入值。
 
 ## 装配普通接口与长连接
 
@@ -378,7 +384,7 @@ accept 遇到 socket I/O 错误时，`InvalidInput`、`PermissionDenied`、`Unsu
 
 `request_header_timeout` 默认 10 秒，用于限制 HTTP/1 请求头；零值或 Tokio 无法通过 `Instant::checked_add` 表示的期限（包括 `Duration::MAX`）会以 `WebServerError::InvalidConfig` 拒绝。SSE keep-alive interval 也必须是正数且可表示。未匹配请求的诊断日志只使用固定标记 `<unmatched>`，不会记录 URI、查询参数或秘密信息。HTTPS TLS 握手也沿用该期限。`transport_idle_timeout` 默认 30 秒，在 handler 和响应体都不活跃时回收空闲 HTTP/1/2 连接。活跃请求停滞不会由空闲期限中断；此类情况应使用路由限额或部署层策略处理。`HttpLimits::with_request_timeout` 与传输空闲期限不同：Controller `short` 路由默认使用该请求期限，原生 Axum 路由则只有显式安装 `RequestLimitLayer` 后才使用。
 
-WebSocket 的 `idle_timeout` 必须为正且能构造 Tokio deadline；不可表示时返回新增的 `WsPolicyError::IdleTimeoutTooLarge`。穷尽匹配 `WsPolicyError` 的调用方需增加该分支或使用兜底分支。`queue_limits` 配置出站队列；`inbound_queue_limits(messages, bytes)` 单独配置入站队列及每连接累计 payload 字节预算，默认是 64 条排队消息和 1 MiB。reader 等待通道空位时最多另持有一条消息，该 payload 也计入相同字节预算。通道满时最多等待至 `idle_timeout`，然后以关闭码 `1013`（原因 `inbound backpressure`）关闭；若剩余字节预算不足以容纳消息，则立即以 `1013` 关闭。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，每个活跃连接还最多有一条 1 MiB 协议重组消息。该估算不含分配开销和应用自有内存，也不限制 I/O 结束后仍被 handler 或 session 保留的内存。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应定期读取消息，再将较长处理交给应用任务。传输读取错误通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；显式 `close()` 会清除待交付错误，此后 `recv()` 返回 `None`。宿主停服可能直接取消 handler，不保证交付该错误。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达；对端或会话关闭后，它会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。
+WebSocket 的 `idle_timeout` 必须为正且能构造 Tokio deadline；不可表示时返回新增的 `WsPolicyError::IdleTimeoutTooLarge`。穷尽匹配 `WsPolicyError` 的调用方需增加该分支或使用兜底分支。`queue_limits` 配置出站队列；`inbound_queue_limits(messages, bytes)` 单独配置入站队列及每连接累计 payload 字节预算，默认是 64 条排队消息和 1 MiB。reader 等待通道空位时最多另持有一条消息，该 payload 也计入相同字节预算。通道满时最多等待至 `idle_timeout`，然后以关闭码 `1013`（原因 `inbound backpressure`）关闭；若剩余字节预算不足以容纳消息，则立即以 `1013` 关闭。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，每个活跃连接还最多有一条 1 MiB 协议重组消息。该估算不含分配开销和应用自有内存，也不限制 I/O 结束后仍被 handler 或 session 保留的内存。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应定期读取消息，再将较长处理交给应用任务。传输读取错误通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；显式 `close()` 会清除待交付错误，此后 `recv()` 返回 `None`。宿主停服可能直接取消 handler，不保证交付该错误。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达；对端或会话关闭后，它会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。WebSocket sink 写入或控制帧刷新失败时，writer 至多发出一次 `websocket_io_failure` warning，并带有 `direction=write` 与 `operation=send` 或 `flush`；不会记录 payload 或底层错误文本。该诊断不会把 `try_send` 变成送达确认。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。
 
 如果要在 WebSocket I/O 结束后停止可取消的业务操作，可等待 `WsSession::closed()`。它返回 owned future，因此不借用 session，可以和应用操作一起 select：
 
