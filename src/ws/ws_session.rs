@@ -158,6 +158,9 @@ impl WsSession {
     /// may be discarded if it is still pending when the session closes;
     /// queue checks follow the order listed, after the session shutdown check.
     /// Success does not confirm network delivery.
+    /// Once the writer starts processing a queued Close frame, the queue is
+    /// closed: later sends return [`WsSendError::Closed`], and messages queued
+    /// behind that Close may be discarded.
     #[inline]
     pub fn try_send(&self, message: Message) -> Result<(), WsSendError> {
         if self.shutdown.is_cancelled() {
@@ -174,7 +177,9 @@ impl WsSession {
     /// Repeated calls are safe. If this future is cancelled while waiting, a
     /// later call continues waiting for any task whose result was not consumed.
     /// During server shutdown, cancellation can also make the writer exit
-    /// without the application calling this method.
+    /// without the application calling this method. A Close queued with
+    /// [`Self::try_send`] follows the same bounded protocol close once the
+    /// writer reaches it, while preserving that frame's code and reason.
     pub async fn close(&mut self) {
         self.explicitly_closed = true;
         self.inbound_state.clear_read_error();

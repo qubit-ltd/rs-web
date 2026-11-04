@@ -96,11 +96,7 @@ pub(in crate::ws) async fn writer_loop<S>(
                             return;
                         }
                         ControlFlushOutcome::Flushed(FlushOutcome::Failed) => {
-                            tracing::warn!(
-                                event = "websocket_io_failure",
-                                direction = "write",
-                                operation = "flush"
-                            );
+                            tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "flush");
                             shutdown.cancel();
                             return;
                         }
@@ -114,6 +110,31 @@ pub(in crate::ws) async fn writer_loop<S>(
         };
         let Some(message) = message else { continue };
         let message_bytes = message_size(&message);
+        if matches!(message, Message::Close(_)) {
+            // A queued application Close starts the protocol close phase when
+            // the writer reaches it. Reject later sends immediately and have
+            // the reader use the same absolute deadline while waiting for the
+            // peer's acknowledgement.
+            queue.close();
+            let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
+            shutdown.cancel();
+            let sent = timeout_at(deadline, sink.send(message)).await;
+            queue.finish_message(message_bytes);
+            match sent {
+                Ok(Ok(())) => {
+                    if matches!(timeout_at(deadline, &mut close_ack).await, Ok(Ok(())))
+                        && matches!(timeout_at(deadline, sink.flush()).await, Ok(Err(_)))
+                    {
+                        tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "flush");
+                    }
+                }
+                Ok(Err(_)) => {
+                    tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "send");
+                }
+                Err(_) => {}
+            }
+            return;
+        }
         let sent = select! {
             biased;
             _ = shutdown.cancelled() => SendOutcome::Shutdown,
@@ -257,6 +278,100 @@ mod tests {
         notified: Arc<Notify>,
     }
 
+    struct RecordingSink(Arc<std::sync::Mutex<Vec<Message>>>);
+
+    impl Sink<Message> for RecordingSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
+            self.0.lock().unwrap().push(message);
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn writer_close_preserves_frame_drops_pending_data_and_times_out_without_ack() {
+        let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .expect("test server should bind");
+        let context = server.context();
+        let session = context.try_register_session().expect("session should register");
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        let queue = WsSendQueue::new(2, 128);
+        queue
+            .try_send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 4001,
+                reason: "custom reason".into(),
+            })))
+            .expect("custom Close should be queued");
+        queue
+            .try_send(Message::text("discard after Close"))
+            .expect("following data should fit before the writer starts Close");
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let shutdown = CancellationToken::new();
+        let lifecycle = SessionLifecycle {
+            shutdown: shutdown.clone(),
+            close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
+            close_deadline: Arc::new(std::sync::Mutex::new(None)),
+            server_deadline: None,
+            shutdown_timeout: Duration::from_millis(25),
+        };
+        let resources = Arc::new(SessionResources::new(permit, session));
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let writer = tokio::spawn({
+            let queue = queue.clone();
+            let recorded = recorded.clone();
+            async move {
+                writer_loop(
+                    RecordingSink(recorded),
+                    queue.clone(),
+                    queue.notify.clone(),
+                    lifecycle,
+                    ack_rx,
+                    resources,
+                )
+                .await;
+            }
+        });
+        timeout(Duration::from_secs(1), writer)
+            .await
+            .expect("writer should finish at the shared close deadline")
+            .expect("writer should not panic");
+        drop(ack_tx);
+
+        assert!(shutdown.is_cancelled(), "queued Close should start session shutdown");
+        assert_eq!(queue.try_send(Message::text("late")), Err(WsSendError::Closed));
+        assert!(queue.is_empty(), "queued and in-flight capacity should be returned");
+        let sent = recorded.lock().unwrap();
+        assert_eq!(sent.len(), 1, "writer should send only the queued Close frame");
+        let Message::Close(Some(frame)) = &sent[0] else {
+            panic!("writer should preserve the queued Close frame");
+        };
+        assert_eq!(frame.code, 4001);
+        assert_eq!(frame.reason, "custom reason");
+        drop(sent);
+        assert_eq!(context.active_sessions(), 0, "session registration should be released");
+        assert_eq!(permits.available_permits(), 1, "policy permit should be released");
+        drop(server);
+    }
+
     impl Sink<Message> for FailingSink {
         type Error = std::io::Error;
 
@@ -380,7 +495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_writer_send_error_cancels_session() {
+    async fn test_writer_failure_terminates_active_session() {
         for point in [FailurePoint::Ready, FailurePoint::Send, FailurePoint::Flush] {
             assert_writer_failure(point).await;
         }
@@ -787,6 +902,66 @@ mod tests {
         fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
+    }
+
+    #[tokio::test]
+    async fn writer_close_send_obeys_shared_deadline_when_sink_blocks() {
+        let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .expect("test server should bind");
+        let context = server.context();
+        let session = context.try_register_session().expect("session should register");
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        let queue = WsSendQueue::new(1, 128);
+        queue.try_send(Message::Close(None)).expect("Close should be queued");
+        let pending_flush = Arc::new(Notify::new());
+        let flush_polls = Arc::new(AtomicUsize::new(0));
+        let lifecycle = SessionLifecycle {
+            shutdown: CancellationToken::new(),
+            close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
+            close_deadline: Arc::new(std::sync::Mutex::new(None)),
+            server_deadline: None,
+            shutdown_timeout: Duration::from_millis(25),
+        };
+        let resources = Arc::new(SessionResources::new(permit, session));
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let writer = tokio::spawn({
+            let queue = queue.clone();
+            let sink = PendingSend {
+                pending_flush: pending_flush.clone(),
+                flush_polls,
+            };
+            async move {
+                writer_loop(sink, queue.clone(), queue.notify.clone(), lifecycle, ack_rx, resources).await;
+            }
+        });
+
+        timeout(Duration::from_secs(1), pending_flush.notified())
+            .await
+            .expect("Close send should reach the intentionally pending flush");
+        assert!(
+            !writer.is_finished(),
+            "writer must remain bounded by its close deadline"
+        );
+        timeout(Duration::from_secs(1), writer)
+            .await
+            .expect("blocked Close send should stop at the shared deadline")
+            .expect("writer should not panic");
+        drop(ack_tx);
+
+        assert!(
+            queue.is_empty(),
+            "in-flight Close budget should be released exactly once"
+        );
+        assert_eq!(queue.try_send(Message::text("late")), Err(WsSendError::Closed));
+        assert_eq!(context.active_sessions(), 0);
+        assert_eq!(permits.available_permits(), 1);
+        drop(server);
     }
 
     #[tokio::test]
