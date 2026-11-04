@@ -81,7 +81,7 @@ let (server_options, http_limits) = configured.into_parts();
 let server = WebServer::bind_http(server_options).await?;
 ```
 
-配置必须包含 `address`；`shutdown_timeout_ms` 缺省为 30000，`transport.max_connections`、`transport.idle_timeout_ms` 和 `transport.http2_max_concurrent_streams` 分别缺省为 1024、30000 和 200。HTTP/2 流数必须是正的 u32。可选键 `transport.http1_max_buffer_bytes` 和 `transport.http2_max_header_list_bytes` 缺省时沿用 Hyper 默认值。`transport.max_connections` 和 `http.max_concurrent_requests` 必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`。`http.*` 配置只生成 `HttpLimits`，不会自动装到 Router：Controller 短路由已有 `HttpLimits::default()`，将配置值传给 `with_http_limits` 可替换该策略。原生 Axum 短路由需在选定分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。解析错误可通过 `ConfigOptionsError::field()` 定位字段；无效限额会指出对应原键，错误不会回显输入值。
+配置必须包含 `address`；`shutdown_timeout_ms` 缺省为 30000，`transport.max_connections`、`transport.idle_timeout_ms`、`transport.request_header_timeout_ms` 和 `transport.http2_max_concurrent_streams` 分别缺省为 1024、30000、10000 和 200。请求头期限必须大于零且能构造 Tokio 截止时间，同时控制 HTTP/1 请求头和 TLS 握手；它不限制 HTTP/2 请求头块。HTTP/2 流数必须是正的 u32。可选键 `transport.http1_max_buffer_bytes` 和 `transport.http2_max_header_list_bytes` 缺省时沿用 Hyper 默认值。`http.*` 配置只生成 `HttpLimits`，不会自动装到 Router：Controller 短路由已有 `HttpLimits::default()`，将配置值传给 `with_http_limits` 可替换该策略。原生 Axum 短路由需在选定分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。解析错误可通过 `ConfigOptionsError::field()` 定位字段；无效值会指出对应原键，错误不会回显输入值。
 
 ## 装配普通接口与长连接
 
@@ -104,7 +104,7 @@ let app = Router::new()
 
 片段中的 `submit`、`progress` 和 `websocket` 是应用自己的 handler；完整组合可参考 [`examples/prompt_stream.rs`](../examples/prompt_stream.rs)。Controller 短路由已有默认限额；调用 `ControllerRoutes::with_http_limits` 可替换默认策略。Controller 的 `sse` 和 `ws` 路由使用独立的流式接纳 layer；`with_http_limits` 只改变短路由策略。原生 SSE/WS 分支不要套用 `RequestLimitLayer`：它的期限还会覆盖响应流。宏把 `kind` 作为限额策略分类，`ws` 只允许 `GET`，但不会验证 handler 是否真正实现了对应协议。
 
-`ControllerRoutes::add` 会在注册前检查当前 Controller 的全部路由声明。重复的 method/path、无效路径或匹配模板冲突（例如参数别名和重叠通配符）会返回 `ControllerRouteError`。不同 method 可以共用同一模板，`finish()` 直接返回 `Router`。路径捕获请使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧式 `/:id`、`/*rest` 会被拒绝。检查范围是 builder 收集的声明；之后与原生 Axum Router 合并仍遵循 Axum 自身行为。`rest_controller` 也支持在同一模块中装配末段名称相同、但实际类型不同的 Controller。
+`ControllerRoutes::add` 会在注册前检查当前 Controller 的全部路由声明。重复的 method/path、无效路径、超过 25 个普通参数或匹配模板冲突（例如参数别名和重叠通配符）会返回 `ControllerRouteError`；末尾 catch-all 不计入数量。不同 method 可以共用同一模板，`finish()` 直接返回 `Router`。路径捕获请使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧式 `/:id`、`/*rest` 会被拒绝。检查范围是 builder 收集的声明；之后与原生 Axum Router 合并仍遵循 Axum 自身行为。`rest_controller` 也支持在同一模块中装配末段名称相同、但实际类型不同的 Controller。
 
 ### Controller 使用单一根状态
 
