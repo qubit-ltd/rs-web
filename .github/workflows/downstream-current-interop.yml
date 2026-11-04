@@ -1,6 +1,17 @@
 name: Current downstream WebSocket interoperability
 
 on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'qubit-web-macros/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'tests/**'
+      - 'scripts/check-downstream-interop.py'
+      - '.infra/**'
+      - '.github/workflows/downstream*interop.yml'
   schedule:
     - cron: '17 3 * * 1'
   workflow_dispatch:
@@ -11,11 +22,14 @@ permissions:
 jobs:
   current-downstream-websocket:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - id: checkout_upstream
+        uses: actions/checkout@v4
         with:
           path: interop/rs-web
-      - uses: actions/checkout@v4
+      - id: checkout_downstream
+        uses: actions/checkout@v4
         with:
           repository: qubit-ltd/rs-websocket
           ref: main
@@ -39,7 +53,8 @@ jobs:
           DOWNSTREAM_PATH: ${{ github.workspace }}/interop/rs-websocket
           MARKER_PATH: ${{ runner.temp }}/rs-websocket-disposable-checkout.marker
         run: python3 -c 'import os; from pathlib import Path; Path(os.environ["MARKER_PATH"]).write_text(str(Path(os.environ["DOWNSTREAM_PATH"]).resolve()) + "\n", encoding="utf-8")'
-      - name: Test current downstream WS and WSS consumers against current upstream
+      - id: test_current_downstream
+        name: Test current downstream WS and WSS consumers against current upstream
         working-directory: interop/rs-websocket
         run: >-
           python3 "$GITHUB_WORKSPACE/interop/rs-web/scripts/check-downstream-interop.py"
@@ -47,3 +62,30 @@ jobs:
           --downstream "$GITHUB_WORKSPACE/interop/rs-websocket"
           --disposable-marker "$RUNNER_TEMP/rs-websocket-disposable-checkout.marker"
           --with-wss
+      - name: Summarize current downstream interoperability
+        if: always()
+        env:
+          UPSTREAM_CHECKOUT_OUTCOME: ${{ steps.checkout_upstream.outcome }}
+          DOWNSTREAM_CHECKOUT_OUTCOME: ${{ steps.checkout_downstream.outcome }}
+          INTEROP_TEST_OUTCOME: ${{ steps.test_current_downstream.outcome }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          upstream_sha='未取得 SHA'
+          downstream_sha='未取得 SHA'
+          if git -C interop/rs-web rev-parse HEAD >/dev/null 2>&1; then
+            upstream_sha="$(git -C interop/rs-web rev-parse HEAD)"
+          fi
+          if git -C interop/rs-websocket rev-parse HEAD >/dev/null 2>&1; then
+            downstream_sha="$(git -C interop/rs-websocket rev-parse HEAD)"
+          fi
+
+          {
+            echo '### Current downstream interoperability'
+            echo
+            echo "- rs-web SHA: $upstream_sha"
+            echo "- rs-websocket SHA: $downstream_sha"
+            echo "- rs-web checkout: $UPSTREAM_CHECKOUT_OUTCOME"
+            echo "- rs-websocket checkout: $DOWNSTREAM_CHECKOUT_OUTCOME"
+            echo "- WS/WSS interoperability check: $INTEROP_TEST_OUTCOME"
+            echo "- Job status: $JOB_STATUS"
+          } >> "$GITHUB_STEP_SUMMARY"
