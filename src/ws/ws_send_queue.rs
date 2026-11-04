@@ -23,6 +23,9 @@ use super::ws_send_error::WsSendError;
 /// Closing the queue rejects future sends and discards pending messages while
 /// preserving accounting for messages already being sent.
 ///
+/// Debug output contains only queue counts, capacity limits, and closed state;
+/// message payloads are omitted.
+///
 /// # Examples
 ///
 /// ```
@@ -33,7 +36,7 @@ use super::ws_send_error::WsSendError;
 /// queue.try_send(Message::text("ready")).expect("capacity available");
 /// assert_eq!(queue.len(), 1);
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[must_use]
 pub struct WsSendQueue {
     /// Mutex-protected pending and in-flight queue accounting.
@@ -44,6 +47,19 @@ pub struct WsSendQueue {
     max_messages: usize,
     /// Maximum bytes retained by pending and in-flight messages.
     max_bytes: usize,
+}
+
+impl std::fmt::Debug for WsSendQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        f.debug_struct("WsSendQueue")
+            .field("len", &(state.messages.len() + state.in_flight_messages))
+            .field("queued_bytes", &state.queued_bytes)
+            .field("max_messages", &self.max_messages)
+            .field("max_bytes", &self.max_bytes)
+            .field("closed", &state.closed)
+            .finish()
+    }
 }
 
 impl WsSendQueue {
@@ -241,5 +257,83 @@ mod tests {
         queue.close();
 
         assert_eq!(clone.try_send(Message::text("x")), Err(WsSendError::Closed));
+    }
+
+    #[test]
+    fn debug_redacts_all_message_payloads() {
+        use axum::extract::ws::CloseFrame;
+
+        const SECRET: &str = "queue-debug-secret-sentinel";
+        let messages = [
+            Message::text(SECRET),
+            Message::Binary(SECRET.as_bytes().to_vec().into()),
+            Message::Ping(SECRET.as_bytes().to_vec().into()),
+            Message::Pong(SECRET.as_bytes().to_vec().into()),
+            Message::Close(Some(CloseFrame {
+                code: 1000,
+                reason: SECRET.into(),
+            })),
+        ];
+        let numeric = SECRET
+            .as_bytes()
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        for message in messages {
+            let queue = WsSendQueue::new(4, 1024);
+            queue.try_send(message).unwrap();
+            for output in [format!("{queue:?}"), format!("{queue:#?}")] {
+                assert!(!output.contains(SECRET));
+                assert!(!output.contains(&numeric));
+                for forbidden in ["messages: [", "state:", "notify:"] {
+                    assert!(!output.contains(forbidden));
+                }
+                for field in ["len:", "queued_bytes:", "max_messages:", "max_bytes:", "closed:"] {
+                    assert!(output.contains(field));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn debug_reports_shared_accounting_without_messages() {
+        let queue = WsSendQueue::new(2, 6);
+        let snapshot = |len: usize, bytes: usize, closed: bool| {
+            for text in [format!("{queue:?}"), format!("{queue:#?}")] {
+                assert!(text.contains(&format!("len: {len}")));
+                assert!(text.contains(&format!("queued_bytes: {bytes}")));
+                assert!(text.contains("max_messages: 2"));
+                assert!(text.contains("max_bytes: 6"));
+                assert!(text.contains(&format!("closed: {closed}")));
+            }
+        };
+        snapshot(0, 0, false);
+        queue.try_send(Message::text("one")).unwrap();
+        queue.clone().try_send(Message::text("two")).unwrap();
+        snapshot(2, 6, false);
+        let in_flight = queue.take_next().unwrap();
+        snapshot(2, 6, false);
+        queue.clone().close();
+        snapshot(1, 3, true);
+        queue.finish_message(message_size(&in_flight));
+        snapshot(0, 0, true);
+    }
+
+    #[test]
+    fn debug_recovers_poisoned_state_without_payloads() {
+        let queue = WsSendQueue::new(1, 1024);
+        queue.try_send(Message::text("poison-secret-sentinel")).unwrap();
+        let state = queue.state.clone();
+        let result = std::thread::spawn(move || {
+            let _guard = state.lock().unwrap();
+            panic!("intentional test poison");
+        })
+        .join();
+        assert!(result.is_err());
+        for output in [format!("{queue:?}"), format!("{queue:#?}")] {
+            assert!(!output.contains("poison-secret-sentinel"));
+            assert!(output.contains("len: 1"));
+        }
     }
 }

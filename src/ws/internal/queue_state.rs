@@ -10,7 +10,6 @@ use std::collections::VecDeque;
 use axum::extract::ws::Message;
 
 /// Tracks queued and in-flight message counts and byte charges under one lock.
-#[derive(Debug)]
 pub(in crate::ws) struct QueueState {
     /// Messages accepted but not yet removed by the writer task.
     pub(in crate::ws) messages: VecDeque<Message>,
