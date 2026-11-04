@@ -221,6 +221,8 @@ StreamAdmissionLayer::from_state(shared.clone());
 
 每个流式接纳状态域默认允许单个请求体缓冲 1 MiB、同时接纳 256 个请求，并在 handler 生成响应头前限时 10 秒。请求体缓冲的理论上限为每个状态域 256 MiB，另加请求和运行时开销；请按内存预算调低请求体或并发上限。layer 会在 handler 运行前收齐请求体，因此超限或读取失败的 body 不会进入 handler。SSE 响应体和 WebSocket 会话不受该接纳期限限制。
 
+该 layer 会为 handler 保留请求 trailers。缓冲时可能合并输入的数据帧；配置的请求体预算只计算数据字节，trailers 不计入此字节限额，layer 也没有单独设置 trailers 内存上限。
+
 | 结果 | 含义与处理建议 |
 | --- | --- |
 | `413` `body_too_large` | 声明长度或实际缓冲数据超过上限；缩小请求，或按内存预算调高请求体限额。 |

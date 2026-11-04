@@ -11,7 +11,6 @@ use std::future::Future;
 use std::pin::Pin;
 
 use axum::body::Body;
-use axum::body::to_bytes;
 use axum::extract::State;
 use axum::http::Request;
 use axum::http::header::CONTENT_LENGTH;
@@ -19,8 +18,11 @@ use axum::middleware;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use http_body_util::BodyExt;
+use http_body_util::Limited;
 use tokio::sync::OwnedSemaphorePermit;
 
+use super::internal::BufferedRequestBody;
 use super::stream_admission_state::StreamAdmissionState;
 use super::web_rejection::WebRejection;
 
@@ -35,6 +37,9 @@ pub type StreamAdmissionMiddleware = fn(State<StreamAdmissionState>, Request<Bod
 /// Creates middleware that buffers request bodies before invoking a long-lived
 /// route handler. The deadline ends when response headers are produced; it
 /// does not cover streaming the response body or a WebSocket session.
+/// Request trailers are preserved. Buffered data frames may be merged, and the
+/// configured body limit counts data bytes; it does not impose a separate
+/// trailers memory limit.
 /// The deadline uses cooperative Tokio cancellation. Synchronous work that
 /// does not yield can delay timeout checks and cleanup, and may finish
 /// successfully after the deadline. Cancelling a wait does not stop an
@@ -170,14 +175,20 @@ async fn buffer_then_run(
     maximum: usize,
 ) -> Result<Response, WebRejection> {
     let (parts, body) = request.into_parts();
-    let bytes = to_bytes(body, maximum).await.map_err(|error| {
-        if std::error::Error::source(&error).is_some_and(|source| source.is::<http_body_util::LengthLimitError>()) {
+    let collected = Limited::new(body, maximum).collect().await.map_err(|error| {
+        if error.is::<http_body_util::LengthLimitError>() {
             WebRejection::BodyTooLarge
         } else {
             WebRejection::BodyReadFailed
         }
     })?;
-    Ok(next.run(Request::from_parts(parts, Body::from(bytes))).await)
+    let trailers = collected.trailers().cloned();
+    let bytes = collected.to_bytes();
+    let replay = match trailers {
+        Some(trailers) => Body::new(BufferedRequestBody::new(bytes, trailers)),
+        None => Body::from(bytes),
+    };
+    Ok(next.run(Request::from_parts(parts, replay)).await)
 }
 
 /// Checks only a parseable `Content-Length` declaration without consuming the

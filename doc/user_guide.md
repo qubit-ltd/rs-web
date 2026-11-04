@@ -207,6 +207,8 @@ Each `StreamAdmissionLayer::new(limits)` creates a separate capacity domain. The
 
 Defaults per stream-admission state are 1 MiB per buffered body, 256 concurrent admissions, and 10 seconds from entering admission through handler response headers. The theoretical body-buffer budget is 256 MiB per state domain, plus request and runtime overhead; lower the body or concurrency limit to fit your memory budget. The layer reads the complete body before invoking the handler, so an oversized or unreadable body cannot reach handler code. An active SSE response body or WebSocket session is outside this deadline.
 
+The layer preserves request trailers for the handler. It may merge incoming data frames while buffering, and the configured body budget counts data bytes; trailers do not count toward that byte limit, and the layer does not set a separate trailers memory limit.
+
 | Result | Meaning and next step |
 | --- | --- |
 | `413` `body_too_large` | Declared or buffered body exceeded the limit; reduce the request or raise the configured body budget. |

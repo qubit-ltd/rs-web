@@ -18,11 +18,13 @@ use axum::Router;
 use axum::body::Body;
 use axum::body::Bytes;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::http::Request;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::post;
 use futures_core::Stream;
+use http_body_util::BodyExt;
 use hyper::body::Body as HttpBody;
 use qubit_web::StreamAdmissionLayer;
 use qubit_web::StreamAdmissionLimits;
@@ -30,6 +32,129 @@ use qubit_web::WebRejection;
 use tower::ServiceExt;
 
 const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
+
+struct DataAndTrailersBody {
+    state: u8,
+    data: Bytes,
+    fail_after_data: bool,
+}
+
+impl HttpBody for DataAndTrailersBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        match self.state {
+            0 => {
+                self.state = 1;
+                Poll::Ready(Some(Ok(hyper::body::Frame::data(self.data.clone()))))
+            }
+            1 => {
+                self.state = 2;
+                if self.fail_after_data {
+                    return Poll::Ready(Some(Err(std::io::Error::other("failed after data"))));
+                }
+                let mut trailers = HeaderMap::new();
+                trailers.insert("x-check", "preserved".parse().unwrap());
+                Poll::Ready(Some(Ok(hyper::body::Frame::trailers(trailers))))
+            }
+            _ => Poll::Ready(None),
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_preserves_request_trailers() {
+    async fn inspect(_: State<()>, request: Request<Body>) -> StatusCode {
+        let collected = request.into_body().collect().await.unwrap();
+        assert_eq!(collected.trailers().unwrap()["x-check"], "preserved");
+        assert_eq!(collected.to_bytes(), Bytes::from_static(b"request"));
+        StatusCode::OK
+    }
+    let router = Router::new()
+        .route("/", post(inspect))
+        .with_state(())
+        .layer(StreamAdmissionLayer::new(StreamAdmissionLimits::default()));
+    let response = router
+        .oneshot(
+            Request::post("/")
+                .body(Body::new(DataAndTrailersBody {
+                    state: 0,
+                    data: Bytes::from_static(b"request"),
+                    fail_after_data: false,
+                }))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn trailer_body_limit_and_read_failure_keep_admission_rejections() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    async fn inspect(State(calls): State<Arc<AtomicUsize>>, request: Request<Body>) -> StatusCode {
+        calls.fetch_add(1, Ordering::SeqCst);
+        let collected = request.into_body().collect().await.unwrap();
+        assert_eq!(collected.trailers().unwrap()["x-check"], "preserved");
+        assert_eq!(collected.to_bytes(), Bytes::from_static(b"request"));
+        StatusCode::OK
+    }
+    let limits = StreamAdmissionLimits::default().with_max_body_bytes(7).unwrap();
+    let router = Router::new()
+        .route("/", post(inspect))
+        .with_state(calls.clone())
+        .layer(StreamAdmissionLayer::new(limits));
+    let exact = router
+        .clone()
+        .oneshot(
+            Request::post("/")
+                .body(Body::new(DataAndTrailersBody {
+                    state: 0,
+                    data: Bytes::from_static(b"request"),
+                    fail_after_data: false,
+                }))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exact.status(), StatusCode::OK);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let over = router
+        .clone()
+        .oneshot(
+            Request::post("/")
+                .body(Body::new(DataAndTrailersBody {
+                    state: 0,
+                    data: Bytes::from_static(b"request!"),
+                    fail_after_data: false,
+                }))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(over.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let failed = router
+        .oneshot(
+            Request::post("/")
+                .body(Body::new(DataAndTrailersBody {
+                    state: 0,
+                    data: Bytes::from_static(b"request"),
+                    fail_after_data: true,
+                }))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(failed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
 
 #[test]
 fn defaults_and_invalid_values_are_stable() {
