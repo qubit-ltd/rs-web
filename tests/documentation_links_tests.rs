@@ -5,10 +5,72 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
+
+#[test]
+fn heading_anchors_match_markdown_heading_rules() {
+    let source = "# Transport budgets\n\n# 配置与启动\n\n## Retry\n\n## Retry\n\n## Retry-1\n\n# Use `WsSession`\n\n```md\n# Fake\n```\n";
+    let anchors = heading_anchors(source);
+
+    for expected in [
+        "transport-budgets",
+        "配置与启动",
+        "retry",
+        "retry-1",
+        "retry-1-1",
+        "use-wssession",
+    ] {
+        assert!(anchors.contains(expected), "missing anchor {expected:?}");
+    }
+    assert!(!anchors.contains("fake"));
+}
+
+#[test]
+fn validates_fragments_after_percent_decoding() {
+    let source = "# 配置与启动\n";
+    assert!(validate_fragment(source, "配置与启动").is_ok());
+    assert!(validate_fragment(source, "%E9%85%8D%E7%BD%AE%E4%B8%8E%E5%90%AF%E5%8A%A8").is_ok());
+    assert!(validate_fragment(source, "%GG").is_err());
+    assert!(validate_fragment(source, "missing").is_err());
+}
+
+#[test]
+fn validates_local_document_links_and_reports_source_line() {
+    let target = "# Transport budgets\n";
+    assert!(validate_fragment(target, "transport-budgets").is_ok());
+    let error = validate_fragment(target, "missing").unwrap_err();
+    assert!(error.contains("missing"));
+
+    let links = markdown_links("first\n[ok](target.md#transport-budgets)\n[bad](target.md#missing)\n");
+    assert_eq!(links[1].0, 3);
+    assert_eq!(links[1].1, "target.md#missing");
+}
+
+#[test]
+fn empty_or_absent_fragments_and_external_urls_are_distinguished() {
+    let parsed = ["target.md#", "target.md", "https://example.com/#ignored"];
+    assert_eq!(parsed[0].split_once('#'), Some(("target.md", "")));
+    assert_eq!(parsed[1].split_once('#'), None);
+    assert!(parsed[2].contains("://"));
+}
+
+#[test]
+fn duplicate_heading_ids_skip_ids_already_claimed_by_later_headings() {
+    let anchors = heading_anchors("## Retry\n## Retry\n## Retry-1\n");
+    assert!(anchors.contains("retry"));
+    assert!(anchors.contains("retry-1"));
+    assert!(anchors.contains("retry-1-1"));
+}
+
+#[test]
+fn heading_slug_uses_visible_text_from_inline_links_and_setext_headings() {
+    let anchors = heading_anchors("[Transport](guide.md) `WsSession`\n==============================\n");
+    assert!(anchors.contains("transport-wssession"));
+}
 
 fn markdown_links(source: &str) -> Vec<(usize, String)> {
     let mut links = Vec::new();
@@ -48,6 +110,141 @@ fn markdown_links(source: &str) -> Vec<(usize, String)> {
     links
 }
 
+fn heading_anchors(source: &str) -> HashSet<String> {
+    let mut anchors = HashSet::new();
+    let mut in_fence = false;
+    let mut fence_char = '\0';
+    let mut fence_len = 0;
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim_start();
+        let fence = trimmed
+            .chars()
+            .take_while(|ch| *ch == '`' || *ch == '~')
+            .collect::<String>();
+        if fence.len() >= 3 {
+            let ch = fence.chars().next().unwrap();
+            if !in_fence {
+                in_fence = true;
+                fence_char = ch;
+                fence_len = fence.len();
+            } else if ch == fence_char && fence.len() >= fence_len {
+                in_fence = false;
+            }
+            index += 1;
+            continue;
+        }
+        if in_fence {
+            index += 1;
+            continue;
+        }
+        let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
+        let title = if hashes > 0 && hashes <= 6 && trimmed[hashes..].chars().next().is_some_and(char::is_whitespace) {
+            trimmed[hashes..].trim().trim_end_matches('#').trim().to_owned()
+        } else if index + 1 < lines.len()
+            && (lines[index + 1].trim().chars().all(|ch| ch == '=')
+                || lines[index + 1].trim().chars().all(|ch| ch == '-'))
+            && !lines[index + 1].trim().is_empty()
+        {
+            index += 1;
+            line.trim().to_owned()
+        } else {
+            index += 1;
+            continue;
+        };
+        let title = visible_heading_text(&title);
+        let slug = title
+            .chars()
+            .flat_map(char::to_lowercase)
+            .filter(|ch| ch.is_alphanumeric() || *ch == '-' || *ch == '_' || ch.is_whitespace())
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("-");
+        if slug.is_empty() {
+            index += 1;
+            continue;
+        }
+        let mut candidate = slug.clone();
+        let mut suffix = 1;
+        while anchors.contains(&candidate) {
+            candidate = format!("{slug}-{suffix}");
+            suffix += 1;
+        }
+        anchors.insert(candidate);
+        index += 1;
+    }
+    anchors
+}
+
+fn visible_heading_text(title: &str) -> String {
+    let mut visible = String::new();
+    let mut chars = title.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '`' | '*' | '_' | '~' => {}
+            '[' => {
+                let mut label = String::new();
+                while let Some(next) = chars.next() {
+                    if next == ']' {
+                        if chars.peek() == Some(&'(') {
+                            for end in chars.by_ref() {
+                                if end == ')' {
+                                    break;
+                                }
+                            }
+                        }
+                        visible.push_str(&label);
+                        break;
+                    }
+                    label.push(next);
+                }
+            }
+            '<' => {
+                for end in chars.by_ref() {
+                    if end == '>' {
+                        break;
+                    }
+                }
+            }
+            _ => visible.push(ch),
+        }
+    }
+    visible
+}
+
+fn validate_fragment(source: &str, fragment: &str) -> Result<(), String> {
+    let decoded = percent_decode(fragment)?;
+    if heading_anchors(source).contains(&decoded) {
+        Ok(())
+    } else {
+        Err(format!("missing heading anchor: {decoded}"))
+    }
+}
+
+fn percent_decode(fragment: &str) -> Result<String, String> {
+    let bytes = fragment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let pair = bytes
+                .get(index + 1..index + 3)
+                .ok_or_else(|| "incomplete percent escape".to_owned())?;
+            let hex = std::str::from_utf8(pair).map_err(|_| "invalid percent escape".to_owned())?;
+            decoded.push(u8::from_str_radix(hex, 16).map_err(|_| "invalid percent escape".to_owned())?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| "fragment is not valid UTF-8".to_owned())
+}
+
 #[test]
 fn test_documentation_local_markdown_links_exist() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -57,6 +254,7 @@ fn test_documentation_local_markdown_links_exist() {
         root.join("doc/README.md"),
     ]);
     let mut visited = HashSet::new();
+    let mut anchor_cache = HashMap::new();
     let mut failures = Vec::new();
 
     while let Some(source_path) = pending.pop_front() {
@@ -74,17 +272,18 @@ fn test_documentation_local_markdown_links_exist() {
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", canonical_source.display()));
 
         for (line, target) in markdown_links(&source) {
-            if target.starts_with('#') || target.contains("://") || target.starts_with("mailto:") {
+            if target.contains("://") || target.starts_with("mailto:") {
                 continue;
             }
-            let target_path = target.split('#').next().unwrap_or("");
-            if target_path.is_empty() {
-                continue;
-            }
-            let resolved = canonical_source
-                .parent()
-                .expect("Markdown source has a parent")
-                .join(target_path);
+            let (target_path, fragment) = target.split_once('#').unwrap_or((target.as_str(), ""));
+            let resolved = if target_path.is_empty() {
+                canonical_source.clone()
+            } else {
+                canonical_source
+                    .parent()
+                    .expect("Markdown source has a parent")
+                    .join(target_path)
+            };
             let Ok(canonical_target) = resolved.canonicalize() else {
                 failures.push(format!(
                     "{}:{line}: local link target does not exist: {target}",
@@ -99,6 +298,30 @@ fn test_documentation_local_markdown_links_exist() {
                 continue;
             }
             if canonical_target.extension().is_some_and(|extension| extension == "md") {
+                if !fragment.is_empty() {
+                    let anchors = anchor_cache.entry(canonical_target.clone()).or_insert_with(|| {
+                        fs::read_to_string(&canonical_target)
+                            .map(|source| heading_anchors(&source))
+                            .unwrap_or_default()
+                    });
+                    match percent_decode(fragment) {
+                        Ok(decoded) if anchors.contains(&decoded) => {}
+                        Ok(decoded) => failures.push(format!(
+                            "{}:{line}: Markdown link target has no heading anchor #{decoded}: {target}",
+                            canonical_source
+                                .strip_prefix(&root)
+                                .unwrap_or(&canonical_source)
+                                .display()
+                        )),
+                        Err(reason) => failures.push(format!(
+                            "{}:{line}: invalid Markdown link fragment ({reason}): {target}",
+                            canonical_source
+                                .strip_prefix(&root)
+                                .unwrap_or(&canonical_source)
+                                .display()
+                        )),
+                    }
+                }
                 pending.push_back(canonical_target);
             }
         }
