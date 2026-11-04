@@ -12,11 +12,17 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+/// Carries shutdown settings from the server into an upgraded I/O lifecycle.
+///
+/// The optional server deadline is shared with the server context when
+/// available; close handling uses the earliest applicable deadline among it and
+/// the close grace period. The deadline is therefore not necessarily present.
 pub(in crate::ws) struct UpgradeLifecycle {
-    /// Cancellation inherited by the upgraded session.
+    /// Cancellation signal inherited by the upgraded session.
     pub(in crate::ws) shutdown: CancellationToken,
     /// Grace period allowed for the peer's close acknowledgement.
     pub(in crate::ws) shutdown_timeout: Duration,
-    /// Shared absolute shutdown deadline, when a server context is available.
+    /// Shared absolute server shutdown deadline, when a server context is
+    /// available.
     pub(in crate::ws) server_deadline: Option<Arc<Mutex<Option<Instant>>>>,
 }

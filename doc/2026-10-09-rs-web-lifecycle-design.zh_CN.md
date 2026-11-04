@@ -30,11 +30,11 @@ SSE 与 WebSocket 容量限制属于彼此独立的策略域，不是整个服�
 
 WebSocket 发送队列的所有克隆共享关闭状态。对端或会话关闭后，`try_send` 会返回 `Closed`；成功入队不保证消息已通过网络送达。出站 `queue_limits` 与入站 `inbound_queue_limits(messages, bytes)` 分开配置。入站默认每连接最多排队 64 条消息、累计 1 MiB payload；reader 等待通道空位时最多另持有一条消息，且同样计入字节预算。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，每个活跃连接另最多有一条 1 MiB 协议重组消息。该估算不含分配开销和应用自有内存，也不限定 I/O 结束后仍被 handler 或 session 保留的内存。字节预算不足以容纳新消息时，消息会被丢弃并立即以关闭码 `1013` 关闭；仅通道槽满时，`WsUpgradePolicy::idle_timeout` 限制无进展等待时间，到期后以 `1013`、原因 `inbound backpressure` 关闭。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应用应持续接收消息，并在收到后再转交较长的业务处理。
 
-服务取消时，普通写入会停止等待刷新完成。对端发送 Close 后，writer 的最终刷新受服务器共享的关闭截止时间约束。发生背压时，Close 帧可能无法送达。writer 退出时会释放其连接策略许可，并解除受管会话登记。
+服务取消时，普通写入会停止等待刷新完成。对端发送 Close 后，writer 的最终刷新受服务器共享的关闭截止时间约束。发生背压时，Close 帧可能无法送达。连接策略许可与受管会话登记由 reader、writer 共享的 I/O 资源持有；两者均释放引用后才归还。仅 writer 退出不足以证明会话容量已恢复。
 
 ## 会话关闭与时间配置边界
 
-`WsSession::close()` 可幂等调用。如果等待期间取消 close future，可以再次调用重试；显式关闭后 `recv()` 返回 `None`，并丢弃尚未交付的读错误。传输读取错误保存在有界通道之外；取消清理完成后，可通过一次 `Some(Err(_))` 交付，之后读取返回 `None`。如果 `recv()` 在清理等待期间被取消，错误仍保留，可由后续调用取得。宿主停服可能直接取消 handler，不保证交付该错误。清空通道时会 drop 尚未交付的入站消息封装并归还其字节预算。writer 退出时会归还出站队列字节预算、策略许可和受管会话登记，包括 sink shutdown 一直处于 Pending 的情况。HTTP 请求头期限和 SSE keep-alive interval 若为零，或无法由 `Tokio Instant::checked_add` 表示（包括 `Duration::MAX`），会以 `WebServerError::InvalidConfig` 拒绝。
+`WsSession::close()` 可幂等调用。如果等待期间取消 close future，可以再次调用重试；显式关闭后 `recv()` 返回 `None`，并丢弃尚未交付的读错误。传输读取错误保存在有界通道之外；取消清理完成后，可通过一次 `Some(Err(_))` 交付，之后读取返回 `None`。如果 `recv()` 在清理等待期间被取消，错误仍保留，可由后续调用取得。宿主停服可能直接取消 handler，不保证交付该错误。清空通道时会 drop 尚未交付的入站消息封装并归还其字节预算。writer 退出时会关闭出站队列、丢弃尚未发送的消息并归还相应的排队字节预算；已经取出发送的消息仍计入预算，直到 writer 完成该次发送。此队列预算清理与共享会话资源释放是不同边界：连接策略许可和受管会话登记要等 reader 与 writer 都释放资源引用后才归还，包括 sink shutdown 一直处于 Pending 而 writer 已退出的情况。HTTP 请求头期限和 SSE keep-alive interval 若为零，或无法由 `Tokio Instant::checked_add` 表示（包括 `Duration::MAX`），会以 `WebServerError::InvalidConfig` 拒绝。
 
 `WsSession::closed()` 返回拥有自身状态的 `Send + 'static` future，可在 I/O 结束前或之后创建，也可由多个等待者同时使用。reader 与 writer 都释放连接许可和受管会话登记后，该 future 才就绪；这不表示 Close 帧已送达、handler 或应用工作已结束，也不表示入站消息已消费。应用可将它与可安全取消的工作一起 select，收到通知后调用 `close()` 清理队列。该通知不会取消 handler 或应用自行启动的任务。若业务工作必须继续，应先转移所需输入，再由应用独立管理。
 
