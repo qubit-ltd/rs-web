@@ -14,9 +14,18 @@ use tokio::sync::Semaphore;
 
 use super::http_limits::HttpLimits;
 
-/// Shared body, deadline, and capacity state for one selected route branch.
+/// Shared body, deadline, and capacity state for selected route branches.
+///
+/// A state is one budget domain: requests using it share the same body and
+/// deadline configuration and concurrent-request capacity. Cloning a state
+/// shares that capacity. Each call to [`RequestLimitLayer::new`] creates an
+/// independent domain; use [`RequestLimitLayer::from_state`] with clones of
+/// this state to share capacity across branches. This is not a process-wide
+/// limit, and controller builders retain their own state.
+///
+/// [`RequestLimitLayer::new`]: super::request_limit_layer::RequestLimitLayer::new
+/// [`RequestLimitLayer::from_state`]: super::request_limit_layer::RequestLimitLayer::from_state
 #[derive(Clone)]
-#[doc(hidden)]
 #[must_use]
 pub struct LimitState {
     /// Body size threshold applied while a handler consumes request data.
@@ -30,6 +39,10 @@ pub struct LimitState {
 impl LimitState {
     /// Creates the shared state used by selected short-request branches.
     ///
+    /// Every independently created state has its own concurrent-request
+    /// capacity. Clone the returned state and pass each clone to
+    /// [`RequestLimitLayer::from_state`] to share one capacity across branches.
+    ///
     /// # Parameters
     ///
     /// - `limits`: validated budgets copied into the branch state.
@@ -37,7 +50,8 @@ impl LimitState {
     /// # Returns
     ///
     /// State that shares one capacity semaphore across the branch's requests.
-    #[doc(hidden)]
+    ///
+    /// [`RequestLimitLayer::from_state`]: super::request_limit_layer::RequestLimitLayer::from_state
     pub fn new(limits: HttpLimits) -> Self {
         Self {
             max_body_bytes: limits.max_body_bytes(),

@@ -29,6 +29,7 @@ use axum::routing::post;
 use hyper::body::Body as HttpBody;
 use qubit_web::diagnostic::DiagnosticLayer;
 use qubit_web::limit::HttpLimits;
+use qubit_web::limit::LimitState;
 use qubit_web::limit::RequestLimitLayer;
 use qubit_web::limit::WebRejection;
 use tower::ServiceExt;
@@ -381,6 +382,147 @@ async fn invalid_configuration_rejection_is_stable() {
 struct RequestGate {
     started: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Semaphore>,
+}
+
+#[derive(Clone)]
+struct BranchGate {
+    gate: RequestGate,
+    calls: Arc<AtomicUsize>,
+}
+
+async fn gated_branch(axum::extract::State(state): axum::extract::State<BranchGate>) -> &'static str {
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    state.gate.started.notify_one();
+    let permit = state.gate.release.acquire().await.unwrap();
+    permit.forget();
+    "ok"
+}
+
+async fn immediate_branch(axum::extract::State(calls): axum::extract::State<Arc<AtomicUsize>>) -> &'static str {
+    calls.fetch_add(1, Ordering::SeqCst);
+    "ok"
+}
+
+fn request_gate() -> RequestGate {
+    RequestGate {
+        started: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+    }
+}
+
+async fn gated_response(app: Router, path: &'static str) -> Result<Response, std::convert::Infallible> {
+    app.oneshot(Request::get(path).body(Body::empty()).unwrap()).await
+}
+
+#[tokio::test]
+async fn shared_limit_state_caps_two_native_branches() {
+    let gate = request_gate();
+    let a_calls = Arc::new(AtomicUsize::new(0));
+    let b_calls = Arc::new(AtomicUsize::new(0));
+    let limits = HttpLimits::default().with_max_concurrent_requests(1).unwrap();
+    let shared = LimitState::new(limits);
+    let app = Router::new()
+        .route(
+            "/a",
+            axum::routing::get(gated_branch)
+                .with_state(BranchGate {
+                    gate: gate.clone(),
+                    calls: a_calls.clone(),
+                })
+                .layer(RequestLimitLayer::from_state(shared.clone())),
+        )
+        .route(
+            "/b",
+            axum::routing::get(immediate_branch)
+                .with_state(b_calls.clone())
+                .layer(RequestLimitLayer::from_state(shared)),
+        );
+
+    let first = tokio::spawn(gated_response(app.clone(), "/a"));
+    let started = tokio::time::timeout(std::time::Duration::from_secs(3), gate.started.notified()).await;
+    let rejected = if started.is_ok() {
+        Some(tokio::time::timeout(std::time::Duration::from_secs(3), gated_response(app.clone(), "/b")).await)
+    } else {
+        None
+    };
+    let b_calls_while_blocked = b_calls.load(Ordering::SeqCst);
+    gate.release.add_permits(1);
+    let first_result = tokio::time::timeout(std::time::Duration::from_secs(3), first).await;
+
+    assert!(started.is_ok(), "A handler did not start within 3 seconds");
+    let rejected = rejected
+        .expect("A handler must start before B is requested")
+        .expect("B request did not finish within 3 seconds")
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        b_calls_while_blocked, 0,
+        "B handler must not run while shared capacity is occupied"
+    );
+    let first = first_result
+        .expect("A task did not finish within 3 seconds")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = axum::body::to_bytes(first.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&first_body[..], b"ok");
+    let recovered = tokio::time::timeout(std::time::Duration::from_secs(3), gated_response(app, "/b"))
+        .await
+        .expect("B recovery request did not finish within 3 seconds")
+        .unwrap();
+    assert_eq!(recovered.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn independent_request_layers_do_not_share_capacity() {
+    let gate = request_gate();
+    let a_calls = Arc::new(AtomicUsize::new(0));
+    let b_calls = Arc::new(AtomicUsize::new(0));
+    let limits = || HttpLimits::default().with_max_concurrent_requests(1).unwrap();
+    let app = Router::new()
+        .route(
+            "/a",
+            axum::routing::get(gated_branch)
+                .with_state(BranchGate {
+                    gate: gate.clone(),
+                    calls: a_calls.clone(),
+                })
+                .layer(RequestLimitLayer::new(limits())),
+        )
+        .route(
+            "/b",
+            axum::routing::get(immediate_branch)
+                .with_state(b_calls.clone())
+                .layer(RequestLimitLayer::new(limits())),
+        );
+
+    let first = tokio::spawn(gated_response(app.clone(), "/a"));
+    let started = tokio::time::timeout(std::time::Duration::from_secs(3), gate.started.notified()).await;
+    let b_result = if started.is_ok() {
+        Some(tokio::time::timeout(std::time::Duration::from_secs(3), gated_response(app, "/b")).await)
+    } else {
+        None
+    };
+    gate.release.add_permits(1);
+    let first_result = tokio::time::timeout(std::time::Duration::from_secs(3), first).await;
+
+    assert!(started.is_ok(), "A handler did not start within 3 seconds");
+    let b_response = b_result
+        .expect("A handler must start before B is requested")
+        .expect("B request did not finish within 3 seconds")
+        .unwrap();
+    assert_eq!(b_response.status(), StatusCode::OK);
+    let first_response = first_result
+        .expect("A task did not finish within 3 seconds")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_body = axum::body::to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&first_body[..], b"ok");
+    assert_eq!(a_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(b_calls.load(Ordering::SeqCst), 1);
 }
 
 async fn blocked_handler(axum::extract::State(gate): axum::extract::State<RequestGate>) -> &'static str {

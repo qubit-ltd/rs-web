@@ -38,6 +38,9 @@ pub type LimitFuture = Pin<Box<dyn Future<Output = Response> + Send>>;
 pub type LimitMiddleware = fn(State<LimitState>, Request<Body>, Next) -> LimitFuture;
 
 /// Creates the request limit middleware for a selected Axum router branch.
+/// Calling [`new`](Self::new) independently creates an independent capacity
+/// domain. To share body, deadline, and concurrency budgets across branches,
+/// create one [`LimitState`] and pass its clones to [`Self::from_state`].
 ///
 /// The deadline uses cooperative Tokio cancellation. Synchronous work that
 /// does not yield can delay timeout checks and cleanup, and may finish
@@ -49,12 +52,22 @@ pub type LimitMiddleware = fn(State<LimitState>, Request<Body>, Next) -> LimitFu
 /// use axum::Router;
 /// use axum::routing::get;
 /// use qubit_web::{HttpLimits, RequestLimitLayer};
+/// use qubit_web::limit::LimitState;
 ///
 /// async fn handler() -> &'static str { "ok" }
 ///
 /// let app: Router<()> = Router::new()
 ///     .route("/", get(handler))
 ///     .layer(RequestLimitLayer::new(HttpLimits::default()));
+/// # let _ = app;
+///
+/// // Cloned state makes both branches share the same capacity budget.
+/// let shared = LimitState::new(HttpLimits::default());
+/// let app: Router = Router::new()
+///     .route("/a", get(|| async { "a" })
+///         .layer(RequestLimitLayer::from_state(shared.clone())))
+///     .route("/b", get(|| async { "b" })
+///         .layer(RequestLimitLayer::from_state(shared)));
 /// # let _ = app;
 ///
 /// #[derive(Clone)]
@@ -73,6 +86,10 @@ pub struct RequestLimitLayer;
 impl RequestLimitLayer {
     /// Creates a middleware with a body budget, short-request capacity, and
     /// deadline.
+    ///
+    /// Each call creates a fresh, independent capacity domain. Use
+    /// [`from_state`](Self::from_state) with cloned [`LimitState`] values to
+    /// share budgets across route branches.
     ///
     /// The middleware counts request data frames as the selected route consumes
     /// them and stops polling the body after the first over-limit frame. An
@@ -109,6 +126,10 @@ impl RequestLimitLayer {
 
     /// Creates a middleware using a previously shared branch state.
     ///
+    /// Pass clones of the same [`LimitState`] to multiple branches to make
+    /// those branches share body and deadline budgets and concurrent-request
+    /// capacity. Independently created states remain independent.
+    ///
     /// # Parameters
     ///
     /// - `state`: shared limits and semaphore installed on the branch.
@@ -116,7 +137,6 @@ impl RequestLimitLayer {
     /// # Returns
     ///
     /// A middleware layer that reuses the supplied branch state.
-    #[doc(hidden)]
     pub fn from_state(
         state: LimitState,
     ) -> middleware::FromFnLayer<LimitMiddleware, LimitState, (State<LimitState>, Request<Body>)> {
