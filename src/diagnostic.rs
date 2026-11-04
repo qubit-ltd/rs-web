@@ -12,6 +12,8 @@ mod diagnostic_layer;
 mod request_diagnostic;
 pub(crate) mod internal {
     mod body_observation;
+    mod body_observation_state;
+    mod body_termination;
     mod connection_id;
     mod diagnostic_body;
 

@@ -24,6 +24,9 @@ use super::SessionLifecycle;
 use super::SessionResources;
 use super::close::get_close_deadline;
 use super::close::send_close_and_wait;
+use super::control_flush_outcome::ControlFlushOutcome;
+use super::flush_outcome::FlushOutcome;
+use super::send_outcome::SendOutcome;
 use crate::ws::internal::CloseQueueOnDrop;
 use crate::ws::ws_send_queue::WsSendQueue;
 use crate::ws::ws_send_queue::message_size;
@@ -148,28 +151,6 @@ pub(in crate::ws) async fn writer_loop<S>(
             }
         }
     }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum SendOutcome {
-    Sent,
-    PeerCloseAcknowledged,
-    SinkError,
-    Shutdown,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum FlushOutcome {
-    Flushed,
-    Cancelled,
-    Failed,
-    TimedOut,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum ControlFlushOutcome {
-    PeerCloseAcknowledged,
-    Flushed(FlushOutcome),
 }
 
 async fn flush_until<S>(sink: &mut S, shutdown: &CancellationToken, deadline: Option<Instant>) -> FlushOutcome

@@ -8,11 +8,14 @@
 //! Private WebSocket reader, writer, and close helpers.
 
 mod close_queue_on_drop;
+mod control_flush_outcome;
 mod delivery_result;
+mod flush_outcome;
 mod inbound_message;
 mod inbound_state;
 mod policy_inner;
 mod queue_state;
+mod send_outcome;
 mod session_resources;
 mod upgrade_lifecycle;
 

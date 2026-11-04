@@ -13,6 +13,9 @@ use std::time::Instant;
 
 use axum::http::Method;
 
+use super::body_observation_state::BodyObservationState;
+use super::body_termination::BodyTermination;
+
 /// Shared response-body observation state cloned by middleware and body tasks.
 pub(crate) struct BodyObservation {
     method: String,
@@ -20,7 +23,7 @@ pub(crate) struct BodyObservation {
     connection_id: String,
     bytes: Option<u64>,
     started: Instant,
-    state: Mutex<State>,
+    state: Mutex<BodyObservationState>,
 }
 
 impl BodyObservation {
@@ -34,19 +37,6 @@ impl BodyObservation {
     ) -> Arc<Self> {
         Arc::new(Self::new(method, route, connection_id, bytes, started))
     }
-}
-
-struct State {
-    status: Option<u16>,
-    outcome: Option<&'static str>,
-    emitted: bool,
-}
-
-/// Allowlisted log snapshot claimed by one terminal transition.
-pub(crate) struct BodyTermination {
-    outcome: &'static str,
-    status: u16,
-    elapsed_ms: u64,
 }
 
 impl BodyObservation {
@@ -64,7 +54,7 @@ impl BodyObservation {
             connection_id,
             bytes,
             started,
-            state: Mutex::new(State {
+            state: Mutex::new(BodyObservationState {
                 status: None,
                 outcome: None,
                 emitted: false,
@@ -72,7 +62,11 @@ impl BodyObservation {
         }
     }
 
-    /// Sets response status after headers have been produced.
+    /// Publishes the response status after headers have been produced.
+    ///
+    /// The status may arrive before or after body termination; once both are
+    /// available, one caller claims the log snapshot while holding the state
+    /// lock and emits it after releasing the lock.
     pub(crate) fn set_status(&self, status: u16) {
         let event = {
             let mut state = self.lock();
@@ -83,12 +77,20 @@ impl BodyObservation {
     }
 
     /// Records the first terminal outcome and emits it when status is ready.
+    ///
+    /// A later terminal caller cannot replace the first outcome. Snapshot
+    /// claiming occurs under the state lock, while tracing output occurs after
+    /// the lock has been released.
     pub(crate) fn terminate(&self, outcome: &'static str) {
         self.emit(self.mark_terminal(outcome));
     }
 
     /// Claims the terminal event without emitting, for callers holding another
     /// lifecycle lock.
+    ///
+    /// The first terminal outcome wins. The snapshot is claimed while the state
+    /// lock is held and can be emitted later, after the caller releases any
+    /// other lifecycle lock it owns.
     pub(crate) fn mark_terminal(&self, outcome: &'static str) -> Option<BodyTermination> {
         let mut state = self.lock();
         if state.outcome.is_none() {
@@ -97,11 +99,11 @@ impl BodyObservation {
         self.take_event(&mut state)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BodyObservationState> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn take_event(&self, state: &mut State) -> Option<BodyTermination> {
+    fn take_event(&self, state: &mut BodyObservationState) -> Option<BodyTermination> {
         let (Some(outcome), Some(status)) = (state.outcome, state.status) else {
             return None;
         };
@@ -117,6 +119,10 @@ impl BodyObservation {
     }
 
     /// Emits one previously claimed terminal event outside lifecycle locks.
+    ///
+    /// Callers must invoke this after releasing lifecycle locks; the snapshot
+    /// has already been claimed and marked emitted while holding the state
+    /// lock, so concurrent transitions cannot produce a second event.
     pub(crate) fn emit(&self, event: Option<BodyTermination>) {
         if let Some(event) = event {
             tracing::info!(target: "qubit_web::diagnostic", event = "response_body_end", outcome = event.outcome, method = %self.method, route = %self.route, status = event.status, elapsed_ms = event.elapsed_ms, connection_id = %self.connection_id, bytes = ?self.bytes);
