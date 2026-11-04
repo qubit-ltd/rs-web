@@ -92,7 +92,16 @@ pub(in crate::ws) async fn writer_loop<S>(
                             send_close_and_wait(&mut sink, &mut close_ack, close_code.load(Ordering::Acquire), deadline).await;
                             return;
                         }
-                        ControlFlushOutcome::Flushed(FlushOutcome::Failed | FlushOutcome::TimedOut) => {
+                        ControlFlushOutcome::Flushed(FlushOutcome::Failed) => {
+                            tracing::warn!(
+                                event = "websocket_io_failure",
+                                direction = "write",
+                                operation = "flush"
+                            );
+                            shutdown.cancel();
+                            return;
+                        }
+                        ControlFlushOutcome::Flushed(FlushOutcome::TimedOut) => {
                             shutdown.cancel();
                             return;
                         }
@@ -118,6 +127,7 @@ pub(in crate::ws) async fn writer_loop<S>(
         match sent {
             SendOutcome::Sent => {}
             SendOutcome::SinkError => {
+                tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "send");
                 let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
                 shutdown.cancel();
                 queue.close();
@@ -192,6 +202,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
@@ -208,6 +219,9 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
+    use tracing::Level;
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::fmt::MakeWriter;
 
     use super::FlushOutcome;
     use super::flush_until;
@@ -218,6 +232,36 @@ mod tests {
     use crate::ws::internal::SessionLifecycle;
     use crate::ws::internal::SessionResources;
     use crate::ws::ws_send_error::WsSendError;
+
+    #[derive(Clone, Default)]
+    struct SharedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedLog {
+        type Writer = LogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogWriter(self.0.clone())
+        }
+    }
+
+    impl SharedLog {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
 
     #[derive(Clone, Copy)]
     enum FailurePoint {
@@ -239,7 +283,7 @@ mod tests {
             if !self.failed && matches!(self.point, FailurePoint::Ready) {
                 self.failed = true;
                 self.notified.notify_one();
-                return Poll::Ready(Err(std::io::Error::other("injected ready failure")));
+                return Poll::Ready(Err(std::io::Error::other("secret-sentinel ready failure")));
             }
             Poll::Ready(Ok(()))
         }
@@ -248,7 +292,7 @@ mod tests {
             if !self.failed && matches!(self.point, FailurePoint::Send) {
                 self.failed = true;
                 self.notified.notify_one();
-                return Err(std::io::Error::other("injected send failure"));
+                return Err(std::io::Error::other("secret-sentinel send failure"));
             }
             Ok(())
         }
@@ -257,7 +301,7 @@ mod tests {
             if !self.failed && matches!(self.point, FailurePoint::Flush) {
                 self.failed = true;
                 self.notified.notify_one();
-                return Poll::Ready(Err(std::io::Error::other("injected flush failure")));
+                return Poll::Ready(Err(std::io::Error::other("secret-sentinel flush failure")));
             }
             Poll::Ready(Ok(()))
         }
@@ -268,6 +312,14 @@ mod tests {
     }
 
     async fn assert_writer_failure(point: FailurePoint) {
+        let log = SharedLog::default();
+        let dispatch = tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_max_level(Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(log.clone())
+                .finish(),
+        );
         let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
             .await
             .expect("test server should bind");
@@ -300,10 +352,13 @@ mod tests {
         };
         let resources = Arc::new(SessionResources::new(permit, session));
         let (ack_tx, ack_rx) = oneshot::channel();
-        let writer = tokio::spawn(async move {
-            writer_loop(sink, queue.clone(), notify, lifecycle, ack_rx, resources).await;
-            queue
-        });
+        let writer = tokio::spawn(
+            async move {
+                writer_loop(sink, queue.clone(), notify, lifecycle, ack_rx, resources).await;
+                queue
+            }
+            .with_subscriber(dispatch),
+        );
 
         timeout(Duration::from_secs(1), reached_failure.notified())
             .await
@@ -313,6 +368,24 @@ mod tests {
             .expect("writer must exit after sink failure")
             .expect("writer task must not panic");
         assert!(shutdown.is_cancelled(), "writer failure must cancel the session");
+        let output = log.contents();
+        let failures: Vec<_> = output
+            .lines()
+            .filter(|line| line.contains("websocket_io_failure"))
+            .collect();
+        assert_eq!(failures.len(), 1, "expected exactly one write failure event: {output}");
+        assert!(
+            failures[0].contains("direction=\"write\""),
+            "unexpected direction: {output}"
+        );
+        assert!(
+            failures[0].contains("operation=\"send\""),
+            "unexpected operation: {output}"
+        );
+        assert!(
+            !output.contains("secret-sentinel"),
+            "underlying error text must be redacted: {output}"
+        );
         assert_eq!(queue.try_send(Message::text("closed")), Err(WsSendError::Closed));
         let state = queue.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(state.messages.is_empty(), "pending messages must be discarded");
@@ -330,6 +403,312 @@ mod tests {
         for point in [FailurePoint::Ready, FailurePoint::Send, FailurePoint::Flush] {
             assert_writer_failure(point).await;
         }
+    }
+
+    #[tokio::test]
+    async fn test_writer_control_flush_error_reports_flush_once() {
+        let log = SharedLog::default();
+        let dispatch = tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_max_level(Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(log.clone())
+                .finish(),
+        );
+        let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .expect("test server should bind");
+        let session = server
+            .context()
+            .try_register_session()
+            .expect("session should register");
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        let queue = WsSendQueue::new(1, 128);
+        let notify = queue.notify.clone();
+        let writer_notify = notify.clone();
+        let lifecycle = SessionLifecycle {
+            shutdown: CancellationToken::new(),
+            close_code: Arc::new(std::sync::atomic::AtomicU16::new(1000)),
+            close_deadline: Arc::new(std::sync::Mutex::new(None)),
+            server_deadline: None,
+            shutdown_timeout: Duration::from_millis(100),
+        };
+        let resources = Arc::new(SessionResources::new(permit, session));
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let writer = tokio::spawn(
+            async move {
+                writer_loop(
+                    ReadyFlush(Some(Err(std::io::Error::other("secret-sentinel flush failure")))),
+                    queue,
+                    writer_notify,
+                    lifecycle,
+                    ack_rx,
+                    resources,
+                )
+                .await;
+            }
+            .with_subscriber(dispatch),
+        );
+        notify.notify_one();
+        timeout(Duration::from_secs(1), writer)
+            .await
+            .expect("writer should exit after control flush error")
+            .expect("writer should not panic");
+        let output = log.contents();
+        let failures: Vec<_> = output
+            .lines()
+            .filter(|line| line.contains("websocket_io_failure"))
+            .collect();
+        assert_eq!(failures.len(), 1, "expected exactly one flush failure event: {output}");
+        assert!(
+            failures[0].contains("operation=\"flush\""),
+            "unexpected operation: {output}"
+        );
+        assert!(
+            failures[0].contains("direction=\"write\""),
+            "unexpected direction: {output}"
+        );
+        assert!(
+            !output.contains("secret-sentinel"),
+            "underlying error text must be redacted: {output}"
+        );
+        drop(ack_tx);
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn test_writer_clean_shutdown_does_not_report_failure() {
+        let log = SharedLog::default();
+        let dispatch = tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_max_level(Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(log.clone())
+                .finish(),
+        );
+        let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .expect("test server should bind");
+        let session = server
+            .context()
+            .try_register_session()
+            .expect("session should register");
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        let queue = WsSendQueue::new(1, 128);
+        let notify = queue.notify.clone();
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let lifecycle = SessionLifecycle {
+            shutdown,
+            close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
+            close_deadline: Arc::new(std::sync::Mutex::new(None)),
+            server_deadline: None,
+            shutdown_timeout: Duration::from_millis(100),
+        };
+        let resources = Arc::new(SessionResources::new(permit, session));
+        let (ack_tx, ack_rx) = oneshot::channel();
+        ack_tx.send(()).expect("writer should retain acknowledgement receiver");
+        tokio::spawn(
+            async move {
+                writer_loop(SuccessfulSink, queue, notify, lifecycle, ack_rx, resources).await;
+            }
+            .with_subscriber(dispatch),
+        )
+        .await
+        .expect("writer should not panic");
+        let output = log.contents();
+        assert!(
+            !output.contains("websocket_io_failure"),
+            "clean shutdown must not log a failure: {output}"
+        );
+        drop(server);
+    }
+
+    struct CloseFailureSink {
+        fail_send: bool,
+        fail_post_ack_flush: bool,
+        flush_count: usize,
+    }
+
+    impl Sink<Message> for CloseFailureSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            if self.fail_send && matches!(item, Message::Close(_)) {
+                return Err(std::io::Error::other("secret-sentinel close send error"));
+            }
+            Ok(())
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            let flush_count = self.flush_count;
+            self.flush_count += 1;
+            if self.fail_post_ack_flush && flush_count > 0 {
+                return Poll::Ready(Err(std::io::Error::other("secret-sentinel close flush error")));
+            }
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    async fn assert_close_failure_reports(operation: &str, fail_send: bool, fail_post_ack_flush: bool) {
+        let log = SharedLog::default();
+        let dispatch = tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_max_level(Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(log.clone())
+                .finish(),
+        );
+        let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .expect("test server should bind");
+        let session = server
+            .context()
+            .try_register_session()
+            .expect("session should register");
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        let queue = WsSendQueue::new(1, 128);
+        let notify = queue.notify.clone();
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let lifecycle = SessionLifecycle {
+            shutdown,
+            close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
+            close_deadline: Arc::new(std::sync::Mutex::new(None)),
+            server_deadline: None,
+            shutdown_timeout: Duration::from_millis(100),
+        };
+        let resources = Arc::new(SessionResources::new(permit, session));
+        let (ack_tx, ack_rx) = oneshot::channel();
+        ack_tx.send(()).expect("writer should retain acknowledgement receiver");
+        let writer = tokio::spawn(
+            async move {
+                writer_loop(
+                    CloseFailureSink {
+                        fail_send,
+                        fail_post_ack_flush,
+                        flush_count: 0,
+                    },
+                    queue,
+                    notify,
+                    lifecycle,
+                    ack_rx,
+                    resources,
+                )
+                .await;
+            }
+            .with_subscriber(dispatch),
+        );
+        timeout(Duration::from_secs(1), writer)
+            .await
+            .expect("writer should exit after close handshake")
+            .expect("writer should not panic");
+        let output = log.contents();
+        let failures: Vec<_> = output
+            .lines()
+            .filter(|line| line.contains("websocket_io_failure"))
+            .collect();
+        assert_eq!(failures.len(), 1, "expected exactly one close failure event: {output}");
+        assert!(
+            failures[0].contains(&format!("operation=\"{operation}\"")),
+            "unexpected operation: {output}"
+        );
+        assert!(
+            failures[0].contains("direction=\"write\""),
+            "unexpected direction: {output}"
+        );
+        assert!(
+            !output.contains("secret-sentinel"),
+            "underlying error must be redacted: {output}"
+        );
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn test_writer_close_send_error_reports_send_once() {
+        assert_close_failure_reports("send", true, false).await;
+    }
+
+    #[tokio::test]
+    async fn test_writer_post_ack_close_flush_error_reports_flush_once() {
+        assert_close_failure_reports("flush", false, true).await;
+    }
+
+    #[tokio::test]
+    async fn test_writer_close_ack_timeout_does_not_report_failure() {
+        let log = SharedLog::default();
+        let dispatch = tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_max_level(Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(log.clone())
+                .finish(),
+        );
+        let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .expect("test server should bind");
+        let session = server
+            .context()
+            .try_register_session()
+            .expect("session should register");
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        let queue = WsSendQueue::new(1, 128);
+        let notify = queue.notify.clone();
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let lifecycle = SessionLifecycle {
+            shutdown,
+            close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
+            close_deadline: Arc::new(std::sync::Mutex::new(None)),
+            server_deadline: None,
+            shutdown_timeout: Duration::from_millis(20),
+        };
+        let resources = Arc::new(SessionResources::new(permit, session));
+        let (_ack_tx, ack_rx) = oneshot::channel();
+        let writer = tokio::spawn(
+            async move {
+                writer_loop(SuccessfulSink, queue, notify, lifecycle, ack_rx, resources).await;
+            }
+            .with_subscriber(dispatch),
+        );
+        timeout(Duration::from_secs(1), writer)
+            .await
+            .expect("writer should stop after acknowledgement timeout")
+            .expect("writer should not panic");
+        let output = log.contents();
+        assert!(
+            !output.contains("websocket_io_failure"),
+            "waiting for close acknowledgement must not log a failure: {output}"
+        );
+        drop(server);
     }
 
     struct PendingFlush {
@@ -372,6 +751,28 @@ mod tests {
 
         fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(self.0.take().expect("poll_flush should be called once"))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct SuccessfulSink;
+
+    impl Sink<Message> for SuccessfulSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
         }
 
         fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {

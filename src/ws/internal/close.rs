@@ -86,10 +86,16 @@ pub(in crate::ws) async fn send_close_and_wait<S>(
 {
     match timeout_at(deadline, sink.send(server_shutdown_close(code))).await {
         Ok(Ok(())) => {}
-        Ok(Err(_)) | Err(_) => return,
+        Ok(Err(_)) => {
+            tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "send");
+            return;
+        }
+        Err(_) => return,
     }
-    if matches!(timeout_at(deadline, close_ack).await, Ok(Ok(()))) {
-        let _ = timeout_at(deadline, sink.flush()).await;
+    if matches!(timeout_at(deadline, close_ack).await, Ok(Ok(())))
+        && matches!(timeout_at(deadline, sink.flush()).await, Ok(Err(_)))
+    {
+        tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "flush");
     }
 }
 
