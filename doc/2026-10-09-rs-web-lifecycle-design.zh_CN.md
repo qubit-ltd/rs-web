@@ -46,7 +46,7 @@ WebSocket 发送队列的所有克隆共享关闭状态。对端或会话关闭�
 
 `WebServerError` 会保留 socket 绑定、本地地址查询和 accept 故障的 `io::Error` source，调用方可通过 `std::error::Error::source()` 主动诊断。默认 `Display` 和 `Debug` 不输出底层操作系统错误文本；TLS 与配置错误也不会暴露可能包含敏感信息的 source 链。
 
-WebSocket writer 在一次生命周期内至多为 sink send 或控制帧 flush 失败发出一条结构化 warning，字段为 `event="websocket_io_failure"`、`direction="write"`，以及 `operation="send"` 或 `"flush"`。事件不记录 payload 或底层 sink 错误文本。取消、正常对端关闭和等待关闭确认超时不会报告为写失败。`WsSession::try_send` 成功仍只表示入队，不表示消息已通过网络送达。
+WebSocket writer 在一次生命周期内至多为 sink send 或控制帧 flush 失败发出一条结构化 warning；对端 Close 后有界收尾 flush 观察到真实错误时也会报警。字段为 `event="websocket_io_failure"`、`direction="write"`，以及 `operation="send"` 或 `"flush"`。事件不记录 payload 或底层 sink 错误文本。对端关闭后的 flush 成功不报警；取消和等待关闭确认超时不会报告为写失败。`WsSession::try_send` 成功仍只表示入队，不表示消息已通过网络送达。
 
 历史说明：0.2.0 曾引入以下破坏性变更：移除只接收 token 的 WebSocket 升级入口，统一使用 `WsUpgradePolicy::on_upgrade(ws, headers, context, handler)`；WebSocket 停服期限统一通过 `ServerOptions` 配置并由 `ServerContext` 提供；`WebServerError` 不再是可复制、无 source 的枚举；SSE 接纳错误区分容量耗尽和停服拒绝。
 

@@ -36,6 +36,17 @@ use crate::ws::ws_send_queue::message_size;
 /// The sink is generic so tests can exercise actual writer-loop behavior with
 /// deterministic readiness and flush results; production uses Axum's split
 /// WebSocket sink.
+/// # Type Parameters
+///
+/// * `S` - WebSocket sink type used to send frames.
+/// # Parameters
+///
+/// * `sink` - WebSocket sink that receives or flushes frames.
+/// * `queue` - Queue whose messages or state are being processed.
+/// * `notify` - Notification used to wake the waiting task.
+/// * `lifecycle` - Shared cancellation, close-code, and deadline state.
+/// * `close_ack` - Signal indicating that the peer acknowledged the close
+/// * `_resources` - Connection permit and session guard retained for this task.
 pub(in crate::ws) async fn writer_loop<S>(
     mut sink: S,
     queue: WsSendQueue,
@@ -74,7 +85,9 @@ pub(in crate::ws) async fn writer_loop<S>(
                 }
                 _ = &mut close_ack => {
                     let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
-                    let _ = flush_until(&mut sink, &shutdown, Some(deadline)).await;
+                    if matches!(flush_until(&mut sink, &shutdown, Some(deadline)).await, FlushOutcome::Failed) {
+                        tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "flush");
+                    }
                     return;
                 }
                 _ = notify.notified() => {
@@ -86,7 +99,9 @@ pub(in crate::ws) async fn writer_loop<S>(
                     match outcome {
                         ControlFlushOutcome::PeerCloseAcknowledged => {
                             let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
-                            let _ = flush_until(&mut sink, &shutdown, Some(deadline)).await;
+                            if matches!(flush_until(&mut sink, &shutdown, Some(deadline)).await, FlushOutcome::Failed) {
+                                tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "flush");
+                            }
                             return;
                         }
                         ControlFlushOutcome::Flushed(FlushOutcome::Flushed) => {}
@@ -162,7 +177,12 @@ pub(in crate::ws) async fn writer_loop<S>(
             }
             SendOutcome::PeerCloseAcknowledged => {
                 let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
-                let _ = flush_until(&mut sink, &shutdown, Some(deadline)).await;
+                if matches!(
+                    flush_until(&mut sink, &shutdown, Some(deadline)).await,
+                    FlushOutcome::Failed
+                ) {
+                    tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "flush");
+                }
                 return;
             }
             SendOutcome::Shutdown => {
@@ -173,7 +193,15 @@ pub(in crate::ws) async fn writer_loop<S>(
         }
     }
 }
-
+/// Flushes the sink until completion, cancellation, or the optional deadline.
+/// # Parameters
+///
+/// * `sink` - WebSocket sink whose buffered frames are flushed.
+/// * `shutdown` - Cancellation token that can end an unbounded flush.
+/// * `deadline` - Optional absolute deadline bounding the flush.
+/// # Type Parameters
+///
+/// * `S` - Sink used to write WebSocket messages.
 async fn flush_until<S>(sink: &mut S, shutdown: &CancellationToken, deadline: Option<Instant>) -> FlushOutcome
 where
     S: Sink<Message> + Unpin,
@@ -302,7 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_close_preserves_frame_drops_pending_data_and_times_out_without_ack() {
+    async fn test_writer_close_preserves_frame_drops_pending_data_and_times_out_without_ack() {
         let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
             .await
             .expect("test server should bind");
@@ -575,6 +603,182 @@ mod tests {
         );
         drop(ack_tx);
         drop(server);
+    }
+
+    #[tokio::test]
+    async fn test_writer_peer_close_ack_while_idle_flush_failure_reports_once() {
+        assert_peer_close_flush_failure(PeerCloseFlushBranch::AckWhileIdle).await;
+    }
+
+    #[tokio::test]
+    async fn test_writer_peer_close_notify_flush_failure_reports_once() {
+        assert_peer_close_flush_failure(PeerCloseFlushBranch::Notify).await;
+    }
+
+    #[tokio::test]
+    async fn test_writer_peer_close_ack_during_send_flush_failure_reports_once() {
+        assert_peer_close_flush_failure(PeerCloseFlushBranch::AckWhileSending).await;
+    }
+
+    #[test]
+    fn test_peer_close_failing_sink_accepts_frames_and_closes() {
+        let mut sink = PeerCloseFailingSink::Ready;
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
+
+        assert!(matches!(
+            Sink::poll_ready(Pin::new(&mut sink), &mut context),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(Sink::start_send(Pin::new(&mut sink), Message::Text("test".into())).is_ok());
+        assert!(matches!(
+            Sink::poll_close(Pin::new(&mut sink), &mut context),
+            Poll::Ready(Ok(()))
+        ));
+    }
+
+    #[derive(Clone, Copy)]
+    enum PeerCloseFlushBranch {
+        AckWhileIdle,
+        Notify,
+        AckWhileSending,
+    }
+
+    async fn assert_peer_close_flush_failure(branch: PeerCloseFlushBranch) {
+        let log = SharedLog::default();
+        let dispatch = tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_max_level(Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(log.clone())
+                .finish(),
+        );
+        let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .expect("test server should bind");
+        let context = server.context();
+        let session = context.try_register_session().expect("session should register");
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        let queue = WsSendQueue::new(1, 128);
+        if matches!(branch, PeerCloseFlushBranch::AckWhileSending) {
+            queue
+                .try_send(Message::text("queued"))
+                .expect("message should be queued");
+        }
+        let notify = queue.notify.clone();
+        let writer_notify = notify.clone();
+        let shutdown = CancellationToken::new();
+        let lifecycle = SessionLifecycle {
+            shutdown: shutdown.clone(),
+            close_code: Arc::new(std::sync::atomic::AtomicU16::new(1000)),
+            close_deadline: Arc::new(std::sync::Mutex::new(None)),
+            server_deadline: None,
+            shutdown_timeout: Duration::from_secs(1),
+        };
+        let resources = Arc::new(SessionResources::new(permit, session));
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let reached_send = Arc::new(Notify::new());
+        let control_flush_started = Arc::new(Notify::new());
+        let sink = if matches!(branch, PeerCloseFlushBranch::AckWhileSending) {
+            PeerCloseFailingSink::Sending {
+                reached: reached_send.clone(),
+            }
+        } else if matches!(branch, PeerCloseFlushBranch::Notify) {
+            PeerCloseFailingSink::NotifyThenFail {
+                started: control_flush_started.clone(),
+                polls: AtomicUsize::new(0),
+            }
+        } else {
+            PeerCloseFailingSink::Ready
+        };
+        let writer = tokio::spawn(
+            async move {
+                writer_loop(sink, queue.clone(), writer_notify, lifecycle, ack_rx, resources).await;
+                queue
+            }
+            .with_subscriber(dispatch),
+        );
+        match branch {
+            PeerCloseFlushBranch::AckWhileIdle => {
+                ack_tx.send(()).expect("ack receiver should be live");
+            }
+            PeerCloseFlushBranch::Notify => {
+                notify.notify_one();
+                timeout(Duration::from_secs(1), control_flush_started.notified())
+                    .await
+                    .expect("writer should enter control flush");
+                ack_tx.send(()).expect("ack receiver should be live");
+            }
+            PeerCloseFlushBranch::AckWhileSending => {
+                timeout(Duration::from_secs(1), reached_send.notified())
+                    .await
+                    .expect("writer should enter send");
+                ack_tx.send(()).expect("ack receiver should be live");
+            }
+        }
+        let queue = timeout(Duration::from_secs(1), writer)
+            .await
+            .expect("writer should exit after flush error")
+            .expect("writer should not panic");
+        let output = log.contents();
+        let failures: Vec<_> = output
+            .lines()
+            .filter(|line| line.contains("websocket_io_failure"))
+            .collect();
+        assert_eq!(failures.len(), 1, "expected one flush warning: {output}");
+        assert!(
+            failures[0].contains("direction=\"write\"") && failures[0].contains("operation=\"flush\""),
+            "unexpected warning: {output}"
+        );
+        assert!(
+            !output.contains("secret-sentinel"),
+            "sink error must be redacted: {output}"
+        );
+        assert_eq!(
+            queue.state.lock().unwrap().in_flight_messages,
+            0,
+            "in-flight budget should be released"
+        );
+        assert_eq!(context.active_sessions(), 0, "session registration should be released");
+        assert_eq!(permits.available_permits(), 1, "connection permit should be released");
+        drop(server);
+    }
+
+    enum PeerCloseFailingSink {
+        Ready,
+        Sending { reached: Arc<Notify> },
+        NotifyThenFail { started: Arc<Notify>, polls: AtomicUsize },
+    }
+
+    impl Sink<Message> for PeerCloseFailingSink {
+        type Error = std::io::Error;
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if let Self::Sending { reached } = &*self {
+                reached.notify_one();
+                return Poll::Pending;
+            }
+            Poll::Ready(Ok(()))
+        }
+        fn start_send(self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if let Self::NotifyThenFail { started, polls } = &mut *self
+                && polls.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                started.notify_one();
+                return Poll::Pending;
+            }
+            Poll::Ready(Err(std::io::Error::other("secret-sentinel peer-close flush failure")))
+        }
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
     }
 
     #[tokio::test]
@@ -905,7 +1109,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_close_send_obeys_shared_deadline_when_sink_blocks() {
+    async fn test_writer_close_send_obeys_shared_deadline_when_sink_blocks() {
         let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
             .await
             .expect("test server should bind");
@@ -965,7 +1169,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_flush_is_cancelled() {
+    async fn test_pending_flush_is_cancelled() {
         let polled = std::sync::Arc::new(Notify::new());
         let sink = PendingFlush { polled: polled.clone() };
         let token = CancellationToken::new();
@@ -986,7 +1190,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_flush_obeys_deadline() {
+    async fn test_pending_flush_obeys_deadline() {
         let mut sink = PendingFlush {
             polled: std::sync::Arc::new(Notify::new()),
         };
@@ -996,7 +1200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ready_flush_succeeds() {
+    async fn test_ready_flush_succeeds() {
         let mut sink = ReadyFlush(Some(Ok(())));
         let token = CancellationToken::new();
         let result = flush_until(&mut sink, &token, None).await;
@@ -1004,7 +1208,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_flush_is_reported() {
+    async fn test_failed_flush_is_reported() {
         let mut sink = ReadyFlush(Some(Err(std::io::Error::other("injected"))));
         let token = CancellationToken::new();
         let result = flush_until(&mut sink, &token, None).await;
@@ -1012,7 +1216,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_pending_send_shutdown_releases_resources() {
+    async fn test_writer_pending_send_shutdown_releases_resources() {
         let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
             .await
             .expect("test server should bind");
@@ -1069,7 +1273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_pending_send_peer_close_ack_does_not_cancel_session() {
+    async fn test_writer_pending_send_peer_close_ack_does_not_cancel_session() {
         let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
             .await
             .expect("test server should bind");
@@ -1138,17 +1342,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_notify_flush_close_ack_sender_drop_releases_resources() {
+    async fn test_writer_notify_flush_close_ack_sender_drop_releases_resources() {
         assert_notify_flush_peer_close(None, true, false).await;
     }
 
     #[tokio::test]
-    async fn writer_notify_flush_close_ack_uses_expired_server_deadline() {
+    async fn test_writer_notify_flush_close_ack_uses_expired_server_deadline() {
         assert_notify_flush_peer_close(Some(tokio::time::Instant::now()), false, false).await;
     }
 
     #[tokio::test]
-    async fn writer_notify_flush_close_ack_and_cancellation_simultaneously_ready() {
+    async fn test_writer_notify_flush_close_ack_and_cancellation_simultaneously_ready() {
         assert_notify_flush_peer_close(None, false, true).await;
     }
 
