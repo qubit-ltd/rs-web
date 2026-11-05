@@ -68,7 +68,7 @@ impl VisitMut for ResolveSelfType<'_> {
 /// - `path`: Path whose leading `Self` segment may be replaced.
 /// - `self_ty`: Concrete type used as the qualified-self type.
 fn resolve_self_path(qself: &mut Option<syn::QSelf>, path: &mut syn::Path, self_ty: &Type) {
-    if qself.is_some() || !path.segments.first().is_some_and(|segment| segment.ident == "Self") {
+    if qself.is_some() || path.segments.first().is_none_or(|segment| segment.ident != "Self") {
         return;
     }
 
