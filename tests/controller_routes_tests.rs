@@ -35,7 +35,7 @@ use tower::ServiceExt;
 static INVALID_PATH_REGISTER_CALLED: AtomicBool = AtomicBool::new(false);
 
 #[test]
-fn controller_route_errors_have_readable_messages() {
+fn test_controller_route_errors_have_readable_messages() {
     assert_eq!(
         ControllerRouteError::DuplicateMethod {
             method: "GET",
@@ -82,6 +82,37 @@ impl ResponseAssoc for ResponseController {
 }
 
 struct QualifiedController;
+
+struct ConstController;
+
+trait ConstLimit {
+    const N: usize;
+}
+
+impl ConstLimit for ConstController {
+    const N: usize = 4;
+}
+
+impl ConstController {
+    const N: usize = 4;
+
+    async fn plain(&self, Extension(value): Extension<[u8; Self::N]>) -> String {
+        value.len().to_string()
+    }
+}
+
+#[rest_controller("/const-self")]
+impl ConstController {
+    #[get_mapping("")]
+    async fn via_macro(&self, Extension(value): Extension<[u8; Self::N]>) -> String {
+        value.len().to_string()
+    }
+
+    #[get_mapping("/qualified")]
+    async fn via_qualified_macro(&self, Extension(value): Extension<[u8; <Self as ConstLimit>::N]>) -> String {
+        value.len().to_string()
+    }
+}
 
 impl ResponseAssoc for QualifiedController {
     type Value = String;
@@ -147,7 +178,7 @@ impl ResponseController {
 }
 
 #[tokio::test]
-async fn controller_handler_supports_opaque_response_and_self_extractor() {
+async fn test_controller_handler_supports_opaque_response_and_self_extractor() {
     let controller = Arc::new(ResponseController {
         name: "controller-name".to_owned(),
     });
@@ -202,7 +233,7 @@ async fn controller_handler_supports_opaque_response_and_self_extractor() {
 }
 
 #[tokio::test]
-async fn controller_handler_resolves_qualified_self_associated_state() {
+async fn test_controller_handler_resolves_qualified_self_associated_state() {
     let app = ControllerRoutes::<String>::new()
         .add(Arc::new(QualifiedController))
         .unwrap()
@@ -217,6 +248,32 @@ async fn controller_handler_resolves_qualified_self_associated_state() {
         axum::body::to_bytes(response.into_body(), 64).await.unwrap(),
         "associated-state"
     );
+}
+
+#[tokio::test]
+async fn test_controller_handler_resolves_self_in_const_array_length() {
+    let ordinary_result = ConstController.plain(Extension([1_u8; 4])).await;
+    assert_eq!(ordinary_result, "4");
+
+    let app = ControllerRoutes::new()
+        .add(Arc::new(ConstController))
+        .unwrap()
+        .finish()
+        .layer(Extension([1_u8; 4]));
+    let response = app
+        .clone()
+        .oneshot(Request::get("/const-self").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(axum::body::to_bytes(response.into_body(), 64).await.unwrap(), "4");
+
+    let response = app
+        .oneshot(Request::get("/const-self/qualified").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(axum::body::to_bytes(response.into_body(), 64).await.unwrap(), "4");
 }
 
 #[rest_controller("/users")]
@@ -304,7 +361,7 @@ impl BlockingController {
 }
 
 #[tokio::test]
-async fn controller_short_and_stream_routes_use_independent_body_limits() {
+async fn test_controller_short_and_stream_routes_use_independent_body_limits() {
     let users = Arc::new(Users {
         prefix: "user".to_owned(),
     });
@@ -372,7 +429,7 @@ async fn controller_short_and_stream_routes_use_independent_body_limits() {
 }
 
 #[tokio::test]
-async fn controller_admission_deadline_covers_headers_but_not_stream_response_body() {
+async fn test_controller_admission_deadline_covers_headers_but_not_stream_response_body() {
     let controller = ControllerRoutes::new()
         .with_http_limits(
             HttpLimits::default()
@@ -411,7 +468,7 @@ async fn controller_admission_deadline_covers_headers_but_not_stream_response_bo
 }
 
 #[tokio::test]
-async fn controller_stream_admission_rejects_before_handler_and_ws_get_route_remains_available() {
+async fn test_controller_stream_admission_rejects_before_handler_and_ws_get_route_remains_available() {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
@@ -495,7 +552,7 @@ async fn controller_stream_admission_rejects_before_handler_and_ws_get_route_rem
 }
 
 #[tokio::test]
-async fn controller_short_routes_apply_default_body_limit() {
+async fn test_controller_short_routes_apply_default_body_limit() {
     let controller = ControllerRoutes::new()
         .add(Arc::new(Users {
             prefix: "user".to_owned(),
@@ -518,7 +575,7 @@ async fn controller_short_routes_apply_default_body_limit() {
 }
 
 #[tokio::test]
-async fn short_controller_routes_share_the_configured_concurrency_limit() {
+async fn test_short_controller_routes_share_the_configured_concurrency_limit() {
     let started = Arc::new(Semaphore::new(0));
     let release = Arc::new(Semaphore::new(0));
     let controller = Arc::new(BlockingController {
@@ -563,7 +620,7 @@ async fn short_controller_routes_share_the_configured_concurrency_limit() {
 }
 
 #[tokio::test]
-async fn controller_routes_mounts_controller_with_native_extractors() {
+async fn test_controller_routes_mounts_controller_with_native_extractors() {
     let metadata = <Users as qubit_web::mvc::ControllerDefinition<AppState>>::route_metadata();
     assert!(
         metadata
@@ -618,7 +675,7 @@ async fn controller_routes_mounts_controller_with_native_extractors() {
 }
 
 #[test]
-fn route_path_join_normalizes_empty_child_and_root_prefix() {
+fn test_route_path_join_normalizes_empty_child_and_root_prefix() {
     assert_eq!(qubit_web::mvc::join_route_path("/users", "/{id}"), "/users/{id}");
     assert_eq!(qubit_web::mvc::join_route_path("/users", ""), "/users");
     assert_eq!(qubit_web::mvc::join_route_path("/", "/health"), "/health");
@@ -639,7 +696,7 @@ fn test_join_route_path_preserves_documented_slash_boundaries() {
 }
 
 #[tokio::test]
-async fn duplicate_method_and_path_across_controllers_is_reported() {
+async fn test_duplicate_method_and_path_across_controllers_is_reported() {
     struct Duplicate;
     #[rest_controller("/users")]
     impl Duplicate {
@@ -665,7 +722,7 @@ async fn duplicate_method_and_path_across_controllers_is_reported() {
 }
 
 #[test]
-fn parameter_aliases_across_controllers_return_pattern_conflict_without_panicking() {
+fn test_parameter_aliases_across_controllers_return_pattern_conflict_without_panicking() {
     struct NamedUser;
     #[rest_controller("/users")]
     impl NamedUser {
@@ -693,7 +750,7 @@ fn parameter_aliases_across_controllers_return_pattern_conflict_without_panickin
 }
 
 #[test]
-fn parameter_aliases_within_one_controller_return_pattern_conflict() {
+fn test_parameter_aliases_within_one_controller_return_pattern_conflict() {
     struct Aliases;
     #[rest_controller("/users")]
     impl Aliases {
@@ -720,7 +777,7 @@ fn parameter_aliases_within_one_controller_return_pattern_conflict() {
 }
 
 #[test]
-fn wildcard_and_parameter_overlap_returns_pattern_conflict() {
+fn test_wildcard_and_parameter_overlap_returns_pattern_conflict() {
     struct Wildcard;
     #[rest_controller("/files")]
     impl Wildcard {
@@ -751,7 +808,7 @@ fn wildcard_and_parameter_overlap_returns_pattern_conflict() {
 }
 
 #[test]
-fn manually_declared_invalid_path_returns_invalid_path_error() {
+fn test_manually_declared_invalid_path_returns_invalid_path_error() {
     struct InvalidPath;
 
     impl qubit_web::mvc::ControllerDefinition<()> for InvalidPath {
@@ -785,7 +842,7 @@ fn manually_declared_invalid_path_returns_invalid_path_error() {
 }
 
 #[test]
-fn manually_declared_legacy_and_nonabsolute_paths_are_rejected_before_register() {
+fn test_manually_declared_legacy_and_nonabsolute_paths_are_rejected_before_register() {
     macro_rules! invalid_controller {
         ($name:ident, $route_path:literal) => {
             struct $name(Arc<AtomicBool>);
@@ -837,7 +894,7 @@ fn manually_declared_legacy_and_nonabsolute_paths_are_rejected_before_register()
 }
 
 #[test]
-fn route_parameter_limit_accepts_twenty_five_and_final_catch_all() {
+fn test_route_parameter_limit_accepts_twenty_five_and_final_catch_all() {
     const PARAMS: &str = "/{p00}/{p01}/{p02}/{p03}/{p04}/{p05}/{p06}/{p07}/{p08}/{p09}/{p10}/{p11}/{p12}/{p13}/{p14}/{p15}/{p16}/{p17}/{p18}/{p19}/{p20}/{p21}/{p22}/{p23}/{p24}";
     // Each successful boundary is passed through ControllerRoutes::add, which
     // invokes matchit.
@@ -884,7 +941,7 @@ fn route_parameter_limit_accepts_twenty_five_and_final_catch_all() {
 }
 
 #[test]
-fn manually_declared_too_many_route_parameters_are_rejected_before_register() {
+fn test_manually_declared_too_many_route_parameters_are_rejected_before_register() {
     static ROUTES: [qubit_web::mvc::RouteMetadata; 1] = [qubit_web::mvc::RouteMetadata::new(
         "GET",
         "/{p00}/{p01}/{p02}/{p03}/{p04}/{p05}/{p06}/{p07}/{p08}/{p09}/{p10}/{p11}/{p12}/{p13}/{p14}/{p15}/{p16}/{p17}/{p18}/{p19}/{p20}/{p21}/{p22}/{p23}/{p24}/{p25}",
@@ -912,7 +969,7 @@ fn manually_declared_too_many_route_parameters_are_rejected_before_register() {
 }
 
 #[test]
-fn route_parameter_precheck_handles_escaped_braces_prefixes_and_unicode() {
+fn test_route_parameter_precheck_handles_escaped_braces_prefixes_and_unicode() {
     static ROUTES: [qubit_web::mvc::RouteMetadata; 3] = [
         qubit_web::mvc::RouteMetadata::new("GET", "/日本語/{{literal}}/{id}", qubit_web::RouteKind::Short),
         qubit_web::mvc::RouteMetadata::new(
@@ -940,7 +997,7 @@ fn route_parameter_precheck_handles_escaped_braces_prefixes_and_unicode() {
 }
 
 #[tokio::test]
-async fn controller_routes_keep_first_and_last_routes_after_multiple_adds() {
+async fn test_controller_routes_keep_first_and_last_routes_after_multiple_adds() {
     struct Middle;
     #[rest_controller("/middle")]
     impl Middle {
@@ -990,7 +1047,7 @@ async fn controller_routes_keep_first_and_last_routes_after_multiple_adds() {
 }
 
 #[test]
-fn same_path_different_methods_and_static_parameter_paths_can_coexist() {
+fn test_same_path_different_methods_and_static_parameter_paths_can_coexist() {
     struct PostUser;
     #[rest_controller("/users")]
     impl PostUser {

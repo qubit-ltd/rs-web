@@ -139,7 +139,7 @@ let router = ControllerRoutes::<AppState>::new()
 
 This assembles a `Router<()>` ready for `WebServer::serve`. If a handler needs a child component, access it through a field or method on `AppState`; do not rely on `FromRef<Child>` to infer the Controller state. The compile-fail contract for mixed state types is covered by the existing conditional-state UI test.
 
-Controller methods can return opaque response types and use `Self` in extractor types. For example, a method may accept `Extension<Arc<Self>>` and return `impl IntoResponse`, or return `Result<impl IntoResponse, StatusCode>`. The generated route converts the value to Axum's concrete `Response` while the Controller instance remains alive; the method's declared return type does not need to change.
+Controller methods can return opaque response types and use `Self` in extractor types, including const expressions such as `Extension<[u8; Self::N]>` and qualified associated constants such as `Extension<[u8; <Self as BufferLimit>::N]>`. A method may also accept `Extension<Arc<Self>>` and return `impl IntoResponse`, or return `Result<impl IntoResponse, StatusCode>`. The generated route converts the value to Axum's concrete `Response` while the Controller instance remains alive; the method's declared return type does not need to change.
 
 ### Combine Axum extractor limits with request budgets
 
