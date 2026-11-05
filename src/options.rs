@@ -204,6 +204,7 @@ impl ServerOptions {
     /// # Parameters
     ///
     /// * `streams` - Positive concurrent stream limit advertised to each HTTP/2
+    ///   connection.
     /// # Errors
     ///
     /// Returns [`WebServerError::InvalidConfig`] when `streams` is zero.
@@ -216,7 +217,9 @@ impl ServerOptions {
     ///
     /// # Parameters
     ///
-    /// * `timeout` - Graceful shutdown deadline; zero is rejected during
+    /// * `timeout` - Graceful shutdown deadline. The value is stored as-is;
+    ///   zero or an unrepresentable Tokio deadline is rejected by
+    ///   [`validate`](Self::validate).
     /// # Returns
     ///
     /// The updated options.
@@ -234,7 +237,9 @@ impl ServerOptions {
     ///
     /// # Parameters
     ///
-    /// * `timeout` - Header receive deadline; zero or a duration that cannot
+    /// * `timeout` - Header receive deadline. The value is stored as-is; zero
+    ///   or an unrepresentable Tokio deadline is rejected by
+    ///   [`validate`](Self::validate).
     /// # Returns
     ///
     /// The updated options.
@@ -246,11 +251,14 @@ impl ServerOptions {
     /// Sets the maximum idle duration for an HTTP transport connection.
     ///
     /// Active request handlers and response bodies pause this timeout. A zero
-    /// duration is rejected during validation.
+    /// duration or a duration that cannot form a Tokio deadline is rejected
+    /// during validation.
     ///
     /// # Parameters
     ///
-    /// * `timeout` - Idle duration before an inactive transport is closed; it
+    /// * `timeout` - Idle duration before an inactive transport is closed. The
+    ///   value is stored as-is; zero or an unrepresentable Tokio deadline is
+    ///   rejected by [`validate`](Self::validate).
     /// # Returns
     ///
     /// The updated options.
@@ -271,7 +279,8 @@ impl ServerOptions {
     ///
     /// # Parameters
     ///
-    /// * `limit` - Maximum accepted transport connections in
+    /// * `limit` - Maximum accepted transport connections for this server
+    ///   instance, from 1 through `Semaphore::MAX_PERMITS`.
     /// # Returns
     ///
     /// The updated options.
@@ -297,9 +306,9 @@ impl ServerOptions {
     ///
     /// # Errors
     ///
-    /// Returns [`WebServerError::InvalidConfig`] if a timeout is zero, the
-    /// any timeout deadline cannot be represented by Tokio, or
-    /// the transport capacity exceeds `tokio::sync::Semaphore::MAX_PERMITS`.
+    /// Returns [`WebServerError::InvalidConfig`] if a timeout is zero, any
+    /// timeout deadline cannot be represented by Tokio, or the transport
+    /// capacity exceeds `tokio::sync::Semaphore::MAX_PERMITS`.
     pub fn validate(&self) -> Result<(), WebServerError> {
         if self.shutdown_timeout.is_zero()
             || tokio::time::Instant::now().checked_add(self.shutdown_timeout).is_none()

@@ -155,7 +155,9 @@ impl WsUpgradePolicy {
     ///
     /// # Parameters
     ///
-    /// * `limit` - Requested connection capacity. Valid values are positive and
+    /// * `limit` - Requested connection capacity from 1 through
+    ///   `Semaphore::MAX_PERMITS`; other values are stored and rejected by
+    ///   `validate`.
     /// # Returns
     ///
     /// The updated policy; invalid values are reported by `validate`.
@@ -224,10 +226,16 @@ impl WsUpgradePolicy {
 
     /// Sets the outbound queue's simultaneous item and byte limits.
     ///
+    /// Configuration updates use copy-on-write, so existing policy clones
+    /// retain their previous limits. The supplied values are stored as-is and
+    /// checked by [`validate`](Self::validate).
+    ///
     /// # Parameters
     ///
-    /// * `messages` - Positive queue item limit, including in-flight sends.
-    /// * `bytes` - Positive aggregate byte limit for queued and in-flight
+    /// * `messages` - Positive queue item limit, including queued and in-flight
+    ///   sends.
+    /// * `bytes` - Positive aggregate payload byte limit covering queued and
+    ///   in-flight sends.
     /// # Returns
     ///
     /// The updated policy; zero values are reported by `validate`. A later
@@ -241,10 +249,18 @@ impl WsUpgradePolicy {
 
     /// Sets the per-connection inbound queue item and aggregate payload limits.
     ///
+    /// Configuration updates use copy-on-write, so existing policy clones
+    /// retain their previous limits. The supplied values are stored as-is and
+    /// checked by [`validate`](Self::validate).
+    ///
     /// # Parameters
     ///
-    /// * `messages` - Positive channel capacity no greater than Tokio's
-    /// * `bytes` - Positive aggregate payload byte limit for queued messages.
+    /// * `messages` - Positive inbound channel capacity no greater than
+    ///   `Semaphore::MAX_PERMITS`.
+    /// * `bytes` - Positive aggregate payload byte limit for messages queued
+    ///   for delivery, including messages already read but not yet delivered to
+    ///   the application. The byte charge is released when the application
+    ///   receives a message.
     /// # Returns
     ///
     /// The updated policy; invalid values are reported by `validate`.
@@ -257,9 +273,16 @@ impl WsUpgradePolicy {
 
     /// Sets the maximum interval without inbound progress before closing.
     ///
+    /// Configuration updates use copy-on-write, so existing policy clones
+    /// retain their previous timeout. The supplied value is stored as-is and
+    /// checked by [`validate`](Self::validate).
+    ///
     /// # Parameters
     ///
-    /// * `timeout` - Positive maximum interval without a received frame or
+    /// * `timeout` - Positive maximum interval for the reader to await a frame,
+    ///   to deliver a frame while the application channel is full, and for
+    ///   [`WsSession::recv`](super::WsSession::recv) to await an application
+    ///   message. Outbound sends do not refresh the reader's idle deadline.
     /// # Returns
     ///
     /// The updated policy; zero and unrepresentable deadlines are reported by
@@ -288,7 +311,7 @@ impl WsUpgradePolicy {
     /// [`WsPolicyError::ConnectionLimitTooLarge`] when the connection limit
     /// exceeds Semaphore's maximum, or
     /// [`WsPolicyError::InboundQueueLimitTooLarge`] when the inbound queue
-    /// capacity exceeds Tokio's channel limit, or
+    /// message capacity exceeds `Semaphore::MAX_PERMITS`, or
     /// [`WsPolicyError::IdleTimeoutTooLarge`] when the idle timeout cannot form
     /// a Tokio deadline.
     pub fn validate(&self) -> Result<(), WsPolicyError> {
