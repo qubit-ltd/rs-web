@@ -20,6 +20,7 @@ use hyper::rt::Executor;
 use tokio::task::AbortHandle;
 use tokio::task::JoinSet;
 
+use super::connection_diagnostics::record_task_result;
 #[path = "connection_task_executor/task_completion_guard.rs"]
 mod task_completion_guard;
 #[path = "connection_task_executor/task_executor_state.rs"]
@@ -79,8 +80,13 @@ impl ConnectionTaskExecutor {
             return None;
         }
 
+        let mut failed_tasks = Vec::new();
         if let Some(tasks) = state.tasks.as_mut() {
-            while tasks.try_join_next().is_some() {}
+            while let Some(result) = tasks.try_join_next() {
+                if let Err(error) = result {
+                    failed_tasks.push(error);
+                }
+            }
         }
         state.active += 1;
 
@@ -90,13 +96,16 @@ impl ConnectionTaskExecutor {
                 state: Arc::clone(&self.state),
             }),
         };
-        Some(
-            state
-                .tasks
-                .as_mut()
-                .expect("an accepting executor has a task set")
-                .spawn(tracked),
-        )
+        let abort_handle = state
+            .tasks
+            .as_mut()
+            .expect("an accepting executor has a task set")
+            .spawn(tracked);
+        drop(state);
+        for error in failed_tasks {
+            record_task_result(Err(error), "hyper");
+        }
+        Some(abort_handle)
     }
 
     /// Closes task admission and takes ownership of all registered tasks.
@@ -148,8 +157,12 @@ mod tests {
 
     use tokio::sync::Barrier;
     use tokio::sync::Notify;
+    use tokio::sync::oneshot;
     use tokio::time::timeout;
+    use tracing::instrument::WithSubscriber;
 
+    use super::super::connection_diagnostics::tests::SharedLog;
+    use super::super::connection_diagnostics::tests::diagnostic_subscriber;
     use super::ConnectionTaskExecutor;
 
     struct DropSignal(Arc<AtomicBool>);
@@ -194,6 +207,93 @@ mod tests {
 
         assert!(report.completed_by_deadline);
         assert!(executor.spawn(async {}).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_opportunistic_reaping_reports_panic_once_outside_state_lock() {
+        let log = SharedLog::default();
+        let dispatch = diagnostic_subscriber(&log);
+        async {
+            let executor = ConnectionTaskExecutor::new();
+            let (panicked_tx, panicked_rx) = oneshot::channel();
+            executor
+                .spawn(async move {
+                    struct SignalOnDrop(Option<oneshot::Sender<()>>);
+
+                    impl Drop for SignalOnDrop {
+                        fn drop(&mut self) {
+                            let _ = self.0.take().expect("panic signal is sent once").send(());
+                        }
+                    }
+
+                    let _signal = SignalOnDrop(Some(panicked_tx));
+                    panic!("executor-opportunistic-panic-sentinel");
+                })
+                .expect("executor should accept task before shutdown");
+            panicked_rx.await.expect("panic task reached unwinding");
+
+            executor.spawn(async {}).expect("executor should accept task");
+            let after_reaping = log.contents();
+            assert_eq!(
+                after_reaping.matches("connection_task_panic").count(),
+                1,
+                "{after_reaping}"
+            );
+            assert!(after_reaping.contains("task_kind=\"hyper\""), "{after_reaping}");
+
+            let _report = executor
+                .close()
+                .wait_until(tokio::time::Instant::now() + Duration::from_secs(1))
+                .await;
+            let after_close = log.contents();
+            assert_eq!(after_close.matches("connection_task_panic").count(), 1, "{after_close}");
+            assert!(
+                !after_close.contains("executor-opportunistic-panic-sentinel"),
+                "{after_close}"
+            );
+        }
+        .with_subscriber(dispatch)
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_drain_reports_panic_but_not_deadline_cancellation() {
+        let log = SharedLog::default();
+        let dispatch = diagnostic_subscriber(&log);
+        async {
+            let executor = ConnectionTaskExecutor::new();
+            let (panicked_tx, panicked_rx) = oneshot::channel();
+            executor
+                .spawn(async move {
+                    struct SignalOnDrop(Option<oneshot::Sender<()>>);
+
+                    impl Drop for SignalOnDrop {
+                        fn drop(&mut self) {
+                            let _ = self.0.take().expect("panic signal is sent once").send(());
+                        }
+                    }
+
+                    let _signal = SignalOnDrop(Some(panicked_tx));
+                    panic!("executor-shutdown-panic-sentinel");
+                })
+                .expect("executor should accept panicking task");
+            executor
+                .spawn(pending::<()>())
+                .expect("executor should accept pending task");
+            panicked_rx.await.expect("panic task reached unwinding");
+
+            let report = executor
+                .close()
+                .wait_until(tokio::time::Instant::now() + Duration::from_millis(20))
+                .await;
+            assert!(!report.completed_by_deadline);
+            let output = log.contents();
+            assert_eq!(output.matches("connection_task_panic").count(), 1, "{output}");
+            assert!(output.contains("task_kind=\"hyper\""), "{output}");
+            assert!(!output.contains("executor-shutdown-panic-sentinel"), "{output}");
+        }
+        .with_subscriber(dispatch)
+        .await;
     }
 
     #[tokio::test]

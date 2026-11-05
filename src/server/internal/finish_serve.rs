@@ -14,6 +14,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 
 use super::connection_completion::ConnectionCompletion;
+use super::connection_diagnostics::record_task_result;
 use super::connection_task_executor::ConnectionTaskExecutor;
 use super::serve_error;
 use super::server_context::ServerContext;
@@ -55,7 +56,9 @@ pub(super) async fn finish_serve(
             let tracked_tasks = connection_tasks.close();
             connections.abort_all();
             tokio::join!(tracked_tasks.wait_until(shutdown_deadline), async {
-                while connections.join_next().await.is_some() {}
+                while let Some(result) = connections.join_next().await {
+                    record_task_result(result, "transport");
+                }
             },);
             return Err(error);
         }
@@ -75,7 +78,9 @@ pub(super) async fn finish_serve(
     if !graceful {
         connections.abort_all();
     }
-    while connections.join_next().await.is_some() {}
+    while let Some(result) = connections.join_next().await {
+        record_task_result(result, "transport");
+    }
     let report = ShutdownReport {
         graceful,
         forced_connections: None,
@@ -104,13 +109,84 @@ mod tests {
     use tokio::sync::Semaphore;
     use tokio::task::JoinSet;
     use tokio::time::timeout;
+    use tracing::instrument::WithSubscriber;
 
     use super::super::accept_loop::run_accept_loop;
     use super::super::accept_retry::AcceptRetry;
     use super::super::connection_completion::ConnectionCompletion;
+    use super::super::connection_diagnostics::tests::SharedLog;
+    use super::super::connection_diagnostics::tests::diagnostic_subscriber;
     use super::super::connection_task_executor::ConnectionTaskExecutor;
     use super::super::server_context::ServerContext;
     use super::finish_serve;
+
+    async fn completed_panicking_connection() -> JoinSet<()> {
+        struct SignalOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+        impl Drop for SignalOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.take().expect("panic signal is sent once").send(());
+            }
+        }
+
+        let mut connections = JoinSet::new();
+        let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
+        connections.spawn(async move {
+            let _signal = SignalOnDrop(Some(signal_tx));
+            panic!("finish-serve-panic-sentinel");
+        });
+        signal_rx.await.expect("panic task reached unwinding");
+        connections
+    }
+
+    #[tokio::test]
+    async fn test_finish_serve_reports_transport_panic_on_successful_shutdown() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let log = SharedLog::default();
+        let dispatch = diagnostic_subscriber(&log);
+        let result = finish_serve(
+            Arc::new(listener),
+            ServerContext::new(Duration::from_secs(1)),
+            GracefulShutdown::new(),
+            ConnectionCompletion::new(),
+            ConnectionTaskExecutor::new(),
+            completed_panicking_connection().await,
+            None,
+        )
+        .with_subscriber(dispatch)
+        .await
+        .expect("shutdown without accept error succeeds");
+
+        assert_eq!(result.unfinished_managed_sessions, 0);
+        let output = log.contents();
+        assert_eq!(output.matches("connection_task_panic").count(), 1, "{output}");
+        assert!(output.contains("task_kind=\"transport\""), "{output}");
+        assert!(!output.contains("finish-serve-panic-sentinel"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn test_finish_serve_reports_transport_panic_on_begin_shutdown_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let log = SharedLog::default();
+        let dispatch = diagnostic_subscriber(&log);
+        let result = finish_serve(
+            Arc::new(listener),
+            ServerContext::new(Duration::MAX),
+            GracefulShutdown::new(),
+            ConnectionCompletion::new(),
+            ConnectionTaskExecutor::new(),
+            completed_panicking_connection().await,
+            None,
+        )
+        .with_subscriber(dispatch)
+        .await;
+
+        assert!(matches!(result, Err(crate::WebServerError::InvalidConfig)));
+        let output = log.contents();
+        assert_eq!(output.matches("connection_task_panic").count(), 1, "{output}");
+        assert!(output.contains("task_kind=\"transport\""), "{output}");
+        assert!(!output.contains("finish-serve-panic-sentinel"), "{output}");
+    }
 
     #[tokio::test]
     async fn test_finish_serve_reaps_hyper_tasks_when_deadline_overflows() {

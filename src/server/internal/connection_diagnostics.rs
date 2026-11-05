@@ -10,6 +10,27 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use tokio::task::JoinError;
+
+/// Records a panic observed while reaping an owned connection task.
+///
+/// # Parameters
+///
+/// * `result` - Result returned by joining the completed task.
+/// * `task_kind` - Stable label identifying the managed task category.
+pub(super) fn record_task_result(result: Result<(), JoinError>, task_kind: &'static str) {
+    if let Err(error) = result
+        && error.is_panic()
+    {
+        tracing::warn!(
+            target: "qubit_web::transport",
+            event = "connection_task_panic",
+            task_kind,
+            "connection task panicked"
+        );
+    }
+}
+
 /// Counters for sampled connection failures in one `WebServer::serve` call.
 ///
 /// Each failure class has an independent saturating counter. Only powers of
@@ -76,14 +97,90 @@ fn next_sample(counter: &AtomicU64) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
+    use std::io;
+    use std::io::Write;
     use std::sync::Arc;
     use std::sync::Barrier;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicU64;
     use std::thread;
 
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::fmt::MakeWriter;
+
     use super::ConnectionDiagnostics;
     use super::next_sample;
+    use super::record_task_result;
+
+    #[derive(Clone, Default)]
+    pub(in super::super) struct SharedLog(Arc<Mutex<Vec<u8>>>);
+
+    pub(in super::super) struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedLog {
+        type Writer = LogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl SharedLog {
+        pub(in super::super) fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    pub(in super::super) fn diagnostic_subscriber(log: &SharedLog) -> tracing::Dispatch {
+        tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_target(true)
+                .with_ansi(false)
+                .with_writer(log.clone())
+                .finish(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_task_result_reports_only_private_safe_panics() {
+        const PANIC_PAYLOAD: &str = "private-panic-sentinel";
+        let log = SharedLog::default();
+        let dispatch = diagnostic_subscriber(&log);
+        async {
+            let panicked = tokio::spawn(async { panic!("{PANIC_PAYLOAD}") });
+            let panic_result = panicked.await;
+            record_task_result(panic_result, "hyper");
+
+            let successful = tokio::spawn(async {}).await;
+            record_task_result(successful, "transport");
+
+            let aborted = tokio::spawn(std::future::pending::<()>());
+            aborted.abort();
+            let abort_result = aborted.await;
+            record_task_result(abort_result, "hyper");
+        }
+        .with_subscriber(dispatch)
+        .await;
+
+        let output = log.contents();
+        assert_eq!(output.matches("connection_task_panic").count(), 1, "{output}");
+        assert!(output.contains("task_kind=\"hyper\""), "{output}");
+        assert!(output.contains("connection task panicked"), "{output}");
+        assert!(!output.contains(PANIC_PAYLOAD), "{output}");
+    }
 
     #[test]
     fn test_samples_only_powers_of_two_and_saturates() {

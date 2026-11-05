@@ -15,6 +15,7 @@ use tokio::task::JoinSet;
 
 use super::accept_result::AcceptResult;
 use super::accept_retry::AcceptRetry;
+use super::connection_diagnostics::record_task_result;
 use super::server_event::ServerEvent;
 /// Runs accept, shutdown, and connection-reaping coordination until serving
 /// stops.
@@ -93,11 +94,12 @@ pub(super) fn handle_accept_result<T>(retry: &mut AcceptRetry, result: io::Resul
 /// # Type Parameters
 ///
 /// * `A` - Future type supplying the accept event.
-/// * `S` - WebSocket sink type used to send frames.
+/// * `S` - Shutdown signal future with `Output = ()`, resolved when shutdown is
+///   requested.
 /// # Parameters
 ///
 /// * `connections` - Set of connection tasks that must be joined or aborted.
-/// * `shutdown` - Cancellation token that can stop the operation.
+/// * `shutdown` - Future that resolves when the server should stop accepting.
 /// * `accept` - Future waiting for one listener accept result.
 pub(super) async fn select_server_event<A, S>(
     connections: &mut JoinSet<()>,
@@ -112,7 +114,9 @@ where
         biased;
         _ = shutdown => ServerEvent::Shutdown,
         joined = connections.join_next(), if !connections.is_empty() => {
-            let _ = joined;
+            if let Some(result) = joined {
+                record_task_result(result, "transport");
+            }
             ServerEvent::Joined
         }
         accepted = accept => ServerEvent::Accept(accepted),
@@ -137,8 +141,11 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::sync::oneshot;
     use tokio::task::JoinSet;
+    use tracing::instrument::WithSubscriber;
 
     use super::super::accept_retry::AcceptRetry;
+    use super::super::connection_diagnostics::tests::SharedLog;
+    use super::super::connection_diagnostics::tests::diagnostic_subscriber;
     use super::super::server_event::ServerEvent;
     use super::run_accept_loop;
     use super::select_server_event;
@@ -177,6 +184,31 @@ mod tests {
 
         assert!(matches!(event, ServerEvent::Accept("accepted")));
         assert!(connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_panicking_connection_is_reaped_and_accept_continues() {
+        let log = SharedLog::default();
+        let dispatch = diagnostic_subscriber(&log);
+        let mut connections = JoinSet::new();
+        let (panicked_tx, panicked_rx) = oneshot::channel();
+        connections.spawn(async move {
+            let _ = panicked_tx.send(());
+            panic!("accept-loop-panic-sentinel");
+        });
+        panicked_rx.await.expect("connection task started");
+
+        let event = select_server_event(&mut connections, pending(), ready(23))
+            .with_subscriber(dispatch)
+            .await;
+        assert!(matches!(event, ServerEvent::Joined));
+
+        let next_event = select_server_event(&mut connections, pending(), ready(24)).await;
+        assert!(matches!(next_event, ServerEvent::Accept(24)));
+        let output = log.contents();
+        assert_eq!(output.matches("connection_task_panic").count(), 1, "{output}");
+        assert!(output.contains("task_kind=\"transport\""), "{output}");
+        assert!(!output.contains("accept-loop-panic-sentinel"), "{output}");
     }
 
     #[test]

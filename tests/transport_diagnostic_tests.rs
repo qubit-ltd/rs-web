@@ -68,6 +68,10 @@ fn subscriber(log: &SharedLog) -> tracing::Dispatch {
     )
 }
 
+async fn panicking_handler() -> &'static str {
+    panic!("private-handler-panic-sentinel")
+}
+
 async fn serve_http(log: &SharedLog) -> (std::net::SocketAddr, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
     let server = WebServer::bind_http(
         ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_request_header_timeout(Duration::from_millis(150)),
@@ -146,6 +150,68 @@ async fn test_malformed_http_is_sampled_and_normal_http_and_shutdown_are_not_fai
     assert!(output.contains("sampling=\"powers_of_two\""), "{output}");
     assert!(!output.contains(REQUEST_SECRET), "{output}");
     assert!(!output.contains("127.0.0.1"), "{output}");
+}
+
+#[tokio::test]
+async fn test_panicking_http_handler_is_reported_and_server_remains_usable() {
+    const PANIC_PAYLOAD: &str = "private-handler-panic-sentinel";
+    let log = SharedLog::default();
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let app = Router::new()
+        .route("/panic", get(panicking_handler))
+        .route("/ok", get(|| async { "ok" }));
+    let dispatch = subscriber(&log);
+    let span = tracing::dispatcher::with_default(&dispatch, || tracing::info_span!("panic_handler_server"));
+    let task = tokio::spawn(
+        async move {
+            let _ = server
+                .serve(app, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        }
+        .instrument(span)
+        .with_subscriber(dispatch),
+    );
+
+    let mut panicking = TcpStream::connect(address).await.unwrap();
+    panicking
+        .write_all(b"GET /panic HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut panic_response = Vec::new();
+    timeout(Duration::from_secs(2), panicking.read_to_end(&mut panic_response))
+        .await
+        .expect("panicking request connection should close")
+        .unwrap();
+    drop(panicking);
+
+    let mut healthy = TcpStream::connect(address).await.unwrap();
+    healthy
+        .write_all(b"GET /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut healthy_response = Vec::new();
+    timeout(Duration::from_secs(2), healthy.read_to_end(&mut healthy_response))
+        .await
+        .expect("healthy request should finish")
+        .unwrap();
+    assert!(String::from_utf8_lossy(&healthy_response).contains("200 OK"));
+
+    stop(shutdown_tx, task).await;
+    let output = log.contents();
+    let panic_events: Vec<_> = output
+        .lines()
+        .filter(|line| line.contains("event=\"connection_task_panic\""))
+        .collect();
+    assert_eq!(panic_events.len(), 1, "{output}");
+    assert!(panic_events[0].contains("task_kind=\"transport\""), "{output}");
+    assert!(panic_events[0].contains("connection task panicked"), "{output}");
+    assert!(!output.contains(PANIC_PAYLOAD), "{output}");
 }
 
 #[cfg(feature = "tls")]

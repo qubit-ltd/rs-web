@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
+use super::super::connection_diagnostics::record_task_result;
 use super::TaskShutdownReport;
 use super::task_executor_state::TaskExecutorState;
 
@@ -38,14 +39,30 @@ impl TaskShutdown {
     /// * `deadline` - Optional absolute instant that bounds this operation.
     pub(in super::super) async fn wait_until(self, deadline: Instant) -> TaskShutdownReport {
         let Self { mut tasks, state } = self;
-        let wait_result = tokio::time::timeout_at(deadline, async { while tasks.join_next().await.is_some() {} }).await;
+        let mut failed_tasks = Vec::new();
+        let wait_result = tokio::time::timeout_at(deadline, async {
+            while let Some(result) = tasks.join_next().await {
+                if let Err(error) = result {
+                    failed_tasks.push(error);
+                }
+            }
+        })
+        .await;
 
         if wait_result.is_err() {
             let active = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).active;
             if active > 0 {
                 tasks.abort_all();
             }
-            while tasks.join_next().await.is_some() {}
+            while let Some(result) = tasks.join_next().await {
+                if let Err(error) = result {
+                    failed_tasks.push(error);
+                }
+            }
+        }
+
+        for error in failed_tasks {
+            record_task_result(Err(error), "hyper");
         }
 
         let state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
