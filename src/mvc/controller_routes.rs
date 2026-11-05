@@ -53,6 +53,7 @@ impl<S> Default for ControllerRoutes<S>
 where
     S: Clone + Send + Sync + 'static,
 {
+    /// Returns the documented default policy.
     fn default() -> Self {
         Self::new()
     }
@@ -111,6 +112,10 @@ where
     /// Each builder has its own shared admission capacity domain. This policy
     /// is independent from the short-route policy configured by
     /// [`Self::with_http_limits`].
+    /// # Parameters
+    ///
+    /// * `limits` - Stream admission capacity and timeout policy for this
+    ///   router.
     pub fn with_stream_admission_limits(mut self, limits: StreamAdmissionLimits) -> Self {
         self.stream_state = StreamAdmissionState::new(limits);
         self

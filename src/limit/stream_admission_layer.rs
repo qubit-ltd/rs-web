@@ -139,6 +139,11 @@ impl StreamAdmissionLayer {
 /// through body buffering and handler completion up to response headers.
 /// Capacity, size, configuration, read, and timeout failures map to stable
 /// [`WebRejection`] responses.
+/// # Parameters
+///
+/// * `State(state)` - Shared admission limits and capacity semaphore.
+/// * `request` - Incoming request whose body and declared length are checked.
+/// * `next` - Axum continuation that invokes the route handler.
 fn admit_stream_request(
     State(state): State<StreamAdmissionState>,
     request: Request<Body>,
@@ -168,6 +173,12 @@ fn admit_stream_request(
 /// future returns or is cancelled. The admission deadline ends when response
 /// headers are produced; response body streaming is outside this layer's
 /// deadline.
+/// # Parameters
+///
+/// * `request` - Request whose body is buffered before the handler runs.
+/// * `next` - Axum continuation that invokes the route handler.
+/// * `_permit` - Capacity permit held while the handler runs.
+/// * `maximum` - Maximum number of body data bytes to buffer.
 async fn buffer_then_run(
     request: Request<Body>,
     next: Next,
@@ -194,6 +205,10 @@ async fn buffer_then_run(
 /// Checks only a parseable `Content-Length` declaration without consuming the
 /// body. This is a fast rejection path; `buffer_then_run` separately accounts
 /// for streamed bodies whose length is absent or cannot be parsed.
+/// # Parameters
+///
+/// * `request` - Request whose `Content-Length` header is inspected.
+/// * `maximum` - Maximum allowed body size in bytes.
 fn body_exceeds_limit(request: &Request<Body>, maximum: usize) -> bool {
     request
         .headers()

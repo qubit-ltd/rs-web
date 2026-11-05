@@ -112,7 +112,7 @@ fn url(address: std::net::SocketAddr) -> String {
 }
 
 #[tokio::test]
-async fn trusted_wss_handshake_subprotocol_echo_and_close() {
+async fn test_trusted_wss_handshake_subprotocol_echo_and_close() {
     let mut server = start_server().await;
     let mut session = timeout(Duration::from_secs(3), client(roots()).connect(&url(server.address)))
         .await
@@ -141,7 +141,7 @@ async fn trusted_wss_handshake_subprotocol_echo_and_close() {
 }
 
 #[tokio::test]
-async fn empty_exclusive_root_rejects_tls_without_entering_handler() {
+async fn test_empty_exclusive_root_rejects_tls_without_entering_handler() {
     let mut server = start_server().await;
     let error = match timeout(
         Duration::from_secs(3),
@@ -171,7 +171,7 @@ async fn empty_exclusive_root_rejects_tls_without_entering_handler() {
 }
 
 #[tokio::test]
-async fn server_shutdown_terminates_active_wss_session_gracefully() {
+async fn test_server_shutdown_terminates_active_wss_session_gracefully() {
     let mut server = start_server().await;
     let mut session = timeout(Duration::from_secs(3), client(roots()).connect(&url(server.address)))
         .await

@@ -16,6 +16,9 @@ pub enum SessionRegistrationError {
 
 impl fmt::Display for SessionRegistrationError {
     /// Formats the stable registration error message.
+    /// # Parameters
+    ///
+    /// * `formatter` - Formatter receiving the error representation.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ShuttingDown => formatter.write_str("server is shutting down"),

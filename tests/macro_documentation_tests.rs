@@ -117,7 +117,7 @@ fn test_macro_crate_documentation_example_compiles() {
 }
 
 #[test]
-fn impl_cfg_macro_consumer_compiles_with_feature_disabled_and_enabled() {
+fn test_impl_cfg_macro_consumer_compiles_with_feature_disabled_and_enabled() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest = repository.join("tests/fixtures/macro_consumers/impl_cfg/Cargo.toml");
     // Keep nested Cargo builds under the parent test's isolated target directory.
@@ -147,7 +147,7 @@ fn impl_cfg_macro_consumer_compiles_with_feature_disabled_and_enabled() {
 }
 
 #[tokio::test]
-async fn conditional_routes_match_metadata_and_registration() {
+async fn test_conditional_routes_match_metadata_and_registration() {
     use axum::body::Body;
     use axum::http::Request;
     use axum::http::StatusCode;
@@ -190,14 +190,14 @@ async fn conditional_routes_match_metadata_and_registration() {
 }
 
 #[test]
-fn conditional_state_type_is_inferred_from_enabled_methods() {
+fn test_conditional_state_type_is_inferred_from_enabled_methods() {
     let metadata = <ConditionalStateController as ControllerDefinition<ConditionalState>>::route_metadata();
     assert_eq!(metadata.len(), 1);
     assert_eq!(metadata[0].path(), "/conditional-state/enabled");
 }
 
 #[tokio::test]
-async fn distinct_type_paths_can_share_terminal_name() {
+async fn test_distinct_type_paths_can_share_terminal_name() {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;

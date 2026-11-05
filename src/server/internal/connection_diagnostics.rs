@@ -17,10 +17,13 @@ use std::sync::atomic::Ordering;
 /// state.
 #[derive(Default)]
 pub(super) struct ConnectionDiagnostics {
+    /// Internal item implementation detail.
     #[cfg(feature = "tls")]
     tls_handshake_timeouts: AtomicU64,
+    /// Internal item implementation detail.
     #[cfg(feature = "tls")]
     tls_handshake_failures: AtomicU64,
+    /// Internal item implementation detail.
     http_connection_failures: AtomicU64,
 }
 
@@ -42,7 +45,12 @@ impl ConnectionDiagnostics {
         record(&self.http_connection_failures, "http_connection_failed");
     }
 }
-
+/// Records a sampled connection failure diagnostic.
+///
+/// # Parameters
+///
+/// * `counter` - Failure counter whose sample is considered.
+/// * `failure_kind` - Stable label attached to a sampled diagnostic event.
 fn record(counter: &AtomicU64, failure_kind: &'static str) {
     if let Some(failure_count) = next_sample(counter) {
         tracing::debug!(
@@ -54,7 +62,11 @@ fn record(counter: &AtomicU64, failure_kind: &'static str) {
         );
     }
 }
-
+/// Increments a failure counter and returns periodic sample numbers.
+///
+/// # Parameters
+///
+/// * `counter` - Atomic counter used to select periodic diagnostic samples.
 fn next_sample(counter: &AtomicU64) -> Option<u64> {
     let previous = counter
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1))
@@ -74,7 +86,7 @@ mod tests {
     use super::next_sample;
 
     #[test]
-    fn samples_only_powers_of_two_and_saturates() {
+    fn test_samples_only_powers_of_two_and_saturates() {
         let counter = AtomicU64::new(0);
         let samples: Vec<_> = (0..=9).filter_map(|_| next_sample(&counter)).collect();
         assert_eq!(samples, [1, 2, 4, 8]);
@@ -86,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn counters_are_independent_per_kind_and_instance() {
+    fn test_counters_are_independent_per_kind_and_instance() {
         let first = ConnectionDiagnostics::default();
         let second = ConnectionDiagnostics::default();
         first.record_http_connection_failure();
@@ -112,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_counter_updates_are_exact() {
+    fn test_concurrent_counter_updates_are_exact() {
         let counter = Arc::new(AtomicU64::new(0));
         let barrier = Arc::new(Barrier::new(9));
         let workers: Vec<_> = (0..8)

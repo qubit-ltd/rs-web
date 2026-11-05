@@ -18,6 +18,7 @@ use super::connection_completion_state::ConnectionCompletionState;
 /// Shared O(1) record of active transports and their latest completion time.
 #[derive(Clone, Debug, Default)]
 pub(super) struct ConnectionCompletion {
+    /// Internal item implementation detail.
     state: Arc<Mutex<ConnectionCompletionState>>,
 }
 
@@ -36,17 +37,24 @@ impl ConnectionCompletion {
     }
 
     /// Reports whether all registered transports completed by `deadline`.
+    /// # Parameters
+    ///
+    /// * `deadline` - Optional absolute instant that bounds this operation.
     pub(super) fn completed_by(&self, deadline: Instant) -> bool {
         let state = self.lock_state();
         state.active == 0 && state.last_completed.is_none_or(|completed| completed <= deadline)
     }
-
+    /// Records a task completion and updates active counts.
+    ///
+    /// # Parameters
+    ///
+    /// * `completed` - Completion instant used to update active and completed
     pub(super) fn record_completion(&self, completed: Instant) {
         let mut state = self.lock_state();
         state.active = state.active.saturating_sub(1);
         state.last_completed = Some(state.last_completed.map_or(completed, |latest| latest.max(completed)));
     }
-
+    /// Locks the connection completion state.
     fn lock_state(&self) -> std::sync::MutexGuard<'_, ConnectionCompletionState> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -69,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_by_checks_empty_active_early_equal_and_late_states() {
+    fn test_completed_by_checks_empty_active_early_equal_and_late_states() {
         let deadline = Instant::now();
         assert!(tracker(0, None).completed_by(deadline));
         assert!(!tracker(1, None).completed_by(deadline));
@@ -79,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn reverse_completion_order_keeps_latest_completion_time() {
+    fn test_reverse_completion_order_keeps_latest_completion_time() {
         let tracker = tracker(2, None);
         let early = Instant::now();
         let late = early + std::time::Duration::from_millis(1);

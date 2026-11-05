@@ -9,11 +9,16 @@ use tokio::sync::watch;
 
 /// One active request or response-body lifetime.
 pub(in crate::server::web_server) struct ActivityLease {
+    /// Internal item implementation detail.
     active: watch::Sender<usize>,
 }
 
 impl ActivityLease {
     /// Creates a lease from the connection activity counter.
+    /// # Parameters
+    ///
+    /// * `active` - Shared watch sender tracking active request and response
+    ///   bodies.
     pub(super) fn new(active: watch::Sender<usize>) -> Self {
         Self { active }
     }

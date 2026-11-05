@@ -24,6 +24,13 @@ pub(in crate::sse) struct SseConnectionGuard {
 }
 
 impl SseConnectionGuard {
+    /// Constructs the guard or state object from its owned resources.
+    /// # Parameters
+    ///
+    /// * `active_connections` - Shared count decremented when the guard is
+    ///   dropped.
+    /// * `session` - Registered session retained for the SSE connection
+    ///   lifetime.
     pub(in crate::sse) fn new(
         active_connections: Arc<AtomicUsize>,
         session: SessionGuard,
@@ -38,6 +45,7 @@ impl SseConnectionGuard {
 }
 
 impl Drop for SseConnectionGuard {
+    /// Releases the resources owned by this guard.
     fn drop(&mut self) {
         self.active_connections.fetch_sub(1, Ordering::AcqRel);
         self.session.take();

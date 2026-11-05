@@ -50,6 +50,9 @@ impl ConfigOptionsError {
 
 impl fmt::Display for ConfigOptionsError {
     /// Formats a value-safe message naming the invalid configuration key.
+    /// # Parameters
+    ///
+    /// * `formatter` - Formats the destination receiving the error message.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "invalid server configuration field `{}`", self.field)
     }

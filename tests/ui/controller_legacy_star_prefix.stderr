@@ -1,5 +1,5 @@
 error: legacy route parameters are not supported; use `{name}` for parameters and `{*name}` for wildcards
-  --> tests/ui/controller_legacy_star_prefix.rs:14:19
+  --> tests/ui/controller_legacy_star_prefix.rs:12:19
    |
-14 | #[rest_controller("/*scope")]
+12 | #[rest_controller("/*scope")]
    |                   ^^^^^^^^^

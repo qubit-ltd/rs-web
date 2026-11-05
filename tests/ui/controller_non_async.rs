@@ -12,7 +12,9 @@ struct Controller;
 #[rest_controller("/items")]
 impl Controller {
     #[get_mapping("/")]
-    fn list(&self) -> &'static str { "items" }
+    fn list(&self) -> &'static str {
+        "items"
+    }
 }
 
 fn main() {}

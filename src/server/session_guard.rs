@@ -41,6 +41,7 @@ use super::session_tracker::SessionTrackerInner;
 #[derive(Debug)]
 #[must_use]
 pub struct SessionGuard {
+    /// Internal item implementation detail.
     pub(super) inner: Arc<SessionTrackerInner>,
 }
 

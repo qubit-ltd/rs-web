@@ -10,6 +10,9 @@
 const MAX_NON_WILDCARD_PARAMETERS: usize = 25;
 
 /// Checks route path constraints shared by all manually declared controllers.
+/// # Parameters
+///
+/// * `path` - Route path to validate for supported syntax and parameter count.
 pub(in crate::mvc) fn validate_route_path(path: &str) -> Result<(), &'static str> {
     if path.is_empty() {
         return Err("route path must not be empty");
@@ -33,6 +36,9 @@ pub(in crate::mvc) fn validate_route_path(path: &str) -> Result<(), &'static str
 
 /// Counts unescaped named parameters without slicing at potentially non-UTF-8
 /// boundaries.
+/// # Parameters
+///
+/// * `path` - Route template whose non-wildcard parameters are counted.
 fn has_too_many_non_wildcard_parameters(path: &str) -> bool {
     let bytes = path.as_bytes();
     let mut index = 0;

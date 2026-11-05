@@ -38,6 +38,10 @@ pub enum WsSendError {
 }
 
 impl std::fmt::Display for WsSendError {
+    /// Formats the value using its stable diagnostic representation.
+    /// # Parameters
+    ///
+    /// * `formatter` - Destination receiving the formatted send error.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Backpressure => "WebSocket send queue capacity exceeded",

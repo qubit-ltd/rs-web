@@ -34,6 +34,9 @@ impl AcceptRetry {
     ///
     /// Fatal errors and errors after eight already scheduled retries are
     /// retained as terminal errors and return `None`.
+    /// # Parameters
+    ///
+    /// * `error` - Error returned by the underlying I/O or service operation.
     pub(super) fn record_error(&mut self, error: io::Error) -> Option<Instant> {
         if is_fatal_accept_error(&error) || self.failures == 8 {
             self.terminal_error = Some(error);
@@ -73,6 +76,9 @@ impl AcceptRetry {
 
 /// Reports whether an accept error should terminate the accept loop
 /// immediately.
+/// # Parameters
+///
+/// * `error` - Error returned by the underlying I/O or service operation.
 fn is_fatal_accept_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -85,6 +91,9 @@ fn is_fatal_accept_error(error: &io::Error) -> bool {
 
 /// Returns the exponential delay for a retry number in `1..=8`, capped at 1000
 /// ms.
+/// # Parameters
+///
+/// * `retry_number` - One-based retry number used to calculate the delay.
 pub(super) fn accept_retry_delay(retry_number: u32) -> Duration {
     debug_assert!((1..=8).contains(&retry_number));
     Duration::from_millis((10_u64 << (retry_number - 1)).min(1000))

@@ -27,6 +27,16 @@ use crate::WebServerError;
 /// and registered tasks until that deadline. It then snapshots completion
 /// state, aborts unfinished connection tasks when needed, and always joins
 /// them.
+/// # Parameters
+///
+/// * `listener` - Bound TCP listener served by this server.
+/// * `context` - Task context used to register a waker or carry request state.
+/// * `graceful` - Hyper graceful-shutdown watcher for accepted connections.
+/// * `completion` - Shared completion state updated when the guard is dropped.
+/// * `connection_tasks` - Executor tracking Hyper tasks for accepted
+///   connections.
+/// * `connections` - Set of connection tasks that must be joined or aborted.
+/// * `accept_error` - Terminal I/O error returned by the accept loop, if any.
 pub(super) async fn finish_serve(
     listener: Arc<TcpListener>,
     context: ServerContext,

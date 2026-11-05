@@ -11,7 +11,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -46,6 +45,8 @@ mod connection_completion_guard;
 mod connection_completion_state;
 #[path = "internal/connection_diagnostics.rs"]
 mod connection_diagnostics;
+#[path = "internal/connection_settings.rs"]
+mod connection_settings;
 #[path = "internal/connection_task_executor.rs"]
 mod connection_task_executor;
 // Shutdown cleanup is kept separate from the public WebServer API.
@@ -70,6 +71,7 @@ use accept_retry::AcceptRetry;
 use connection_activity::ConnectionActivity;
 use connection_completion::ConnectionCompletion;
 use connection_diagnostics::ConnectionDiagnostics;
+use connection_settings::ConnectionSettings;
 use connection_task_executor::ConnectionTaskExecutor;
 use finish_serve::finish_serve;
 use serve_cancellation_guard::ServeCancellationGuard;
@@ -113,6 +115,11 @@ pub struct WebServer {
 }
 
 impl std::fmt::Debug for WebServer {
+    /// Formats the server's stable identifying state.
+    ///
+    /// # Parameters
+    ///
+    /// * `f` - Formatter receiving the server debug representation.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WebServer")
             .field("local_addr", &self.local_addr)
@@ -126,7 +133,6 @@ impl WebServer {
     /// # Parameters
     ///
     /// * `options` - Validated address, timeouts, and connection-cap policy.
-    ///
     /// # Returns
     ///
     /// A server owning the bound listener and shared shutdown context.
@@ -166,7 +172,6 @@ impl WebServer {
     ///
     /// * `options` - Address and connection policy for the HTTPS listener.
     /// * `config` - TLS credentials and protocol configuration.
-    ///
     /// # Returns
     ///
     /// A server bound to the configured HTTPS address.
@@ -192,7 +197,6 @@ impl WebServer {
     /// * `options` - Validated server policy.
     /// * `listener` - Bound listener prepared for HTTPS.
     /// * `config` - TLS configuration used for incoming handshakes.
-    ///
     /// # Returns
     ///
     /// A server that applies TLS to accepted transport connections.
@@ -271,12 +275,10 @@ impl WebServer {
     /// # Type Parameters
     ///
     /// * `F` - Sendable future that resolves when the host requests shutdown.
-    ///
     /// # Parameters
     ///
     /// * `app` - Axum router serving accepted HTTP and upgraded connections.
     /// * `shutdown` - Host-controlled shutdown notification future.
-    ///
     /// # Returns
     ///
     /// A report describing graceful completion or deadline-forced shutdown.
@@ -427,7 +429,6 @@ impl WebServer {
 /// # Parameters
 ///
 /// * `result` - The result returned by the listener's address query.
-///
 /// # Returns
 ///
 /// The local address, or an error retaining the original I/O source.
@@ -440,7 +441,6 @@ fn local_address_result(result: io::Result<SocketAddr>) -> Result<SocketAddr, We
 /// # Parameters
 ///
 /// * `source` - The original error returned by `TcpListener::accept`.
-///
 /// # Returns
 ///
 /// A serving error that exposes the original I/O error through `source()`.
@@ -448,35 +448,19 @@ fn serve_error(source: io::Error) -> WebServerError {
     WebServerError::ServeFailed { source }
 }
 
-/// Per-connection HTTP settings copied from the listener options.
-#[derive(Clone, Copy)]
-struct ConnectionSettings {
-    /// Deadline for receiving HTTP/1 request headers.
-    request_header_timeout: Duration,
-    /// Maximum duration without an active request or response body.
-    transport_idle_timeout: Duration,
-    /// Maximum concurrent HTTP/2 streams on this connection.
-    http2_max_concurrent_streams: u32,
-    /// Optional maximum HTTP/1 parser buffer size.
-    http1_max_buffer_bytes: Option<usize>,
-    /// Optional HTTP/2 decoded header-list limit.
-    http2_max_header_list_bytes: Option<u32>,
-}
-
 /// Adapts one TCP or TLS stream into an HTTP connection with upgrades enabled.
 ///
 /// # Type Parameters
 ///
 /// * `S` - Asynchronous bidirectional stream used by Hyper.
-///
 /// # Parameters
 ///
 /// * `stream` - Accepted transport stream, optionally after TLS negotiation.
+/// * `peer_addr` - Remote socket address of the accepted connection.
 /// * `app` - Router cloned into each request service call.
 /// * `watcher` - Graceful shutdown watcher for this connection.
 /// * `settings` - Per-connection timeouts and protocol limits.
 /// * `connection_tasks` - Executor registering Hyper tasks so shutdown can wait
-///   for them until the server deadline, then abort and reap them.
 /// * `diagnostics` - Per-serve sampled failure counters.
 async fn serve_connection<S>(
     stream: S,

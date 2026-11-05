@@ -28,6 +28,12 @@ pub(in crate::ws) struct InboundMessage {
 }
 
 impl InboundMessage {
+    /// Constructs the guard or state object from its owned resources.
+    /// # Parameters
+    ///
+    /// * `message` - Inbound WebSocket frame retained for delivery.
+    /// * `bytes` - Buffered byte count charged to inbound state.
+    /// * `state` - Shared inbound accounting state released when the message is
     pub(in crate::ws) fn new(message: Message, bytes: usize, state: Arc<InboundState>) -> Self {
         Self {
             message: Some(message),
@@ -47,6 +53,7 @@ impl InboundMessage {
 }
 
 impl Drop for InboundMessage {
+    /// Releases the resources owned by this guard.
     fn drop(&mut self) {
         self.state.release(self.bytes);
     }

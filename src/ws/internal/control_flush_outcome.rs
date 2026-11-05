@@ -15,5 +15,8 @@ pub(super) enum ControlFlushOutcome {
     /// The peer-close acknowledgment completed before the flush result.
     PeerCloseAcknowledged,
     /// The flush attempt completed, was cancelled, failed, or timed out.
-    Flushed(FlushOutcome),
+    Flushed(
+        /// Result of the control-frame flush attempt.
+        FlushOutcome,
+    ),
 }

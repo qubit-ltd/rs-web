@@ -28,7 +28,9 @@ struct LimitedRequestBody {
 }
 
 impl hyper::body::Body for LimitedRequestBody {
+    /// Internal Data implementation detail.
     type Data = Bytes;
+    /// Internal Error implementation detail.
     type Error = std::io::Error;
 
     /// Polls one frame and rejects data frames that exceed the cumulative

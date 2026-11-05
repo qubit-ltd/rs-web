@@ -33,6 +33,9 @@ impl TaskShutdown {
     /// The report distinguishes completion by the deadline from forced
     /// cancellation. Aborting tasks releases their futures, but does not await
     /// work spawned independently by an application.
+    /// # Parameters
+    ///
+    /// * `deadline` - Optional absolute instant that bounds this operation.
     pub(in super::super) async fn wait_until(self, deadline: Instant) -> TaskShutdownReport {
         let Self { mut tasks, state } = self;
         let wait_result = tokio::time::timeout_at(deadline, async { while tasks.join_next().await.is_some() {} }).await;

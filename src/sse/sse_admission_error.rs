@@ -23,6 +23,7 @@ pub enum SseAdmissionError {
 }
 
 impl IntoResponse for SseAdmissionError {
+    /// Converts this policy rejection into an HTTP response.
     fn into_response(self) -> Response {
         match self {
             Self::CapacityExceeded => WebRejection::CapacityExceeded.into_response(),

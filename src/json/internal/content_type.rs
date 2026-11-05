@@ -67,6 +67,10 @@ fn is_json_media_type(media_type: &str) -> bool {
 }
 
 /// Checks whether a byte is permitted in an HTTP token.
+///
+/// # Parameters
+///
+/// * `byte` - Byte checked against the HTTP token character set.
 #[inline]
 fn is_http_tchar(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)

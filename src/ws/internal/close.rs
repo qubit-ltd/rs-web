@@ -29,9 +29,7 @@ use tokio::time::timeout_at;
 ///
 /// * `deadline` - Mutable per-session deadline slot.
 /// * `server_deadline` - Optional shared server deadline, which takes
-///   precedence.
 /// * `timeout` - Fallback grace period when the server has no deadline.
-///
 /// # Returns
 ///
 /// The earlier of the current and newly computed deadlines.
@@ -76,6 +74,9 @@ pub(in crate::ws) fn server_shutting_down_response() -> Response {
 /// * `close_ack` - Signal receiver completed when the reader observes a close.
 /// * `code` - Protocol close code to send.
 /// * `deadline` - Absolute latest time for sending and acknowledging close.
+/// # Type Parameters
+///
+/// * `S` - WebSocket sink type used to send frames.
 pub(in crate::ws) async fn send_close_and_wait<S>(
     sink: &mut S,
     close_ack: &mut oneshot::Receiver<()>,
@@ -104,7 +105,6 @@ pub(in crate::ws) async fn send_close_and_wait<S>(
 /// # Parameters
 ///
 /// * `code` - WebSocket close status code.
-///
 /// # Returns
 ///
 /// A close message with a reason corresponding to the selected code.
@@ -133,7 +133,7 @@ mod tests {
     use super::get_close_deadline;
 
     #[test]
-    fn fallback_overflow_returns_an_immediate_deadline() {
+    fn test_fallback_overflow_returns_an_immediate_deadline() {
         let deadline = Mutex::new(None);
         let result = get_close_deadline(&deadline, None, Duration::MAX);
 
@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_server_deadline_takes_precedence_over_fallback() {
+    fn test_shared_server_deadline_takes_precedence_over_fallback() {
         let server_deadline = Arc::new(Mutex::new(Some(Instant::now())));
         let expected = *server_deadline.lock().unwrap();
         let deadline = Mutex::new(None);

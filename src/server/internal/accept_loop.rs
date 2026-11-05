@@ -21,6 +21,21 @@ use super::server_event::ServerEvent;
 ///
 /// Shutdown remains biased over ready accepts, and completed tasks are polled
 /// between accepts so a continuously ready listener cannot starve reaping.
+/// # Type Parameters
+///
+/// * `T` - Accepted transport or item type carried by this operation.
+/// * `MakeAccept` - Callback type that creates the listener accept future.
+/// * `AcceptFuture` - Future type returned by the accept callback.
+/// * `OnAccepted` - Callback type that handles an accepted transport.
+/// * `Shutdown` - Future type that resolves when shutdown is requested.
+/// # Parameters
+///
+/// * `connections` - Set of connection tasks that must be joined or aborted.
+/// * `shutdown` - Cancellation token that can stop the operation.
+/// * `retry` - Mutable retry state updated for this accept result.
+/// * `make_accept` - Callback creating the next accept future for a retry
+///   deadline.
+/// * `on_accepted` - Callback that handles each accepted transport and permit.
 pub(super) async fn run_accept_loop<T, MakeAccept, AcceptFuture, OnAccepted, Shutdown>(
     mut connections: JoinSet<()>,
     mut shutdown: Shutdown,
@@ -54,6 +69,13 @@ where
 }
 
 /// Records an accept result and determines whether to continue, retry, or stop.
+/// # Type Parameters
+///
+/// * `T` - Accepted transport or item type carried by this operation.
+/// # Parameters
+///
+/// * `retry` - Mutable retry state updated for this accept result.
+/// * `result` - Result returned by the underlying operation.
 pub(super) fn handle_accept_result<T>(retry: &mut AcceptRetry, result: io::Result<T>) -> AcceptResult<T> {
     match result {
         Ok(accepted) => {
@@ -68,6 +90,15 @@ pub(super) fn handle_accept_result<T>(retry: &mut AcceptRetry, result: io::Resul
 }
 
 /// Selects shutdown, a completed connection task, or the current accept result.
+/// # Type Parameters
+///
+/// * `A` - Future type supplying the accept event.
+/// * `S` - WebSocket sink type used to send frames.
+/// # Parameters
+///
+/// * `connections` - Set of connection tasks that must be joined or aborted.
+/// * `shutdown` - Cancellation token that can stop the operation.
+/// * `accept` - Future waiting for one listener accept result.
 pub(super) async fn select_server_event<A, S>(
     connections: &mut JoinSet<()>,
     shutdown: S,

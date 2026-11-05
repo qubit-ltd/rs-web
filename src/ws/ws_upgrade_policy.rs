@@ -76,6 +76,7 @@ pub struct WsUpgradePolicy {
 }
 
 impl Default for WsUpgradePolicy {
+    /// Returns the documented default policy.
     fn default() -> Self {
         Self::new()
     }
@@ -155,9 +156,6 @@ impl WsUpgradePolicy {
     /// # Parameters
     ///
     /// * `limit` - Requested connection capacity. Valid values are positive and
-    ///   no greater than Semaphore's maximum; a later call replaces this value,
-    ///   including an invalid one.
-    ///
     /// # Returns
     ///
     /// The updated policy; invalid values are reported by `validate`.
@@ -180,11 +178,9 @@ impl WsUpgradePolicy {
     ///
     /// * `I` - Into-iterator of allowed origin values.
     /// * `S` - Origin item convertible into an owned string.
-    ///
     /// # Parameters
     ///
     /// * `origins` - Exact origin strings accepted by the upgrade policy.
-    ///
     /// # Returns
     ///
     /// The updated policy.
@@ -201,7 +197,6 @@ impl WsUpgradePolicy {
     /// # Parameters
     ///
     /// * `limit` - Positive maximum number of bytes in one frame.
-    ///
     /// # Returns
     ///
     /// The updated policy; zero is reported by `validate`. A later call
@@ -217,7 +212,6 @@ impl WsUpgradePolicy {
     /// # Parameters
     ///
     /// * `limit` - Positive maximum bytes in a complete message.
-    ///
     /// # Returns
     ///
     /// The updated policy; zero is reported by `validate`. A later call
@@ -234,8 +228,6 @@ impl WsUpgradePolicy {
     ///
     /// * `messages` - Positive queue item limit, including in-flight sends.
     /// * `bytes` - Positive aggregate byte limit for queued and in-flight
-    ///   sends.
-    ///
     /// # Returns
     ///
     /// The updated policy; zero values are reported by `validate`. A later
@@ -252,9 +244,7 @@ impl WsUpgradePolicy {
     /// # Parameters
     ///
     /// * `messages` - Positive channel capacity no greater than Tokio's
-    ///   maximum.
     /// * `bytes` - Positive aggregate payload byte limit for queued messages.
-    ///
     /// # Returns
     ///
     /// The updated policy; invalid values are reported by `validate`.
@@ -270,9 +260,6 @@ impl WsUpgradePolicy {
     /// # Parameters
     ///
     /// * `timeout` - Positive maximum interval without a received frame or
-    ///   successful delivery of a frame to the application, and a duration that
-    ///   can form a representable Tokio deadline.
-    ///
     /// # Returns
     ///
     /// The updated policy; zero and unrepresentable deadlines are reported by
@@ -345,14 +332,12 @@ impl WsUpgradePolicy {
     ///
     /// * `F` - Handler that consumes the admitted WebSocket session.
     /// * `Fut` - Sendable future returned by the handler.
-    ///
     /// # Parameters
     ///
     /// * `ws` - Axum upgrade extractor for the accepted request.
     /// * `headers` - Request headers used for Origin validation.
     /// * `context` - Server cancellation and shutdown-deadline state.
     /// * `handler` - Application logic that reads and writes the session.
-    ///
     /// # Returns
     ///
     /// An upgrade response or an HTTP rejection for invalid policy, Origin, or
@@ -384,7 +369,6 @@ impl WsUpgradePolicy {
     /// # Parameters
     ///
     /// * `f` - One-shot update to the policy configuration.
-    ///
     /// # Returns
     ///
     /// The policy with the update applied.
@@ -398,7 +382,6 @@ impl WsUpgradePolicy {
     /// # Parameters
     ///
     /// * `headers` - Request headers that may contain an Origin field.
-    ///
     /// # Returns
     ///
     /// `true` when no Origin is present or exactly one allowed value matches.
@@ -427,15 +410,13 @@ impl WsUpgradePolicy {
     ///
     /// * `F` - Handler for the upgraded session.
     /// * `Fut` - Sendable future returned by the handler.
-    ///
     /// # Parameters
     ///
     /// * `ws` - Axum upgrade extractor.
     /// * `headers` - Request headers inspected for Origin.
+    /// * `context` - Server context whose session state is updated.
     /// * `lifecycle` - Cancellation, timeout, deadline, and session accounting
-    ///   values for the upgraded session.
     /// * `handler` - Application session logic.
-    ///
     /// # Returns
     ///
     /// The upgrade response or a rejection response.
@@ -556,7 +537,7 @@ mod tests {
     use super::WsUpgradePolicy;
 
     #[test]
-    fn default_policy_has_valid_finite_limits() {
+    fn test_default_policy_has_valid_finite_limits() {
         assert!(WsUpgradePolicy::default().validate().is_ok());
     }
 }

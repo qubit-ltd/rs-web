@@ -50,6 +50,10 @@ pub struct WsSendQueue {
 }
 
 impl std::fmt::Debug for WsSendQueue {
+    /// Formats the value using its stable diagnostic representation.
+    /// # Parameters
+    ///
+    /// * `f` - Destination receiving the queue summary.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         f.debug_struct("WsSendQueue")
@@ -68,11 +72,7 @@ impl WsSendQueue {
     /// # Parameters
     ///
     /// * `max_messages` - Maximum message capacity, including in-flight sends;
-    ///   zero prevents every send.
     /// * `max_bytes` - Maximum total payload byte capacity. Zero permits
-    ///   zero-byte messages, which still consume message capacity; set
-    ///   `max_messages` to zero to prevent every send.
-    ///
     /// # Returns
     ///
     /// An empty queue with the supplied capacity bounds.
@@ -118,7 +118,6 @@ impl WsSendQueue {
     /// # Parameters
     ///
     /// * `message` - Text, binary, ping, pong, or close message to enqueue.
-    ///
     /// # Returns
     ///
     /// `Ok(())` when accepted into the queue.
@@ -200,7 +199,6 @@ impl WsSendQueue {
 /// # Parameters
 ///
 /// * `message` - WebSocket frame whose queue cost is being calculated.
-///
 /// # Returns
 ///
 /// Payload size in bytes, including the close code when present.
@@ -224,7 +222,7 @@ mod tests {
     use crate::ws::ws_send_error::WsSendError;
 
     #[test]
-    fn oversized_message_is_not_temporary_backpressure() {
+    fn test_oversized_message_is_not_temporary_backpressure() {
         let queue = WsSendQueue::new(4, 3);
         assert_eq!(queue.try_send(Message::text("four")), Err(WsSendError::MessageTooLarge));
         assert!(queue.is_empty());
@@ -236,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_message_precedes_capacity_checks_without_changing_accounting() {
+    fn test_oversized_message_precedes_capacity_checks_without_changing_accounting() {
         let full = WsSendQueue::new(1, 3);
         full.try_send(Message::text("123")).unwrap();
         assert_eq!(full.try_send(Message::text("four")), Err(WsSendError::MessageTooLarge));
@@ -260,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn message_size_boundaries_use_utf8_payload_bytes_and_support_zero_budget() {
+    fn test_message_size_boundaries_use_utf8_payload_bytes_and_support_zero_budget() {
         let five_bytes = WsSendQueue::new(1, 5);
         assert_eq!(
             five_bytes.try_send(Message::text("你好")),
@@ -301,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn close_rejects_new_messages_and_clears_only_pending() {
+    fn test_close_rejects_new_messages_and_clears_only_pending() {
         let queue = WsSendQueue::new(2, 6);
         queue.try_send(Message::text("one")).unwrap();
         queue.try_send(Message::text("two")).unwrap();
@@ -318,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_queue_closes_its_clones() {
+    fn test_closing_a_queue_closes_its_clones() {
         let queue = WsSendQueue::new(2, 6);
         let clone = queue.clone();
 
@@ -328,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_redacts_all_message_payloads() {
+    fn test_debug_redacts_all_message_payloads() {
         use axum::extract::ws::CloseFrame;
 
         const SECRET: &str = "queue-debug-secret-sentinel";
@@ -365,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_reports_shared_accounting_without_messages() {
+    fn test_debug_reports_shared_accounting_without_messages() {
         let queue = WsSendQueue::new(2, 6);
         let snapshot = |len: usize, bytes: usize, closed: bool| {
             for text in [format!("{queue:?}"), format!("{queue:#?}")] {
@@ -389,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_recovers_poisoned_state_without_payloads() {
+    fn test_debug_recovers_poisoned_state_without_payloads() {
         let queue = WsSendQueue::new(1, 1024);
         queue.try_send(Message::text("poison-secret-sentinel")).unwrap();
         let state = queue.state.clone();

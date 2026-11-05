@@ -5,10 +5,13 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+mod controller_method;
 mod controller_model;
 pub(super) mod generate_controller;
 mod mapping_args;
 pub(super) mod parse_controller;
+mod pending_method;
+mod pending_route;
 mod resolve_self_type;
 mod route;
 mod route_args;

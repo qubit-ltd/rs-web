@@ -63,6 +63,12 @@ impl ConnectionTaskExecutor {
     /// Admission and shutdown are serialized by the state lock, so a task is
     /// either registered in the owned `JoinSet` or rejected. Reaped task
     /// futures are destroyed after the registration lock is released.
+    /// # Type Parameters
+    ///
+    /// * `F` - Application future type submitted to the executor.
+    /// # Parameters
+    ///
+    /// * `future` - Application future submitted to the connection executor.
     pub(super) fn spawn<F>(&self, future: F) -> Option<AbortHandle>
     where
         F: Future + Send + 'static,
@@ -122,6 +128,10 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    /// Submits the future to the tracked connection executor.
+    /// # Parameters
+    ///
+    /// * `future` - Connection task registered for completion tracking.
     fn execute(&self, future: F) {
         let _ = self.spawn(future);
     }
@@ -151,7 +161,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn normal_completion_is_joined_before_shutdown_returns() {
+    async fn test_normal_completion_is_joined_before_shutdown_returns() {
         let executor = ConnectionTaskExecutor::new();
         let dropped = Arc::new(AtomicBool::new(false));
         let task_dropped = dropped.clone();
@@ -171,7 +181,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn panic_is_joined_and_does_not_poison_executor_state() {
+    async fn test_panic_is_joined_and_does_not_poison_executor_state() {
         let executor = ConnectionTaskExecutor::new();
         executor
             .spawn(async { panic!("tracked Hyper task panic") })
@@ -187,7 +197,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_task_releases_its_resources_before_shutdown_returns() {
+    async fn test_cancelled_task_releases_its_resources_before_shutdown_returns() {
         let executor = ConnectionTaskExecutor::new();
         let entered = Arc::new(Notify::new());
         let task_entered = entered.clone();
@@ -215,7 +225,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deadline_aborts_and_joins_only_registered_tasks() {
+    async fn test_deadline_aborts_and_joins_only_registered_tasks() {
         let executor = ConnectionTaskExecutor::new();
         let entered = Arc::new(Notify::new());
         let task_entered = entered.clone();
@@ -242,7 +252,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn registration_racing_shutdown_is_rejected_or_joined() {
+    async fn test_registration_racing_shutdown_is_rejected_or_joined() {
         const PRODUCERS: usize = 16;
 
         struct CountDrop(Arc<AtomicUsize>);

@@ -22,6 +22,10 @@ pub(in crate::controller) struct RouteArgs {
 
 impl Parse for RouteArgs {
     /// Parses a path and its optional comma-separated route settings.
+    ///
+    /// # Parameters
+    ///
+    /// - `input`: Attribute argument stream to parse.
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let path = input.parse()?;
         let options = if input.is_empty() {

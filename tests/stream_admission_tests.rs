@@ -67,7 +67,7 @@ impl HttpBody for DataAndTrailersBody {
 }
 
 #[tokio::test]
-async fn admission_preserves_request_trailers() {
+async fn test_admission_preserves_request_trailers() {
     async fn inspect(_: State<()>, request: Request<Body>) -> StatusCode {
         let collected = request.into_body().collect().await.unwrap();
         assert_eq!(collected.trailers().unwrap()["x-check"], "preserved");
@@ -94,7 +94,7 @@ async fn admission_preserves_request_trailers() {
 }
 
 #[tokio::test]
-async fn trailer_body_limit_and_read_failure_keep_admission_rejections() {
+async fn test_trailer_body_limit_and_read_failure_keep_admission_rejections() {
     let calls = Arc::new(AtomicUsize::new(0));
     async fn inspect(State(calls): State<Arc<AtomicUsize>>, request: Request<Body>) -> StatusCode {
         calls.fetch_add(1, Ordering::SeqCst);
@@ -157,7 +157,7 @@ async fn trailer_body_limit_and_read_failure_keep_admission_rejections() {
 }
 
 #[test]
-fn defaults_and_invalid_values_are_stable() {
+fn test_defaults_and_invalid_values_are_stable() {
     let limits = StreamAdmissionLimits::default();
     assert_eq!(limits.max_body_bytes(), DEFAULT_MAX_BODY_BYTES);
     assert_eq!(limits.max_concurrent_admissions(), 256);
@@ -192,7 +192,7 @@ async fn body(response: Response) -> String {
 }
 
 #[tokio::test]
-async fn declared_and_streamed_body_limits_are_checked_before_handler() {
+async fn test_declared_and_streamed_body_limits_are_checked_before_handler() {
     let calls = Arc::new(AtomicUsize::new(0));
     let router = app(StreamAdmissionLimits::default(), calls.clone());
     let declared = router
@@ -232,7 +232,7 @@ async fn declared_and_streamed_body_limits_are_checked_before_handler() {
 }
 
 #[tokio::test]
-async fn over_limit_body_is_rejected_even_when_handler_would_not_read_it() {
+async fn test_over_limit_body_is_rejected_even_when_handler_would_not_read_it() {
     async fn ignore_body(State(calls): State<Arc<AtomicUsize>>) -> &'static str {
         calls.fetch_add(1, Ordering::SeqCst);
         "ignored"
@@ -293,7 +293,7 @@ impl Stream for PendingStream {
 }
 
 #[tokio::test]
-async fn body_read_failure_returns_safe_400_problem() {
+async fn test_body_read_failure_returns_safe_400_problem() {
     let calls = Arc::new(AtomicUsize::new(0));
     let response = app(StreamAdmissionLimits::default(), calls.clone())
         .oneshot(Request::post("/").body(Body::new(FailedBody)).unwrap())
@@ -311,7 +311,7 @@ async fn body_read_failure_returns_safe_400_problem() {
 }
 
 #[tokio::test]
-async fn pending_request_body_times_out_before_handler_runs() {
+async fn test_pending_request_body_times_out_before_handler_runs() {
     let calls = Arc::new(AtomicUsize::new(0));
     let limits = StreamAdmissionLimits::default()
         .with_max_concurrent_admissions(1)
@@ -358,7 +358,7 @@ async fn blocked_with_pending_response(State(gate): State<Gate>) -> Response {
 }
 
 #[tokio::test]
-async fn admission_permit_is_released_after_response_headers() {
+async fn test_admission_permit_is_released_after_response_headers() {
     let gate = Gate {
         entered: Arc::new(tokio::sync::Notify::new()),
         release: Arc::new(tokio::sync::Semaphore::new(0)),
@@ -397,7 +397,7 @@ async fn admission_permit_is_released_after_response_headers() {
 }
 
 #[tokio::test]
-async fn shared_state_limits_admissions_across_router_branches() {
+async fn test_shared_state_limits_admissions_across_router_branches() {
     let gate = Gate {
         entered: Arc::new(tokio::sync::Notify::new()),
         release: Arc::new(tokio::sync::Semaphore::new(0)),
@@ -508,12 +508,12 @@ fn native_string_request(path: &str, size: usize) -> Request<Body> {
 }
 
 #[tokio::test]
-async fn stream_admission_preserves_axum_and_native_bytes_limits() {
+async fn test_stream_admission_preserves_axum_and_native_bytes_limits() {
     assert_native_stream_limit_matrix("/bytes", native_bytes_request).await;
 }
 
 #[tokio::test]
-async fn stream_admission_preserves_axum_and_native_string_limits() {
+async fn test_stream_admission_preserves_axum_and_native_string_limits() {
     assert_native_stream_limit_matrix("/string", native_string_request).await;
 }
 
@@ -547,7 +547,7 @@ fn native_json_request(size: usize) -> Request<Body> {
 
 #[cfg(feature = "json")]
 #[tokio::test]
-async fn stream_admission_preserves_axum_and_native_json_limits() {
+async fn test_stream_admission_preserves_axum_and_native_json_limits() {
     let default_calls = Arc::new(AtomicUsize::new(0));
     let default_response = native_json_router(AxumBodyPolicy::Default, default_calls.clone())
         .oneshot(native_json_request(3 * 1024 * 1024))
@@ -578,7 +578,7 @@ async fn stream_admission_preserves_axum_and_native_json_limits() {
 }
 
 #[tokio::test]
-async fn admission_deadline_covers_handler_but_not_response_body() {
+async fn test_admission_deadline_covers_handler_but_not_response_body() {
     async fn slow() -> &'static str {
         tokio::time::sleep(Duration::from_millis(50)).await;
         "late"

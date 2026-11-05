@@ -144,7 +144,6 @@ impl WsSession {
     /// # Parameters
     ///
     /// * `message` - Outbound WebSocket message to queue.
-    ///
     /// # Returns
     ///
     /// `Ok(())` when the message is accepted.
@@ -185,7 +184,7 @@ impl WsSession {
         self.inbound_state.clear_read_error();
         self.cleanup().await;
     }
-
+    /// Runs the shutdown cleanup for the active WebSocket session.
     async fn cleanup(&mut self) {
         self.queue.close();
         self.shutdown.cancel();
@@ -208,6 +207,9 @@ impl WsSession {
 
 /// Waits for one session task without losing its handle if the caller is
 /// cancelled.
+/// # Parameters
+///
+/// * `slot` - Optional task handle taken from the session slot.
 async fn wait_task(slot: &mut Option<JoinHandle<()>>) {
     if let Some(task) = slot.as_mut() {
         let _ = task.await;
@@ -216,6 +218,7 @@ async fn wait_task(slot: &mut Option<JoinHandle<()>>) {
 }
 
 impl Drop for WsSession {
+    /// Releases the resources owned by this guard.
     fn drop(&mut self) {
         self.queue.close();
         self.shutdown.cancel();
@@ -260,7 +263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_send_forwards_queue_error_and_prefers_session_shutdown() {
+    async fn test_try_send_forwards_queue_error_and_prefers_session_shutdown() {
         let closed = session(tokio::spawn(pending::<()>()), tokio::spawn(pending::<()>()));
         closed.queue.close();
         assert_eq!(closed.try_send(Message::text("oversized")), Err(WsSendError::Closed));
@@ -276,7 +279,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn close_timeout_aborts_and_consumes_only_pending_task() {
+    async fn test_close_timeout_aborts_and_consumes_only_pending_task() {
         let (started_tx, started_rx) = oneshot::channel();
         let writer = tokio::spawn(async move {
             let _ = started_tx.send(());
@@ -297,7 +300,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_close_can_be_retried_after_one_task_was_consumed() {
+    async fn test_cancelled_close_can_be_retried_after_one_task_was_consumed() {
         let (writer_done_tx, writer_done_rx) = oneshot::channel();
         let writer = tokio::spawn(async move {
             let _ = writer_done_tx.send(());
@@ -335,7 +338,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_recv_cleanup_can_be_retried_to_deliver_read_error() {
+    async fn test_cancelled_recv_cleanup_can_be_retried_to_deliver_read_error() {
         let writer = tokio::spawn(async {});
         while !writer.is_finished() {
             yield_now().await;
@@ -374,7 +377,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unrepresentable_recv_deadline_returns_none_and_cleans_up() {
+    async fn test_unrepresentable_recv_deadline_returns_none_and_cleans_up() {
         let (incoming_tx, incoming) = mpsc::channel(1);
         let mut session = WsSession {
             incoming,

@@ -40,6 +40,10 @@ pub enum ControllerRouteError {
 }
 
 impl fmt::Display for ControllerRouteError {
+    /// Formats the value using its stable diagnostic representation.
+    /// # Parameters
+    ///
+    /// * `formatter` - Destination receiving the formatted route error.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DuplicateMethod { method, path } => {

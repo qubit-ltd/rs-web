@@ -324,7 +324,7 @@ async fn read_to_end_stream(reader: &mut OwnedReadHalf, stream_id: u32, deadline
 
 #[tokio::test]
 #[ignore = "bounded transport diagnostic; explicitly run to investigate response backpressure"]
-async fn zero_window_timeout_and_reset_recover_transport_capacity() {
+async fn test_zero_window_timeout_and_reset_recover_transport_capacity() {
     timeout(MAX_TOTAL, zero_window_timeout_and_reset_case())
         .await
         .expect("whole zero-window diagnostic must finish within 10 seconds");
@@ -459,7 +459,7 @@ async fn zero_window_timeout_and_reset_case() {
 
 #[tokio::test]
 #[ignore = "bounded transport diagnostic; normal consumption and WINDOW_UPDATE control"]
-async fn consuming_or_resuming_window_releases_short_and_transport_capacity() {
+async fn test_consuming_or_resuming_window_releases_short_and_transport_capacity() {
     timeout(MAX_TOTAL, consuming_or_resuming_case())
         .await
         .expect("whole consumption/resume diagnostic must finish within 10 seconds");
@@ -510,7 +510,7 @@ async fn consuming_or_resuming_case() {
 
 #[tokio::test]
 #[ignore = "bounded transport diagnostic; active SSE multiplexing and peer-disconnect control"]
-async fn active_sse_progresses_with_short_request_and_disconnect_releases_capacity() {
+async fn test_active_sse_progresses_with_short_request_and_disconnect_releases_capacity() {
     timeout(MAX_TOTAL, active_sse_and_disconnect_case())
         .await
         .expect("whole SSE/disconnect diagnostic must finish within 10 seconds");

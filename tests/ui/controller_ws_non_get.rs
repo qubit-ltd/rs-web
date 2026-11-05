@@ -12,7 +12,9 @@ struct Controller;
 #[rest_controller("/")]
 impl Controller {
     #[post_mapping("/ws", kind = "ws")]
-    async fn websocket(&self) -> &'static str { "websocket" }
+    async fn websocket(&self) -> &'static str {
+        "websocket"
+    }
 }
 
 fn main() {}

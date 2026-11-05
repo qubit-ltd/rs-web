@@ -31,7 +31,7 @@ use tracing::Level;
 use tracing_subscriber::fmt::MakeWriter;
 
 #[tokio::test]
-async fn diagnostic_layer_installs_on_stateless_router() {
+async fn test_diagnostic_layer_installs_on_stateless_router() {
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(Level::INFO)
         .with_writer(std::io::sink)
@@ -49,7 +49,7 @@ async fn diagnostic_layer_installs_on_stateless_router() {
 }
 
 #[test]
-fn explicit_body_diagnostics_report_complete_after_eof() {
+fn test_explicit_body_diagnostics_report_complete_after_eof() {
     let output = capture_body_diagnostic(false, false);
     assert!(
         output.contains("event=\"response_body_end\""),
@@ -72,7 +72,7 @@ fn explicit_body_diagnostics_report_complete_after_eof() {
 }
 
 #[test]
-fn explicit_body_diagnostics_report_body_error_without_error_text() {
+fn test_explicit_body_diagnostics_report_body_error_without_error_text() {
     let output = capture_error_body_diagnostic();
     assert!(
         output.contains("outcome=\"body_error\""),
@@ -174,7 +174,7 @@ fn capture_body_diagnostic(default_layer: bool, empty: bool) -> String {
 }
 
 #[test]
-fn explicit_body_diagnostics_report_empty_body_complete() {
+fn test_explicit_body_diagnostics_report_empty_body_complete() {
     let output = capture_body_diagnostic(false, true);
     assert!(
         output.contains("outcome=\"complete\""),
@@ -188,7 +188,7 @@ fn explicit_body_diagnostics_report_empty_body_complete() {
 }
 
 #[test]
-fn diagnostic_body_preserves_size_hint_and_trailers() {
+fn test_diagnostic_body_preserves_size_hint_and_trailers() {
     let output = Arc::new(Mutex::new(Vec::new()));
     let writer = SharedWriter(output.clone());
     let subscriber = tracing_subscriber::fmt()
@@ -265,7 +265,7 @@ impl HttpBody for TrailerBody {
 }
 
 #[test]
-fn default_diagnostic_layer_does_not_report_body_termination() {
+fn test_default_diagnostic_layer_does_not_report_body_termination() {
     let output = capture_body_diagnostic(true, false);
     assert!(
         !output.contains("response_body_end"),
@@ -274,7 +274,7 @@ fn default_diagnostic_layer_does_not_report_body_termination() {
 }
 
 #[test]
-fn explicit_body_diagnostics_report_drop() {
+fn test_explicit_body_diagnostics_report_drop() {
     let output = capture_dropped_body_diagnostic();
     assert!(
         output.contains("outcome=\"dropped\""),
@@ -314,7 +314,7 @@ fn capture_dropped_body_diagnostic() -> String {
 }
 
 #[tokio::test]
-async fn diagnostic_layer_installs_before_router_state() {
+async fn test_diagnostic_layer_installs_before_router_state() {
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(Level::INFO)
         .with_writer(std::io::sink)
@@ -333,7 +333,7 @@ async fn diagnostic_layer_installs_before_router_state() {
 }
 
 #[test]
-fn diagnostic_formats_only_allowlisted_request_metadata() {
+fn test_diagnostic_formats_only_allowlisted_request_metadata() {
     let diagnostic = RequestDiagnostic::new(
         Method::POST,
         "/users/{id}",
@@ -358,7 +358,7 @@ fn diagnostic_formats_only_allowlisted_request_metadata() {
 }
 
 #[test]
-fn diagnostic_never_accepts_a_full_url_as_the_route_template() {
+fn test_diagnostic_never_accepts_a_full_url_as_the_route_template() {
     assert!(
         RequestDiagnostic::new(
             Method::GET,
@@ -383,7 +383,7 @@ fn test_diagnostic_accepts_dots_inside_segments() {
 }
 
 #[test]
-fn diagnostic_rejects_standalone_dot_segments() {
+fn test_diagnostic_rejects_standalone_dot_segments() {
     for route in ["/a/../b", "/./health"] {
         assert!(
             RequestDiagnostic::new(Method::GET, route, 200, Duration::ZERO, "c1", None,).is_err(),
@@ -394,7 +394,7 @@ fn diagnostic_rejects_standalone_dot_segments() {
 }
 
 #[test]
-fn diagnostic_rejects_query_fragment_and_control_characters_in_routes() {
+fn test_diagnostic_rejects_query_fragment_and_control_characters_in_routes() {
     for route in ["/users?token=secret", "/users#fragment", "/users/\n"] {
         assert!(
             RequestDiagnostic::new(Method::GET, route, 200, Duration::ZERO, "c1", None,).is_err(),
@@ -404,7 +404,7 @@ fn diagnostic_rejects_query_fragment_and_control_characters_in_routes() {
 }
 
 #[test]
-fn diagnostic_rejects_log_control_characters() {
+fn test_diagnostic_rejects_log_control_characters() {
     assert!(
         RequestDiagnostic::new(
             Method::GET,
@@ -419,7 +419,7 @@ fn diagnostic_rejects_log_control_characters() {
 }
 
 #[test]
-fn request_logs_at_info_and_trace_keep_only_allowlisted_fields() {
+fn test_request_logs_at_info_and_trace_keep_only_allowlisted_fields() {
     const QUERY_SECRET: &str = "query-secret-sentinel";
     const AUTH_SECRET: &str = "authorization-secret-sentinel";
     const COOKIE_SECRET: &str = "cookie-secret-sentinel";
@@ -445,7 +445,7 @@ fn request_logs_at_info_and_trace_keep_only_allowlisted_fields() {
 }
 
 #[test]
-fn diagnostic_layer_logs_route_templates_with_dots_inside_segments() {
+fn test_diagnostic_layer_logs_route_templates_with_dots_inside_segments() {
     let output = capture_dotted_route_log();
     for field in ["route=/releases/v1..v2", "status=200"] {
         assert!(output.contains(field), "log omitted {field}: {output}");
@@ -453,7 +453,7 @@ fn diagnostic_layer_logs_route_templates_with_dots_inside_segments() {
 }
 
 #[test]
-fn unmatched_and_fallback_request_logs_use_safe_marker() {
+fn test_unmatched_and_fallback_request_logs_use_safe_marker() {
     const QUERY_SECRET: &str = "unmatched-query-secret-sentinel";
     const AUTH_SECRET: &str = "unmatched-authorization-secret-sentinel";
     const COOKIE_SECRET: &str = "unmatched-cookie-secret-sentinel";

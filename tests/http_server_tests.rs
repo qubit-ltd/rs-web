@@ -272,7 +272,7 @@ async fn test_binds_ephemeral_http_and_serves_router_with_native_404() {
 }
 
 #[test]
-fn rejects_transport_capacity_above_tokio_semaphore_maximum() {
+fn test_rejects_transport_capacity_above_tokio_semaphore_maximum() {
     let max = tokio::sync::Semaphore::MAX_PERMITS;
     let options = ServerOptions::new("127.0.0.1:0".parse().unwrap());
     assert!(matches!(

@@ -82,6 +82,10 @@ impl WebServerError {
 
 impl fmt::Debug for WebServerError {
     /// Formats only the stable error category, omitting the underlying source.
+    /// # Parameters
+    ///
+    /// * `self` - Error category being formatted.
+    /// * `f` - Formatter that receives the stable error category.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::InvalidConfig => "InvalidConfig",
@@ -95,6 +99,10 @@ impl fmt::Debug for WebServerError {
 
 impl fmt::Display for WebServerError {
     /// Formats a value-safe human-readable error message.
+    /// # Parameters
+    ///
+    /// * `self` - Error category being formatted.
+    /// * `f` - Formatter that receives the human-readable error message.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::InvalidConfig => "invalid server configuration",

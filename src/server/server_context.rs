@@ -55,7 +55,6 @@ impl ServerContext {
     /// # Parameters
     ///
     /// * `shutdown_timeout` - Grace period applied after cancellation begins.
-    ///
     /// # Returns
     ///
     /// A context with no registered sessions and no shutdown deadline.
@@ -120,6 +119,9 @@ impl ServerContext {
     }
 
     /// Returns the number of sessions that were still active at an instant.
+    /// # Parameters
+    ///
+    /// * `instant` - Instant at which the active session count is observed.
     pub(crate) fn active_sessions_at(&self, instant: tokio::time::Instant) -> usize {
         self.sessions.active_at(instant)
     }
@@ -193,7 +195,7 @@ mod tests {
     use crate::WebServerError;
 
     #[test]
-    fn begin_shutdown_overflow() {
+    fn test_begin_shutdown_overflow() {
         let context = ServerContext::new(Duration::MAX);
 
         assert!(matches!(context.begin_shutdown(), Err(WebServerError::InvalidConfig)));
@@ -207,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_begin_shutdown_reuses_the_first_deadline() {
+    fn test_repeated_begin_shutdown_reuses_the_first_deadline() {
         let context = ServerContext::new(Duration::from_secs(30));
 
         let first = context.begin_shutdown().expect("first shutdown deadline");

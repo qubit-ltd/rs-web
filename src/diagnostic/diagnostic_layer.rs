@@ -133,6 +133,10 @@ fn record_request(request: Request<axum::body::Body>, next: Next) -> DiagnosticF
 }
 
 /// Records allowlisted request data and wraps the response body observer.
+/// # Parameters
+///
+/// * `request` - Request whose metadata is recorded and body is observed.
+/// * `next` - Axum continuation that produces the response.
 fn record_request_body(request: Request<axum::body::Body>, next: Next) -> DiagnosticFuture {
     Box::pin(async move {
         let method = request.method().clone();

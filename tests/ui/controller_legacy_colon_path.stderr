@@ -1,7 +1,7 @@
 error: legacy route parameters are not supported; use `{name}` for parameters and `{*name}` for wildcards
-  --> tests/ui/controller_legacy_colon_path.rs:15:1
+  --> tests/ui/controller_legacy_colon_path.rs:12:1
    |
-15 | #[rest_controller("/users")]
+12 | #[rest_controller("/users")]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the attribute macro `rest_controller` (in Nightly builds, run with -Z macro-backtrace for more info)

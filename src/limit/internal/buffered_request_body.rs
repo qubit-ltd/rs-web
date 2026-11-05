@@ -48,7 +48,9 @@ impl BufferedRequestBody {
 }
 
 impl Body for BufferedRequestBody {
+    /// Internal Data implementation detail.
     type Data = Bytes;
+    /// Internal Error implementation detail.
     type Error = Infallible;
 
     /// Returns the next buffered frame, skipping empty data and replaying
@@ -58,6 +60,10 @@ impl Body for BufferedRequestBody {
     ///
     /// A data frame, then a trailers frame, or `Poll::Ready(None)` after both
     /// have been consumed. This body returns a ready result on every call.
+    /// # Parameters
+    ///
+    /// * `self` - Pinned body whose next buffered frame is requested.
+    /// * `_` - Task context used to register the current waker.
     fn poll_frame(
         mut self: Pin<&mut Self>,
         _: &mut Context<'_>,
@@ -97,7 +103,7 @@ mod tests {
     use super::BufferedRequestBody;
 
     #[tokio::test]
-    async fn replays_data_then_trailers_and_tracks_remaining_data_size() {
+    async fn test_replays_data_then_trailers_and_tracks_remaining_data_size() {
         let mut trailers = HeaderMap::new();
         trailers.insert("x-check", "preserved".parse().unwrap());
         let mut body = BufferedRequestBody::new(Bytes::from_static(b"abc"), trailers);
@@ -114,7 +120,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replays_trailers_without_data_and_excludes_them_from_size_hint() {
+    async fn test_replays_trailers_without_data_and_excludes_them_from_size_hint() {
         let mut trailers = HeaderMap::new();
         trailers.insert("x-check", "only".parse().unwrap());
         let mut body = BufferedRequestBody::new(Bytes::new(), trailers);

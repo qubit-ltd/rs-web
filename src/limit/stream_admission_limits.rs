@@ -41,8 +41,11 @@ use std::time::Duration;
 #[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamAdmissionLimits {
+    /// Internal item implementation detail.
     max_body_bytes: NonZeroUsize,
+    /// Internal item implementation detail.
     max_concurrent_admissions: NonZeroUsize,
+    /// Internal item implementation detail.
     admission_timeout: Duration,
 }
 

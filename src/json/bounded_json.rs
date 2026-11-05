@@ -75,6 +75,7 @@ where
     S: Send + Sync,
     T: DeserializeOwned,
 {
+    /// Rejection value returned when bounded JSON decoding fails.
     type Rejection = JsonRejection;
 
     /// Decodes a JSON request body under extension-provided or default budgets.

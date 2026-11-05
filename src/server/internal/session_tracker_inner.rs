@@ -10,9 +10,11 @@ use std::sync::Mutex;
 use tokio::sync::watch;
 
 use super::session_state::SessionState;
-
+/// Shared mutable session registration and draining state.
 #[derive(Debug)]
 pub(in crate::server::web_server) struct SessionTrackerInner {
+    /// Internal item implementation detail.
     pub(in crate::server::web_server) state: Mutex<SessionState>,
+    /// Internal item implementation detail.
     pub(in crate::server::web_server) updates: watch::Sender<usize>,
 }

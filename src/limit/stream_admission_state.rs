@@ -41,8 +41,11 @@ use super::stream_admission_limits::StreamAdmissionLimits;
 #[derive(Clone)]
 #[must_use]
 pub struct StreamAdmissionState {
+    /// Internal item implementation detail.
     pub(super) max_body_bytes: usize,
+    /// Internal item implementation detail.
     pub(super) admission_timeout: Duration,
+    /// Internal item implementation detail.
     pub(super) permits: Arc<Semaphore>,
 }
 

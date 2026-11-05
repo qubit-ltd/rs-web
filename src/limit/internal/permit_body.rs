@@ -30,6 +30,7 @@ struct PermitBody {
     deadline: tokio::time::Instant,
     /// Deadline task cancelled when this wrapper finishes or is dropped.
     watcher: Option<JoinHandle<()>>,
+    /// Internal item implementation detail.
     observation: Option<Arc<BodyObservation>>,
 }
 
@@ -57,6 +58,7 @@ impl PermitBody {
 }
 
 impl Drop for PermitBody {
+    /// Releases the resources owned by this guard.
     fn drop(&mut self) {
         let (inner, permit) = self.finish();
         drop(inner);
@@ -66,7 +68,9 @@ impl Drop for PermitBody {
 }
 
 impl hyper::body::Body for PermitBody {
+    /// Internal Data implementation detail.
     type Data = Bytes;
+    /// Internal Error implementation detail.
     type Error = axum::Error;
 
     /// Polls the application body until completion or emits one deadline error.
@@ -239,6 +243,11 @@ impl hyper::body::Body for PermitBody {
 /// The lock decides whether timeout or normal completion wins. The application
 /// body and permit are dropped after releasing the lock so their destructors
 /// cannot block other lifecycle transitions.
+/// # Parameters
+///
+/// * `state` - State read or updated by the operation.
+/// * `deadline` - Absolute instant when the response body times out.
+/// * `observation` - Optional diagnostic recorder for the terminal outcome.
 async fn watch_deadline(
     state: Arc<Mutex<BodyState>>,
     deadline: tokio::time::Instant,

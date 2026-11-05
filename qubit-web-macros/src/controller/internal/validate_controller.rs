@@ -14,7 +14,7 @@ use syn::FnArg;
 use syn::ImplItem;
 
 use super::ControllerModel;
-use super::controller_model::ControllerMethod;
+use super::controller_method::ControllerMethod;
 use crate::controller::cfg_condition;
 use crate::controller::combine_conditions;
 use crate::controller::make_route;
@@ -26,7 +26,12 @@ use crate::controller::validate_path;
 use crate::controller::validate_template;
 use crate::controller::validate_websocket_methods;
 
-/// Resolves route declarations and checks method, path, cfg, and state constraints.
+/// Resolves route declarations and checks method, path, cfg, and state
+/// constraints.
+///
+/// # Parameters
+///
+/// - `model`: Parsed controller model to validate and normalize.
 pub(in crate::controller) fn validate(model: &mut ControllerModel) -> syn::Result<()> {
     validate_path(&model.prefix.value(), true, model.prefix.span())?;
     validate_template(&model.prefix.value(), model.prefix.span())?;

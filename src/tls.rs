@@ -118,7 +118,7 @@ mod tests {
     use super::TlsConfig;
 
     #[tokio::test]
-    async fn wraps_and_clones_an_existing_rustls_config() {
+    async fn test_wraps_and_clones_an_existing_rustls_config() {
         let certificate = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls/cert.pem");
         let key = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls/key.pem");
         let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(certificate, key)

@@ -23,6 +23,7 @@ use activity_lease::ActivityLease;
 /// Shared per-connection request activity counter.
 #[derive(Clone, Debug)]
 pub(super) struct ConnectionActivity {
+    /// Internal item implementation detail.
     active: watch::Sender<usize>,
 }
 
@@ -40,6 +41,9 @@ impl ConnectionActivity {
     }
 
     /// Waits for one full idle interval, restarting whenever activity changes.
+    /// # Parameters
+    ///
+    /// * `timeout` - Maximum duration allowed for the operation.
     pub(super) async fn wait_until_idle_for(&self, timeout: Duration) {
         let mut active = self.active.subscribe();
         loop {
@@ -65,6 +69,10 @@ impl ConnectionActivity {
 }
 
 /// Wraps a response body so its request lease lasts through body completion.
+/// # Parameters
+///
+/// * `body` - HTTP response body whose activity is retained.
+/// * `lease` - Activity lease retained until the body is dropped.
 pub(super) fn retain_response_activity(body: Body, lease: ActivityLease) -> Body {
     if body.is_end_stream() {
         drop(lease);
@@ -74,6 +82,10 @@ pub(super) fn retain_response_activity(body: Body, lease: ActivityLease) -> Body
 }
 
 /// Acquires a request lease from the connection tracker.
+/// # Parameters
+///
+/// * `activity` - Connection activity tracker from which the request lease is
+///   acquired.
 pub(super) fn request_lease(activity: &ConnectionActivity) -> ActivityLease {
     activity.acquire()
 }
@@ -87,7 +99,7 @@ mod tests {
     use super::ConnectionActivity;
 
     #[tokio::test]
-    async fn unrepresentable_idle_deadline_ends_the_wait_immediately() {
+    async fn test_unrepresentable_idle_deadline_ends_the_wait_immediately() {
         timeout(
             Duration::from_millis(100),
             ConnectionActivity::new().wait_until_idle_for(Duration::MAX),

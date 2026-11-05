@@ -83,7 +83,7 @@ mod tests {
     use super::CfgBefore;
 
     #[tokio::test]
-    async fn enabled_impl_conditions_produce_requestable_routes() {
+    async fn test_enabled_impl_conditions_produce_requestable_routes() {
         assert_eq!(<CfgBefore as ControllerDefinition<()>>::route_metadata().len(), 2);
         assert_eq!(<CfgAfter as ControllerDefinition<()>>::route_metadata().len(), 2);
         assert_eq!(<CfgAttrBefore as ControllerDefinition<()>>::route_metadata().len(), 2);

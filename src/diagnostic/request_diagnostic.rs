@@ -110,6 +110,10 @@ impl RequestDiagnostic {
 
 impl fmt::Display for RequestDiagnostic {
     /// Formats the allowlisted metadata as a single log-safe line.
+    /// # Parameters
+    ///
+    /// * `self` - Diagnostic record whose allowlisted fields are formatted.
+    /// * `f` - Formatter that receives the log-safe representation.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,

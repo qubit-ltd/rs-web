@@ -27,6 +27,7 @@ use crate::limit::WebRejection;
 pub struct SseCapacityExceeded;
 
 impl IntoResponse for SseCapacityExceeded {
+    /// Converts this policy rejection into an HTTP response.
     fn into_response(self) -> Response {
         WebRejection::CapacityExceeded.into_response()
     }

@@ -22,6 +22,10 @@ pub(in crate::controller) struct MappingArgs {
 
 impl Parse for MappingArgs {
     /// Parses the path followed by an optional comma-separated option list.
+    ///
+    /// # Parameters
+    ///
+    /// - `input`: Attribute argument stream to parse.
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let path = input.parse()?;
         let options = if input.is_empty() {

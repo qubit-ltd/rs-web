@@ -47,6 +47,10 @@ impl JsonResponseError {
 
 impl fmt::Display for JsonResponseError {
     /// Formats only the stable code, without including serialized input data.
+    /// # Parameters
+    ///
+    /// * `self` - Error whose stable code is formatted.
+    /// * `formatter` - Formatter that receives the error representation.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.code())
     }

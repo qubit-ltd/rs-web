@@ -23,6 +23,7 @@ pub(super) struct TaskCompletionGuard {
 }
 
 impl Drop for TaskCompletionGuard {
+    /// Releases the resources owned by this guard.
     fn drop(&mut self) {
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         state.active = state.active.saturating_sub(1);

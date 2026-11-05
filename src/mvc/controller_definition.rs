@@ -34,6 +34,12 @@ where
     fn route_metadata() -> &'static [RouteMetadata];
 
     /// Adds all routes for one explicitly supplied Controller instance.
+    /// # Parameters
+    ///
+    /// * `self` - Shared controller instance whose routes are being registered.
+    /// * `router` - Router to which the controller's routes are added.
+    /// * `limit_state` - Shared request limit state for registered routes.
+    /// * `stream_state` - Shared stream admission state for registered routes.
     fn register(
         self: Arc<Self>,
         router: Router<S>,

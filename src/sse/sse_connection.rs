@@ -56,6 +56,11 @@ impl SseConnection {
     ///
     /// The guard releases the active-connection reservation and session guard,
     /// then cancels the producer token when the response ends or is dropped.
+    /// # Parameters
+    ///
+    /// * `keep_alive_interval` - Interval between keep-alive comment frames.
+    /// * `guard` - Reservation released when the response stream ends or drops.
+    /// * `cancellation` - Token cancelled when the connection lifetime ends.
     pub(in crate::sse) fn new(
         keep_alive_interval: Duration,
         guard: SseConnectionGuard,

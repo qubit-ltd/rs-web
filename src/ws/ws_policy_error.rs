@@ -39,6 +39,10 @@ pub enum WsPolicyError {
 }
 
 impl std::fmt::Display for WsPolicyError {
+    /// Formats the value using its stable diagnostic representation.
+    /// # Parameters
+    ///
+    /// * `formatter` - Destination receiving the formatted policy error.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
             Self::ZeroLimit => "WebSocket policy limits must be positive",

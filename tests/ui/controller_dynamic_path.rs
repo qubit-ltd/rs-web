@@ -14,7 +14,9 @@ const PATH: &str = "/items";
 #[rest_controller("/items")]
 impl Controller {
     #[get_mapping(PATH)]
-    async fn list(&self) -> &'static str { "items" }
+    async fn list(&self) -> &'static str {
+        "items"
+    }
 }
 
 fn main() {}

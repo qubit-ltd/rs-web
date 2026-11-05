@@ -77,7 +77,7 @@ async fn consume_body(_: Bytes) -> &'static str {
 }
 
 #[tokio::test]
-async fn request_limit_stops_polling_after_the_first_over_limit_frame() {
+async fn test_request_limit_stops_polling_after_the_first_over_limit_frame() {
     let poll_count = Arc::new(AtomicUsize::new(0));
     let body = Body::new(ObservedChunks {
         chunks: VecDeque::from([
@@ -131,7 +131,7 @@ async fn consume_one_frame(mut request: axum::extract::Request) -> &'static str 
 }
 
 #[tokio::test]
-async fn handler_starts_before_the_request_body_reaches_eof() {
+async fn test_handler_starts_before_the_request_body_reaches_eof() {
     let poll_count = Arc::new(AtomicUsize::new(0));
     let body = Body::new(PendingAfterFirst {
         yielded_first: false,
@@ -165,7 +165,7 @@ async fn stateful_handler(State(state): State<AppState>) -> &'static str {
 }
 
 #[tokio::test]
-async fn request_limit_layer_installs_on_router_with_application_state() {
+async fn test_request_limit_layer_installs_on_router_with_application_state() {
     let calls = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route("/", post(stateful_handler))
@@ -182,7 +182,7 @@ async fn request_limit_layer_installs_on_router_with_application_state() {
 }
 
 #[tokio::test]
-async fn declared_and_streamed_body_limits_use_exact_byte_boundaries() {
+async fn test_declared_and_streamed_body_limits_use_exact_byte_boundaries() {
     let app = Router::new().route("/", post(echo)).layer(RequestLimitLayer::new(
         HttpLimits::default().with_max_body_bytes(4).unwrap(),
     ));
@@ -240,7 +240,7 @@ async fn record_side_effect_before_reading(
 }
 
 #[tokio::test]
-async fn streamed_body_limit_can_reject_after_handler_side_effect() {
+async fn test_streamed_body_limit_can_reject_after_handler_side_effect() {
     let side_effects = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route("/", post(record_side_effect_before_reading))
@@ -260,7 +260,7 @@ async fn streamed_body_limit_can_reject_after_handler_side_effect() {
 }
 
 #[tokio::test]
-async fn declared_body_limit_rejects_before_handler_side_effect() {
+async fn test_declared_body_limit_rejects_before_handler_side_effect() {
     let side_effects = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route("/", post(record_side_effect_before_reading))
@@ -287,7 +287,7 @@ async fn ignore_request_body(_: axum::extract::Request) -> &'static str {
 }
 
 #[tokio::test]
-async fn unconsumed_oversized_body_is_not_polled_by_request_limit() {
+async fn test_unconsumed_oversized_body_is_not_polled_by_request_limit() {
     let poll_count = Arc::new(AtomicUsize::new(0));
     let body = Body::new(ObservedChunks {
         chunks: VecDeque::from([Bytes::from_static(b"12345")]),
@@ -306,7 +306,7 @@ async fn unconsumed_oversized_body_is_not_polled_by_request_limit() {
 }
 
 #[test]
-fn zero_byte_limit_is_rejected() {
+fn test_zero_byte_limit_is_rejected() {
     assert!(HttpLimits::default().with_max_body_bytes(0).is_err());
     assert!(HttpLimits::default().with_max_concurrent_requests(0).is_err());
     assert!(
@@ -317,7 +317,7 @@ fn zero_byte_limit_is_rejected() {
 }
 
 #[test]
-fn rejects_unrepresentable_request_timeout() {
+fn test_rejects_unrepresentable_request_timeout() {
     assert!(matches!(
         HttpLimits::default().with_request_timeout(std::time::Duration::MAX),
         Err(qubit_web::WebServerError::InvalidConfig)
@@ -325,7 +325,7 @@ fn rejects_unrepresentable_request_timeout() {
 }
 
 #[test]
-fn rejects_concurrency_above_tokio_semaphore_maximum() {
+fn test_rejects_concurrency_above_tokio_semaphore_maximum() {
     let max = tokio::sync::Semaphore::MAX_PERMITS;
     assert!(HttpLimits::default().with_max_concurrent_requests(0).is_err());
     assert!(HttpLimits::default().with_max_concurrent_requests(1).is_ok());
@@ -337,7 +337,7 @@ fn rejects_concurrency_above_tokio_semaphore_maximum() {
 }
 
 #[test]
-fn infrastructure_rejections_use_stable_problem_json_codes() {
+fn test_infrastructure_rejections_use_stable_problem_json_codes() {
     for (rejection, status, code) in [
         (
             WebRejection::BodyTooLarge,
@@ -363,7 +363,7 @@ fn infrastructure_rejections_use_stable_problem_json_codes() {
 }
 
 #[tokio::test]
-async fn invalid_configuration_rejection_is_stable() {
+async fn test_invalid_configuration_rejection_is_stable() {
     let rejection = WebRejection::InvalidConfiguration;
     assert_eq!(rejection.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(rejection.code(), "invalid_configuration");
@@ -415,7 +415,7 @@ async fn gated_response(app: Router, path: &'static str) -> Result<Response, std
 }
 
 #[tokio::test]
-async fn shared_limit_state_caps_two_native_branches() {
+async fn test_shared_limit_state_caps_two_native_branches() {
     let gate = request_gate();
     let a_calls = Arc::new(AtomicUsize::new(0));
     let b_calls = Arc::new(AtomicUsize::new(0));
@@ -474,7 +474,7 @@ async fn shared_limit_state_caps_two_native_branches() {
 }
 
 #[tokio::test]
-async fn independent_request_layers_do_not_share_capacity() {
+async fn test_independent_request_layers_do_not_share_capacity() {
     let gate = request_gate();
     let a_calls = Arc::new(AtomicUsize::new(0));
     let b_calls = Arc::new(AtomicUsize::new(0));
@@ -533,7 +533,7 @@ async fn blocked_handler(axum::extract::State(gate): axum::extract::State<Reques
 }
 
 #[tokio::test]
-async fn capacity_overflow_returns_immediate_503() {
+async fn test_capacity_overflow_returns_immediate_503() {
     let gate = RequestGate {
         started: Arc::new(tokio::sync::Notify::new()),
         release: Arc::new(tokio::sync::Semaphore::new(0)),
@@ -561,7 +561,7 @@ async fn capacity_overflow_returns_immediate_503() {
 }
 
 #[tokio::test]
-async fn short_request_deadline_returns_gateway_timeout() {
+async fn test_short_request_deadline_returns_gateway_timeout() {
     async fn slow_handler() -> &'static str {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         "too late"
@@ -581,7 +581,7 @@ async fn short_request_deadline_returns_gateway_timeout() {
 }
 
 #[tokio::test]
-async fn permit_is_released_after_final_frame() {
+async fn test_permit_is_released_after_final_frame() {
     let app = Router::new()
         .route(
             "/",
@@ -632,7 +632,7 @@ async fn permit_is_released_after_final_frame() {
 }
 
 #[tokio::test]
-async fn completed_body_stays_finished_after_deadline() {
+async fn test_completed_body_stays_finished_after_deadline() {
     let app = Router::new()
         .route(
             "/",
@@ -665,7 +665,7 @@ async fn completed_body_stays_finished_after_deadline() {
 }
 
 #[tokio::test]
-async fn empty_response_body_releases_short_request_capacity_immediately() {
+async fn test_empty_response_body_releases_short_request_capacity_immediately() {
     let app = Router::new()
         .route("/empty", post(|| async { Response::new(Body::empty()) }))
         .route("/ok", post(|| async { "ok" }))
@@ -761,12 +761,12 @@ fn string_request(size: usize) -> Request<Body> {
 }
 
 #[tokio::test]
-async fn native_bytes_extractor_obeys_axum_and_http_limit_budgets() {
+async fn test_native_bytes_extractor_obeys_axum_and_http_limit_budgets() {
     assert_native_body_limit_matrix(bytes_request).await;
 }
 
 #[tokio::test]
-async fn native_string_extractor_obeys_axum_and_http_limit_budgets() {
+async fn test_native_string_extractor_obeys_axum_and_http_limit_budgets() {
     assert_native_body_limit_matrix(string_request).await;
 }
 
@@ -800,7 +800,7 @@ fn json_request(size: usize) -> Request<Body> {
 
 #[cfg(feature = "json")]
 #[tokio::test]
-async fn native_json_extractor_obeys_axum_and_http_limit_budgets() {
+async fn test_native_json_extractor_obeys_axum_and_http_limit_budgets() {
     let default_calls = Arc::new(AtomicUsize::new(0));
     let default_response = json_body_router(AxumBodyPolicy::Default, default_calls.clone())
         .oneshot(json_request(3 * 1024 * 1024))
@@ -845,7 +845,7 @@ impl hyper::body::Body for FailedResponseBody {
 }
 
 #[tokio::test]
-async fn response_body_error_releases_short_request_capacity() {
+async fn test_response_body_error_releases_short_request_capacity() {
     let app = Router::new()
         .route(
             "/failed",
@@ -877,7 +877,7 @@ async fn response_body_error_releases_short_request_capacity() {
 }
 
 #[tokio::test]
-async fn dropping_unconsumed_response_body_releases_short_request_capacity() {
+async fn test_dropping_unconsumed_response_body_releases_short_request_capacity() {
     let app = Router::new()
         .route("/ok", post(|| async { "ok" }))
         .layer(RequestLimitLayer::new(
@@ -933,7 +933,7 @@ impl Drop for DropObservedResponse {
 }
 
 #[tokio::test]
-async fn unpolled_response_body_deadline_releases_capacity_and_drops_source() {
+async fn test_unpolled_response_body_deadline_releases_capacity_and_drops_source() {
     // A real slow-reader test depends on Hyper and kernel socket buffering to
     // stop polling within a stable time window. Keep this deterministic body-
     // level regression as the reliable gate instead of asserting a platform-
@@ -992,7 +992,7 @@ async fn unpolled_response_body_deadline_releases_capacity_and_drops_source() {
 }
 
 #[tokio::test]
-async fn dropping_response_near_deadline_drops_source_once_and_releases_capacity() {
+async fn test_dropping_response_near_deadline_drops_source_once_and_releases_capacity() {
     let drops = Arc::new(AtomicUsize::new(0));
     let body_drops = drops.clone();
     let limits = HttpLimits::default()
@@ -1039,7 +1039,7 @@ async fn dropping_response_near_deadline_drops_source_once_and_releases_capacity
 }
 
 #[test]
-fn unpolled_response_timeout_is_logged_once_and_keeps_status() {
+fn test_unpolled_response_timeout_is_logged_once_and_keeps_status() {
     let output = Arc::new(Mutex::new(Vec::new()));
     let writer = LimitSharedWriter(output.clone());
     let subscriber = tracing_subscriber::fmt()
@@ -1122,7 +1122,7 @@ impl<'a> MakeWriter<'a> for LimitSharedWriter {
 }
 
 #[tokio::test]
-async fn response_body_deadline_releases_short_request_capacity() {
+async fn test_response_body_deadline_releases_short_request_capacity() {
     let limits = HttpLimits::default()
         .with_max_concurrent_requests(1)
         .unwrap()

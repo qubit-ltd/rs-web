@@ -16,6 +16,10 @@ use super::sse_connection_guard::SseConnectionGuard;
 
 /// Pins the application stream and retains its reservation for the response
 /// lifetime.
+///
+/// # Type Parameters
+///
+/// * `S` - Application event stream exposed as the SSE response body.
 pub(in crate::sse) struct SessionStream<S> {
     /// Pinned source polled by Axum's SSE body.
     stream: Pin<Box<S>>,
@@ -47,8 +51,14 @@ impl<S, E> Stream for SessionStream<S>
 where
     S: Stream<Item = Result<Event, E>>,
 {
+    /// Internal Item implementation detail.
     type Item = Result<Event, E>;
-
+    /// Polls the pinned application stream for its next event.
+    ///
+    /// # Parameters
+    ///
+    /// * `self` - Pinned response stream whose next event is requested.
+    /// * `cx` - Poll context used by the wrapped stream.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         match this.stream.as_mut().poll_next(cx) {
@@ -62,6 +72,7 @@ where
 }
 
 impl<S> Drop for SessionStream<S> {
+    /// Releases the resources owned by this guard.
     fn drop(&mut self) {
         self.guard.take();
     }

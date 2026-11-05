@@ -5,6 +5,7 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+/// Route-path transformation that inserts a required slash.
 pub(in crate::mvc) trait InsertSlash {
     /// Adds a leading slash when the owned route fragment does not already have
     /// one.
@@ -13,6 +14,7 @@ pub(in crate::mvc) trait InsertSlash {
 }
 
 impl InsertSlash for String {
+    /// Adds a slash to the route path when the policy requires it.
     #[inline]
     fn insert_slash(self) -> String {
         if self.starts_with('/') {

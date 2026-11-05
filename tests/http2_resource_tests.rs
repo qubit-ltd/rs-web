@@ -378,7 +378,7 @@ fn append_hpack_string(output: &mut Vec<u8>, value: &[u8]) {
 }
 
 #[tokio::test]
-async fn cleartext_http2_header_list_budget_rejects_oversized_request_and_recovers() {
+async fn test_cleartext_http2_header_list_budget_rejects_oversized_request_and_recovers() {
     let handler_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls = handler_calls.clone();
     let app = Router::new().route(
@@ -460,7 +460,7 @@ async fn cleartext_http2_header_list_budget_rejects_oversized_request_and_recove
 /// Child process entrypoint for the explicitly invoked resource experiment.
 #[tokio::test]
 #[ignore = "child process entrypoint for resource experiment"]
-async fn resource_service_child() {
+async fn test_resource_service_child() {
     let Ok(dir) = std::env::var("RS_WEB_RESOURCE_CHILD_DIR") else {
         return;
     };
@@ -533,7 +533,7 @@ async fn resource_service_child() {
 /// intervals.
 #[tokio::test]
 #[ignore = "bounded, explicit HTTP/2 resource experiment; not a CI threshold"]
-async fn bounded_http2_resource_matrix() {
+async fn test_bounded_http2_resource_matrix() {
     assert!(
         PathBuf::from("/proc/self/status").exists(),
         "RSS measurement requires Linux /proc"
@@ -700,7 +700,7 @@ async fn bounded_http2_resource_matrix() {
 }
 
 #[tokio::test]
-async fn investigates_incomplete_h2_headers_with_active_sse() {
+async fn test_investigates_incomplete_h2_headers_with_active_sse() {
     let (address, shutdown, serving) = start_server().await;
     let (mut reader, mut writer) = begin_h2(address).await;
 
@@ -767,7 +767,7 @@ async fn investigates_incomplete_h2_headers_with_active_sse() {
 }
 
 #[tokio::test]
-async fn incomplete_h2_header_block_on_idle_connection_waits_for_continuation() {
+async fn test_incomplete_h2_header_block_on_idle_connection_waits_for_continuation() {
     let (address, shutdown, serving) = start_server().await;
     let (mut reader, mut writer) = begin_h2(address).await;
 

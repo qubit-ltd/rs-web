@@ -13,7 +13,9 @@ struct Controller;
 #[rest_controller("/items")]
 impl Controller {
     #[route("/", method = "BREW")]
-    async fn list(&self) -> &'static str { "items" }
+    async fn list(&self) -> &'static str {
+        "items"
+    }
 }
 
 fn main() {}

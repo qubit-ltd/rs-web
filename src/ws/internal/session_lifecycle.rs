@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-
+/// Shared close, cancellation, and deadline state for one session.
 #[derive(Clone)]
 pub(in crate::ws) struct SessionLifecycle {
     /// Child cancellation token shared by the session handler and I/O drivers.

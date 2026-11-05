@@ -11,13 +11,18 @@ use quote::quote;
 use syn::ImplItem;
 
 use super::ControllerModel;
-use super::controller_model::ControllerMethod;
+use super::controller_method::ControllerMethod;
 use crate::controller::cfg_attribute;
 use crate::controller::make_handler;
 use crate::controller::method_filter;
 use crate::controller::route_kind;
 
-/// Generates handlers, route metadata, and controller registration implementations.
+/// Generates handlers, route metadata, and controller registration
+/// implementations.
+///
+/// # Parameters
+///
+/// - `model`: Parsed and validated controller model to generate.
 pub(in crate::controller) fn generate(model: ControllerModel) -> syn::Result<TokenStream> {
     let ControllerModel {
         implementation,

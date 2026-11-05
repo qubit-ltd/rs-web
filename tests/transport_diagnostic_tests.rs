@@ -99,7 +99,7 @@ async fn stop(shutdown: oneshot::Sender<()>, task: tokio::task::JoinHandle<()>) 
 }
 
 #[tokio::test]
-async fn malformed_http_is_sampled_and_normal_http_and_shutdown_are_not_failures() {
+async fn test_malformed_http_is_sampled_and_normal_http_and_shutdown_are_not_failures() {
     const REQUEST_SECRET: &str = "request-secret-sentinel";
     let log = SharedLog::default();
     let (address, shutdown, task) = serve_http(&log).await;
@@ -186,7 +186,7 @@ async fn serve_tls(log: &SharedLog) -> (std::net::SocketAddr, oneshot::Sender<()
 
 #[cfg(feature = "tls")]
 #[tokio::test]
-async fn tls_timeout_and_handshake_failure_emit_fixed_private_events() {
+async fn test_tls_timeout_and_handshake_failure_emit_fixed_private_events() {
     const TLS_INPUT_SECRET: &str = "tls-input-secret-sentinel";
     let log = SharedLog::default();
     let (address, shutdown, task) = serve_tls(&log).await;

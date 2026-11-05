@@ -58,6 +58,7 @@ pub struct SseConnectionPolicy {
 }
 
 impl Default for SseConnectionPolicy {
+    /// Returns the documented default policy.
     fn default() -> Self {
         Self {
             max_connections: NonZeroUsize::new(DEFAULT_MAX_CONNECTIONS)

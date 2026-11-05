@@ -19,14 +19,19 @@ use syn::spanned::Spanned;
 use super::MappingArgs;
 use super::RouteArgs;
 use super::controller_model::ControllerModel;
-use super::controller_model::PendingMethod;
-use super::controller_model::PendingRoute;
+use super::pending_method::PendingMethod;
+use super::pending_route::PendingRoute;
 use super::resolve_runtime_path;
 use crate::controller::cfg_attr_contains_mapping;
 use crate::controller::effective_cfg;
 use crate::controller::marker_verb;
 
 /// Reads controller syntax and preserves its declaration and cfg order.
+///
+/// # Parameters
+///
+/// - `args`: Controller attribute argument tokens.
+/// - `input`: Controller implementation tokens.
 pub(in crate::controller) fn parse(args: TokenStream, input: TokenStream) -> syn::Result<ControllerModel> {
     let runtime = resolve_runtime_path()?;
     let axum = quote! { #runtime::__private::axum };
@@ -89,6 +94,11 @@ pub(in crate::controller) fn parse(args: TokenStream, input: TokenStream) -> syn
     })
 }
 
+/// Parses a route mapping attribute, returning `None` for unrelated attributes.
+///
+/// # Parameters
+///
+/// - `attr`: Attribute to parse as a route mapping.
 fn parse_mapping_attribute(attr: &Attribute) -> syn::Result<Option<PendingRoute>> {
     let Some(name) = attr.path().segments.last().map(|segment| segment.ident.to_string()) else {
         return Ok(None);

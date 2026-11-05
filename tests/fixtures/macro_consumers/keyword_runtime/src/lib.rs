@@ -25,10 +25,7 @@ impl Health {
     }
 
     #[get_mapping("/self")]
-    async fn self_extractor(
-        &self,
-        axum::extract::Extension(value): axum::extract::Extension<Arc<Self>>,
-    ) -> String {
+    async fn self_extractor(&self, axum::extract::Extension(value): axum::extract::Extension<Arc<Self>>) -> String {
         let _ = value;
         "ok".to_owned()
     }

@@ -10,6 +10,8 @@ use tokio::time::Instant;
 /// State shared by the transport completion tracker and its guards.
 #[derive(Debug, Default)]
 pub(super) struct ConnectionCompletionState {
+    /// Internal item implementation detail.
     pub(super) active: usize,
+    /// Internal item implementation detail.
     pub(super) last_completed: Option<Instant>,
 }

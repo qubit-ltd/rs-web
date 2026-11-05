@@ -13,7 +13,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 #[test]
-fn heading_anchors_match_markdown_heading_rules() {
+fn test_heading_anchors_match_markdown_heading_rules() {
     let source = "# Transport budgets\n\n# 配置与启动\n\n## Retry\n\n## Retry\n\n## Retry-1\n\n# Use `WsSession`\n\n```md\n# Fake\n```\n";
     let anchors = heading_anchors(source);
 
@@ -32,7 +32,7 @@ fn heading_anchors_match_markdown_heading_rules() {
 }
 
 #[test]
-fn validates_fragments_after_percent_decoding() {
+fn test_validates_fragments_after_percent_decoding() {
     let source = "# 配置与启动\n";
     assert!(validate_fragment(source, "配置与启动").is_ok());
     assert!(validate_fragment(source, "%E9%85%8D%E7%BD%AE%E4%B8%8E%E5%90%AF%E5%8A%A8").is_ok());
@@ -41,7 +41,7 @@ fn validates_fragments_after_percent_decoding() {
 }
 
 #[test]
-fn validates_local_document_links_and_reports_source_line() {
+fn test_validates_local_document_links_and_reports_source_line() {
     let fixture = LinkFixture::new();
     fixture.write("index.md", "first\n[bad](target.md#missing)\n");
     fixture.write("target.md", "# Present\n");
@@ -53,7 +53,7 @@ fn validates_local_document_links_and_reports_source_line() {
 }
 
 #[test]
-fn empty_or_absent_fragments_and_external_urls_are_distinguished() {
+fn test_empty_or_absent_fragments_and_external_urls_are_distinguished() {
     let fixture = LinkFixture::new();
     fixture.write(
         "index.md",
@@ -66,7 +66,7 @@ fn empty_or_absent_fragments_and_external_urls_are_distinguished() {
 }
 
 #[test]
-fn link_to_heading_inside_fenced_or_indented_code_is_rejected() {
+fn test_link_to_heading_inside_fenced_or_indented_code_is_rejected() {
     let fixture = LinkFixture::new();
     fixture.write(
         "index.md",
@@ -86,7 +86,7 @@ fn link_to_heading_inside_fenced_or_indented_code_is_rejected() {
 }
 
 #[test]
-fn duplicate_heading_ids_skip_ids_already_claimed_by_later_headings() {
+fn test_duplicate_heading_ids_skip_ids_already_claimed_by_later_headings() {
     let anchors = heading_anchors("## Retry\n## Retry\n## Retry-1\n");
     assert!(anchors.contains("retry"));
     assert!(anchors.contains("retry-1"));
@@ -94,7 +94,7 @@ fn duplicate_heading_ids_skip_ids_already_claimed_by_later_headings() {
 }
 
 #[test]
-fn heading_slug_uses_visible_text_from_inline_links_and_setext_headings() {
+fn test_heading_slug_uses_visible_text_from_inline_links_and_setext_headings() {
     let anchors = heading_anchors("[Transport](guide.md) `WsSession`\n==============================\n");
     assert!(anchors.contains("transport-wssession"));
 }

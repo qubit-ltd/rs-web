@@ -7,7 +7,6 @@
 // =============================================================================
 //! Inbound WebSocket reader loop.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -19,57 +18,27 @@ use futures_util::stream::SplitStream;
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::time::error::Elapsed;
 use tokio::time::timeout_at;
 use tokio_util::sync::CancellationToken;
 
 use super::DeliveryResult;
-use super::InboundState;
 use super::SessionLifecycle;
-use super::SessionResources;
 use super::close::get_close_deadline;
+use super::reader_context::ReaderContext;
+use super::reader_wait_result::ReaderWaitResult;
 use crate::ws::internal::CloseQueueOnDrop;
 use crate::ws::ws_send_queue::WsSendQueue;
-
-enum ReaderWaitResult {
-    /// A wait with a representable deadline; the nested result distinguishes
-    /// timeout, stream end, received frame, and stream read error.
-    Timed(Result<Option<Result<Message, Error>>, Elapsed>),
-    /// No idle deadline could be represented by Tokio's clock. This is a
-    /// clock-range condition, not evidence that the deadline elapsed.
-    IdleDeadlineUnrepresentable,
-}
-
 /// Selects the shutdown deadline when present, otherwise computes an idle
 /// deadline. `None` means the idle deadline overflowed and was not created.
+/// # Parameters
+///
+/// * `shutdown_deadline` - Absolute server-shutdown deadline, when one is
+/// * `idle_timeout` - Maximum duration allowed without inbound activity.
 fn reader_deadline(
     shutdown_deadline: Option<tokio::time::Instant>,
     idle_timeout: Duration,
 ) -> Option<tokio::time::Instant> {
     shutdown_deadline.or_else(|| tokio::time::Instant::now().checked_add(idle_timeout))
-}
-
-/// Reader-owned state and resources retained for the entire reader task.
-pub(in crate::ws) struct ReaderContext {
-    /// Mutable state used to wrap inbound messages.
-    inbound_state: Arc<InboundState>,
-    /// Keeps the connection permit and session guard alive until this task
-    /// exits.
-    _resources: Arc<SessionResources>,
-}
-
-impl ReaderContext {
-    /// Creates reader context while retaining the connection's shared
-    /// resources.
-    ///
-    /// The permit and session guard are released when the reader and writer
-    /// tasks have both dropped their references to the shared resources.
-    pub(in crate::ws) fn new(inbound_state: Arc<InboundState>, resources: Arc<SessionResources>) -> Self {
-        Self {
-            inbound_state,
-            _resources: resources,
-        }
-    }
 }
 
 /// Receives frames, applies idle/shutdown deadlines, and forwards input to the
@@ -80,11 +49,10 @@ impl ReaderContext {
 /// * `stream` - Socket half read by the session task.
 /// * `incoming` - Bounded channel used to deliver frames to the application.
 /// * `queue` - Shared outbound queue used to wake the writer and reject sends
-///   after the reader exits.
 /// * `lifecycle` - Shared cancellation, close-code and deadline policy.
 /// * `close_ack` - Signal used to coordinate peer close acknowledgement.
 /// * `idle_timeout` - Maximum time without a received frame or successful
-///   delivery to the application before shutdown.
+/// * `context` - Server context whose session state is updated.
 pub(in crate::ws) async fn reader_loop(
     mut stream: SplitStream<WebSocket>,
     incoming: mpsc::Sender<super::InboundMessage>,
@@ -233,7 +201,6 @@ pub(in crate::ws) async fn reader_loop(
 /// # Parameters
 ///
 /// * `error` - Read failure wrapped by Axum.
-///
 /// # Returns
 ///
 /// `1009` for an oversized message, or `1002` otherwise.
@@ -252,6 +219,12 @@ fn close_code_for_read_error(error: &Error) -> u16 {
 }
 
 /// Applies the state transition for one attempted inbound delivery.
+/// # Parameters
+///
+/// * `delivery` - Result of attempting to forward one inbound frame.
+/// * `queue` - Outbound queue closed when inbound delivery terminates.
+/// * `lifecycle` - Shared shutdown and close state for this session.
+/// * `deadline` - Absolute instant that bounds the wait or operation.
 fn handle_delivery(
     delivery: DeliveryResult,
     queue: &WsSendQueue,
@@ -294,7 +267,6 @@ fn handle_delivery(
 /// * `shutdown` - Token that interrupts delivery during shutdown.
 /// * `message` - Frame or read error to deliver.
 /// * `idle_timeout` - Maximum time the application channel may remain full.
-///
 /// # Returns
 ///
 /// The outcome of delivery, cancellation, receiver closure, or timeout.
@@ -353,12 +325,12 @@ mod tests {
     }
 
     #[test]
-    fn unrepresentable_reader_idle_deadline_is_detected() {
+    fn test_unrepresentable_reader_idle_deadline_is_detected() {
         assert!(reader_deadline(None, Duration::MAX).is_none());
     }
 
     #[tokio::test]
-    async fn unrepresentable_delivery_deadline_uses_the_timeout_path() {
+    async fn test_unrepresentable_delivery_deadline_uses_the_timeout_path() {
         let state = Arc::new(InboundState::new(8));
         let message = state
             .try_wrap(Message::Text("payload".into()))

@@ -27,7 +27,7 @@ fn config_with(address: &str, shutdown_timeout_ms: u64) -> Config {
 }
 
 #[tokio::test]
-async fn maps_loopback_address_and_accepts_a_valid_shutdown_timeout() {
+async fn test_maps_loopback_address_and_accepts_a_valid_shutdown_timeout() {
     let mut config = config_with("127.0.0.1:0", 2500);
     config.set("http.max_body_bytes", 4096u64).unwrap();
     config.set("http.max_concurrent_requests", 8u64).unwrap();
@@ -59,7 +59,7 @@ async fn maps_loopback_address_and_accepts_a_valid_shutdown_timeout() {
 }
 
 #[test]
-fn parses_optional_protocol_header_budgets_and_reports_field_errors() {
+fn test_parses_optional_protocol_header_budgets_and_reports_field_errors() {
     let mut config = Config::new();
     config.set("address", "127.0.0.1:0").unwrap();
     config.set("transport.http1_max_buffer_bytes", 8192u64).unwrap();
@@ -105,7 +105,7 @@ fn parses_optional_protocol_header_budgets_and_reports_field_errors() {
 }
 
 #[tokio::test]
-async fn configured_http_limits_apply_when_attached_to_a_router_branch() {
+async fn test_configured_http_limits_apply_when_attached_to_a_router_branch() {
     let mut config = config_with("127.0.0.1:0", 2500);
     config.set("http.max_body_bytes", 3u64).unwrap();
     let configured = ConfiguredWeb::from_config(&config).unwrap();
@@ -122,7 +122,7 @@ async fn configured_http_limits_apply_when_attached_to_a_router_branch() {
 }
 
 #[tokio::test]
-async fn configured_http1_buffer_budget_is_applied_by_the_server() {
+async fn test_configured_http1_buffer_budget_is_applied_by_the_server() {
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpStream;
@@ -156,7 +156,7 @@ async fn configured_http1_buffer_budget_is_applied_by_the_server() {
 }
 
 #[tokio::test]
-async fn configured_limits_do_not_change_an_unlayered_native_router() {
+async fn test_configured_limits_do_not_change_an_unlayered_native_router() {
     let mut config = config_with("127.0.0.1:0", 2500);
     config.set("http.max_body_bytes", 3u64).unwrap();
     let configured = ConfiguredWeb::from_config(&config).unwrap();
@@ -172,7 +172,7 @@ async fn configured_limits_do_not_change_an_unlayered_native_router() {
 }
 
 #[test]
-fn uses_the_standard_shutdown_timeout_when_omitted() {
+fn test_uses_the_standard_shutdown_timeout_when_omitted() {
     let mut config = Config::new();
     config.set("address", "127.0.0.1:0").unwrap();
 
@@ -190,7 +190,7 @@ fn uses_the_standard_shutdown_timeout_when_omitted() {
 }
 
 #[test]
-fn configures_request_header_timeout_from_milliseconds() {
+fn test_configures_request_header_timeout_from_milliseconds() {
     let mut config = Config::new();
     config.set("address", "127.0.0.1:0").unwrap();
     config.set("transport.request_header_timeout_ms", 2500u64).unwrap();
@@ -201,7 +201,7 @@ fn configures_request_header_timeout_from_milliseconds() {
 }
 
 #[test]
-fn rejects_zero_or_malformed_request_header_timeout_by_field() {
+fn test_rejects_zero_or_malformed_request_header_timeout_by_field() {
     for malformed in [false, true] {
         let mut config = Config::new();
         config.set("address", "127.0.0.1:0").unwrap();
@@ -221,7 +221,7 @@ fn rejects_zero_or_malformed_request_header_timeout_by_field() {
 }
 
 #[test]
-fn reports_unrepresentable_request_header_timeout_by_field() {
+fn test_reports_unrepresentable_request_header_timeout_by_field() {
     let timeout = std::time::Duration::from_millis(u64::MAX);
     let representable = tokio::time::Instant::now().checked_add(timeout).is_some();
     let mut config = Config::new();
@@ -241,7 +241,7 @@ fn reports_unrepresentable_request_header_timeout_by_field() {
 }
 
 #[test]
-fn rejects_an_invalid_address_without_echoing_its_value() {
+fn test_rejects_an_invalid_address_without_echoing_its_value() {
     let config = config_with("private-address-sentinel", 1000);
 
     let error = ConfiguredWeb::from_config(&config).unwrap_err();
@@ -251,7 +251,7 @@ fn rejects_an_invalid_address_without_echoing_its_value() {
 }
 
 #[test]
-fn rejects_configuration_values_with_the_wrong_type() {
+fn test_rejects_configuration_values_with_the_wrong_type() {
     let mut config = Config::new();
     config.set("address", 123u64).unwrap();
     assert_eq!(ConfiguredWeb::from_config(&config).unwrap_err().field(), "address");
@@ -274,7 +274,7 @@ fn rejects_configuration_values_with_the_wrong_type() {
 }
 
 #[test]
-fn reports_a_malformed_limit_by_field_without_echoing_its_value() {
+fn test_reports_a_malformed_limit_by_field_without_echoing_its_value() {
     let mut config = Config::new();
     config.set("address", "127.0.0.1:0").unwrap();
     config
@@ -291,7 +291,7 @@ fn reports_a_malformed_limit_by_field_without_echoing_its_value() {
 }
 
 #[test]
-fn rejects_a_zero_shutdown_timeout() {
+fn test_rejects_a_zero_shutdown_timeout() {
     let config = config_with("127.0.0.1:0", 0);
 
     let error = ConfiguredWeb::from_config(&config).unwrap_err();
@@ -300,7 +300,7 @@ fn rejects_a_zero_shutdown_timeout() {
 }
 
 #[test]
-fn rejects_zero_http_limits_and_preserves_the_field_path() {
+fn test_rejects_zero_http_limits_and_preserves_the_field_path() {
     let mut config = Config::new();
     config.set("address", "127.0.0.1:0").unwrap();
     config.set("http.max_body_bytes", 0u64).unwrap();
@@ -311,7 +311,7 @@ fn rejects_zero_http_limits_and_preserves_the_field_path() {
 }
 
 #[test]
-fn rejects_zero_concurrency_and_request_timeout_limits() {
+fn test_rejects_zero_concurrency_and_request_timeout_limits() {
     for (field, config_key) in [
         ("http.max_concurrent_requests", "http.max_concurrent_requests"),
         ("http.request_timeout_ms", "http.request_timeout_ms"),
@@ -327,7 +327,7 @@ fn rejects_zero_concurrency_and_request_timeout_limits() {
 }
 
 #[test]
-fn defaults_transport_connection_limit_to_1024_and_reports_invalid_values() {
+fn test_defaults_transport_connection_limit_to_1024_and_reports_invalid_values() {
     let mut config = Config::new();
     config.set("address", "127.0.0.1:0").unwrap();
 
@@ -351,7 +351,7 @@ fn defaults_transport_connection_limit_to_1024_and_reports_invalid_values() {
 }
 
 #[test]
-fn configures_per_connection_http2_stream_limit_and_reports_its_field() {
+fn test_configures_per_connection_http2_stream_limit_and_reports_its_field() {
     for (configured, expected) in [(1u64, 1u32), (u64::from(u32::MAX), u32::MAX)] {
         let mut config = Config::new();
         config.set("address", "127.0.0.1:0").unwrap();
@@ -379,7 +379,7 @@ fn configures_per_connection_http2_stream_limit_and_reports_its_field() {
 }
 
 #[test]
-fn rejects_zero_or_malformed_transport_idle_timeout_by_field() {
+fn test_rejects_zero_or_malformed_transport_idle_timeout_by_field() {
     for malformed in [false, true] {
         let mut config = Config::new();
         config.set("address", "127.0.0.1:0").unwrap();
@@ -397,7 +397,7 @@ fn rejects_zero_or_malformed_transport_idle_timeout_by_field() {
 }
 
 #[test]
-fn configured_transport_idle_timeout_uses_the_field_specific_deadline_check() {
+fn test_configured_transport_idle_timeout_uses_the_field_specific_deadline_check() {
     let timeout = std::time::Duration::from_millis(u64::MAX);
     if tokio::time::Instant::now().checked_add(timeout).is_none() {
         let mut config = Config::new();
@@ -409,7 +409,7 @@ fn configured_transport_idle_timeout_uses_the_field_specific_deadline_check() {
 }
 
 #[test]
-fn rejects_configured_semaphore_capacity_above_maximum() {
+fn test_rejects_configured_semaphore_capacity_above_maximum() {
     let invalid = u64::try_from(tokio::sync::Semaphore::MAX_PERMITS).expect("Tokio semaphore maximum fits u64") + 1;
     for field in ["http.max_concurrent_requests", "transport.max_connections"] {
         let mut config = config_with("127.0.0.1:0", 2500);

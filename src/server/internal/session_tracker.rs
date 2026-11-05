@@ -24,6 +24,7 @@ use super::session_registration_error::SessionRegistrationError;
 /// Atomically tracks managed sessions and the shutdown admission gate.
 #[derive(Clone, Debug)]
 pub(crate) struct SessionTracker {
+    /// Internal item implementation detail.
     inner: Arc<SessionTrackerInner>,
 }
 
@@ -70,6 +71,9 @@ impl SessionTracker {
     }
 
     /// Returns the number of sessions that were active at an absolute instant.
+    /// # Parameters
+    ///
+    /// * `instant` - Instant at which the active session count is observed.
     pub(crate) fn active_at(&self, instant: Instant) -> usize {
         let state = self
             .inner
@@ -139,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn deadline_snapshot_counts_sessions_released_after_the_deadline() {
+    fn test_deadline_snapshot_counts_sessions_released_after_the_deadline() {
         let tracker = SessionTracker::new();
         let guard = tracker.try_register().expect("initial registration");
         tracker.begin_shutdown();
@@ -153,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn default_tracker_starts_empty_with_admission_open() {
+    fn test_default_tracker_starts_empty_with_admission_open() {
         let tracker = SessionTracker::default();
         assert_eq!(tracker.active(), 0);
         assert!(tracker.try_register().is_ok());

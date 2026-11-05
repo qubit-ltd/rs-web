@@ -212,7 +212,7 @@ mod tests {
     use super::build_router;
 
     #[tokio::test]
-    async fn stream_routes_reject_oversized_bodies_before_handlers() {
+    async fn test_stream_routes_reject_oversized_bodies_before_handlers() {
         let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
             .await
             .unwrap();

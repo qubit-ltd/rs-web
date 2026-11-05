@@ -155,7 +155,7 @@ impl ControllerUpgrade {
 }
 
 #[tokio::test]
-async fn controller_stream_admission_preserves_native_websocket_upgrade() {
+async fn test_controller_stream_admission_preserves_native_websocket_upgrade() {
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
         .unwrap();

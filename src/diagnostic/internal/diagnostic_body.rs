@@ -34,6 +34,10 @@ pub(crate) struct DiagnosticBody {
 
 impl DiagnosticBody {
     /// Wraps a response body and its shared observation state.
+    /// # Parameters
+    ///
+    /// * `inner` - Response body whose frames and size hint are forwarded.
+    /// * `observation` - Shared state that records the body's terminal outcome.
     pub(crate) fn new(inner: Body, observation: Arc<BodyObservation>) -> Self {
         Self {
             inner,
@@ -44,6 +48,7 @@ impl DiagnosticBody {
 }
 
 impl Drop for DiagnosticBody {
+    /// Releases the resources owned by this guard.
     fn drop(&mut self) {
         // Dropping an unfinished response is terminal too; the shared
         // observation makes this idempotent with other lifecycle observers.
@@ -54,7 +59,9 @@ impl Drop for DiagnosticBody {
 }
 
 impl HttpBody for DiagnosticBody {
+    /// Internal Data implementation detail.
     type Data = Bytes;
+    /// Internal Error implementation detail.
     type Error = axum::Error;
 
     /// Polls and forwards one body frame while observing terminal outcomes.
@@ -62,6 +69,10 @@ impl HttpBody for DiagnosticBody {
     /// A completed body and a body error are recorded once before their
     /// original result is returned. `Pending` is forwarded without marking
     /// the body terminal.
+    /// # Parameters
+    ///
+    /// * `self` - Pinned body wrapper whose inner body is polled.
+    /// * `cx` - Task context used to register the current waker.
     fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
         let this = self.as_mut().get_mut();
         match Pin::new(&mut this.inner).poll_frame(cx) {
@@ -145,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn forwards_pending_and_nonterminal_state() {
+    fn test_forwards_pending_and_nonterminal_state() {
         let observation = Arc::new(BodyObservation::new(
             Method::GET,
             "/pending".to_owned(),

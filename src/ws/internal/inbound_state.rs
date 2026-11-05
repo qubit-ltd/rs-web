@@ -33,6 +33,9 @@ pub(in crate::ws) struct InboundState {
 
 impl InboundState {
     /// Creates an empty per-connection budget with the given payload limit.
+    /// # Parameters
+    ///
+    /// * `max_bytes` - Maximum number of queued message bytes.
     pub(in crate::ws) fn new(max_bytes: usize) -> Self {
         Self {
             max_bytes,
@@ -47,6 +50,9 @@ impl InboundState {
     /// Returns the original message unchanged when its payload would exceed the
     /// remaining budget. The reservation is returned when the wrapper is
     /// dropped.
+    /// # Parameters
+    ///
+    /// * `message` - WebSocket message being queued, wrapped, or delivered.
     pub(in crate::ws) fn try_wrap(self: &Arc<Self>, message: Message) -> Result<InboundMessage, Message> {
         let bytes = message_size(&message);
         let mut used = self.used_bytes.lock().unwrap_or_else(PoisonError::into_inner);
@@ -59,12 +65,18 @@ impl InboundState {
     }
 
     /// Returns a wrapper's reserved payload bytes to this connection's budget.
+    /// # Parameters
+    ///
+    /// * `bytes` - Number of message or body bytes charged to the resource
     pub(in crate::ws) fn release(&self, bytes: usize) {
         let mut used = self.used_bytes.lock().unwrap_or_else(PoisonError::into_inner);
         *used = used.saturating_sub(bytes);
     }
 
     /// Stores a read error only if no earlier error is waiting for delivery.
+    /// # Parameters
+    ///
+    /// * `error` - Error returned by the underlying I/O or service operation.
     pub(in crate::ws) fn record_read_error(&self, error: Error) {
         let mut slot = self.read_error.lock().unwrap_or_else(PoisonError::into_inner);
         if slot.is_none() {
@@ -96,7 +108,7 @@ mod tests {
     use super::InboundState;
 
     #[test]
-    fn byte_budget_accepts_exact_limit_and_releases_on_drop() {
+    fn test_byte_budget_accepts_exact_limit_and_releases_on_drop() {
         let state = Arc::new(InboundState::new(4));
         let first = state.try_wrap(Message::text("four")).expect("exact limit fits");
         assert!(state.try_wrap(Message::text("x")).is_err());
@@ -105,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn first_read_error_is_consumed_once() {
+    fn test_first_read_error_is_consumed_once() {
         let state = InboundState::new(4);
         state.record_read_error(Error::new(std::io::Error::other("first")));
         state.record_read_error(Error::new(std::io::Error::other("second")));
@@ -115,7 +127,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_channel_send_releases_reserved_bytes() {
+    async fn test_failed_channel_send_releases_reserved_bytes() {
         let state = Arc::new(InboundState::new(4));
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         drop(receiver);
@@ -126,7 +138,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receiver_drop_releases_queued_bytes() {
+    async fn test_receiver_drop_releases_queued_bytes() {
         let state = Arc::new(InboundState::new(4));
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         let message = state.try_wrap(Message::text("four")).expect("budget should fit");

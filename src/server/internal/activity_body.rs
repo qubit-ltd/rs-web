@@ -27,6 +27,10 @@ pub(super) struct ActivityBody {
 
 impl ActivityBody {
     /// Wraps a body and keeps its request activity lease until completion.
+    /// # Parameters
+    ///
+    /// * `inner` - Wrapped HTTP body polled by this activity-aware body.
+    /// * `lease` - Activity lease retained until the body is dropped.
     pub(super) fn new(inner: Body, lease: ActivityLease) -> Self {
         Self {
             inner,
@@ -36,10 +40,15 @@ impl ActivityBody {
 }
 
 impl HttpBody for ActivityBody {
+    /// Internal Data implementation detail.
     type Data = Bytes;
+    /// Internal Error implementation detail.
     type Error = <Body as HttpBody>::Error;
 
     /// Polls the response body and releases its lease at completion or error.
+    /// # Parameters
+    ///
+    /// * `context` - Task context used to register a waker or carry request
     fn poll_frame(
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,

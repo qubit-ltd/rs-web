@@ -16,25 +16,32 @@ use crate::server::SessionGuard;
 /// The permit and guard are released only after the reader and writer have both
 /// dropped their `Arc` references to this value.
 pub(in crate::ws) struct SessionResources {
+    /// Internal item implementation detail.
     resources: Option<(OwnedSemaphorePermit, SessionGuard)>,
+    /// Internal item implementation detail.
     closed: CancellationToken,
 }
 
 impl SessionResources {
     /// Holds the resources reserved for one admitted WebSocket connection.
+    /// # Parameters
+    ///
+    /// * `permit` - Owned capacity permit transferred to the request or
+    /// * `session` - Registered server session retained for the connection
     pub(in crate::ws) fn new(permit: OwnedSemaphorePermit, session: SessionGuard) -> Self {
         Self {
             resources: Some((permit, session)),
             closed: CancellationToken::new(),
         }
     }
-
+    /// Returns the cancellation token signalled when resources close.
     pub(in crate::ws) fn closed_token(&self) -> CancellationToken {
         self.closed.clone()
     }
 }
 
 impl Drop for SessionResources {
+    /// Releases the resources owned by this guard.
     fn drop(&mut self) {
         drop(self.resources.take());
         self.closed.cancel();
@@ -57,7 +64,7 @@ mod tests {
     use crate::WebServer;
 
     #[tokio::test]
-    async fn notifies_only_after_last_io_reference_releases_resources() {
+    async fn test_notifies_only_after_last_io_reference_releases_resources() {
         let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
             .await
             .expect("test server should bind");
@@ -86,7 +93,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supports_multiple_waiters_late_registration_and_waiter_cancellation() {
+    async fn test_supports_multiple_waiters_late_registration_and_waiter_cancellation() {
         let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
             .await
             .expect("test server should bind");

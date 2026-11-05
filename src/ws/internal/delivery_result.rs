@@ -7,8 +7,12 @@
 // =============================================================================
 /// Result of forwarding a frame to the bounded application channel.
 pub(in crate::ws) enum DeliveryResult {
+    /// Internal item implementation detail.
     Delivered,
+    /// Internal item implementation detail.
     ReceiverClosed,
+    /// Internal item implementation detail.
     Cancelled,
+    /// Internal item implementation detail.
     TimedOut,
 }
