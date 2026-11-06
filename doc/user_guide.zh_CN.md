@@ -173,6 +173,23 @@ let app = Router::new()
 
 若保留 Axum 默认值，原生提取器可能在 handler 执行前拒绝超过其默认上限的请求，即使 rs-web 预算更大。提高 Axum 限制后，rs-web 预算仍会检查请求；关闭 Axum 限制也不会关闭 rs-web 的 body 预算。SSE/WS 分支上的 `StreamAdmissionLayer` 遵循同样的独立预算规则。`BoundedJson` 则使用自己的 `JsonLimits` 读取请求体，不受 Axum 原生 JSON 提取器默认值约束。layer Rustdoc 和测试覆盖了 Router 装配方式及 3/4/5 MiB 边界。
 
+### 配置 JSON 输入与输出预算
+
+使用 `BoundedJson` 时，可在路由或 Router 上安装 `Extension<JsonLimits>` 作为输入策略。`BoundedJson` 会读取这个 extension；未安装时使用 `JsonLimits::default()`，其默认输入字节上限为 1 MiB。可运行的 [`json_budgets` 示例](../examples/json_budgets.rs)将 `RequestLimitLayer` 的请求体上限设为 4 MiB，并将 JSON 输入字节上限和单个字符串上限分别设为 2 MiB。HTTP 上限是外层传输限制，JSON 字节与字符串仍是独立检查；深度、节点数、集合、键和数字等其余结构预算仍采用各自的 `JsonLimits` 默认值。
+
+输出编码有单独的显式预算。示例另行创建 `JsonLimits`，通过 `with_max_output_bytes(4096)` 设置上限，并将它传给 `json_response`；输入 extension 不会配置输出编码。编码成功时，handler 返回 JSON 响应。失败时，handler 检查 `JsonResponseError::code()` 并返回固定 HTTP 500 正文：输出字节预算超限时为 `json_output_budget_exceeded`，其他编码失败时为 `json_encode_failed`；不会返回部分 JSON。500 状态映射是示例采用的应用策略，库本身不强制这样处理。不要对同一个无法编码的值重试；记录安全错误码后，可缩小响应数据或检查序列化器；如果预期响应确实更大，再有意识地调整输出预算。同时不要把 prompt 内容或错误详情放进响应。
+
+启动示例并提交一个小 prompt：
+
+```sh
+cargo run -p qubit-web --features json --example json_budgets
+curl -i http://127.0.0.1:3001/prompts \
+  -H 'content-type: application/json' \
+  -d '{"prompt":"hello"}'
+```
+
+请求返回 HTTP 200，JSON 中包含 `accepted: true` 和 prompt。请求体在 4 MiB HTTP 上限内、但超过 2 MiB JSON 输入预算时，`BoundedJson` 返回 HTTP 413。若将 `max_string_bytes` 配置得低于 `max_input_bytes`，字符串超过单项预算时也返回 HTTP 413，即使整个 JSON 请求体仍在字节预算内。输出超过 4096 字节时返回上文固定 HTTP 500 错误码，且没有部分 JSON 正文。其他 `BoundedJson` 输入拒绝仍按其 400/413/415 行为处理（应用 handler 也可选择自己的映射）。4 MiB 请求 middleware 也可能在 handler 执行前独立拒绝超大请求体；handler 不会改写 middleware 响应。API 细节见 [`JsonLimits`](../src/json/json_limits.rs)、[`BoundedJson`](../src/json/bounded_json.rs)、[`json_response`](../src/json/json_response.rs) 和 [`JsonResponseError`](../src/json/json_response_error.rs)。
+
 ### 按 JSON 拒绝类别决定响应
 
 启用 `json` feature 后，handler 可接收 `Result<BoundedJson<T>, JsonRejection>`，针对每类失败返回应用自己的响应。公共类型路径为 `qubit_web::json::JsonRejection`。默认响应仍是：JSON 无效或请求体读取失败返回 `400`，JSON 预算超限返回 `413`，媒体类型不支持返回 `415`。这段 handler 只处理 `BoundedJson` 的拒绝；请求限额等中间件生成的响应不会自动改写成应用格式。

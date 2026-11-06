@@ -159,6 +159,23 @@ let app = Router::new()
 
 With Axum's default, a native extractor may reject a body above its default before the handler runs, even when the rs-web budget is larger. Raising Axum's limit lets the rs-web limit govern the request; disabling Axum's limit still leaves the rs-web body budget in force. `StreamAdmissionLayer` follows the same independent-budget rule on SSE/WS branches. `BoundedJson` is different: it reads through its own `JsonLimits` budget and is not governed by Axum's native JSON extractor default. The router assembly and 3/4/5 MiB boundaries are covered by the layer documentation and tests.
 
+### Configure JSON input and output budgets
+
+For `BoundedJson`, install the input policy as an Axum `Extension<JsonLimits>` on the route or router. `BoundedJson` reads that extension and falls back to `JsonLimits::default()` when it is absent; the default input byte limit is 1 MiB. The runnable [`json_budgets` example](../examples/json_budgets.rs) sets a 4 MiB `RequestLimitLayer` body ceiling, then installs input limits of 2 MiB and a 2 MiB maximum for each string. The HTTP ceiling is an outer transport limit; the JSON byte and string limits remain separate checks, and the remaining structure limits (depth, nodes, collections, keys, and numbers) retain their own `JsonLimits` defaults.
+
+Output encoding has its own explicit budget. The example creates a separate `JsonLimits` value with `with_max_output_bytes(4096)` and passes it to `json_response`; the input extension does not configure output encoding. On success, the handler returns the encoded response. On failure, it checks `JsonResponseError::code()` and emits a fixed HTTP 500 body: `json_output_budget_exceeded` for the output byte budget, or `json_encode_failed` for another encoding failure. No partial JSON is returned. This 500 mapping is the example's application policy; the library does not force it. Do not retry the same unencodable value. Record the safe code for operators, then reduce the response data or review the serializer; if the intended response is larger, adjust the output budget deliberately. Keep prompt contents and error details out of the response.
+
+Run the example and submit a small prompt:
+
+```sh
+cargo run -p qubit-web --features json --example json_budgets
+curl -i http://127.0.0.1:3001/prompts \
+  -H 'content-type: application/json' \
+  -d '{"prompt":"hello"}'
+```
+
+The request returns HTTP 200 with `accepted: true` and the prompt. A body that fits the 4 MiB HTTP ceiling but exceeds the 2 MiB JSON input budget receives HTTP 413 from `BoundedJson`. When `max_string_bytes` is configured below `max_input_bytes`, exceeding the per-string budget also receives HTTP 413 even if the whole JSON body remains within its byte budget. An output that exceeds 4096 bytes receives the fixed HTTP 500 code described above, with no partial JSON body. JSON input rejections from `BoundedJson` otherwise retain its 400/413/415 behavior (or an application handler's chosen mapping). The 4 MiB request middleware can independently reject an oversized body before the handler runs; that middleware response is not rewritten by the handler. See [`JsonLimits`](../src/json/json_limits.rs), [`BoundedJson`](../src/json/bounded_json.rs), [`json_response`](../src/json/json_response.rs), and [`JsonResponseError`](../src/json/json_response_error.rs) for the API details.
+
 ### Handle bounded JSON rejection categories
 
 With the `json` feature, a handler can accept `Result<BoundedJson<T>, JsonRejection>` and choose its own response for each failure category. `JsonRejection` is available at `qubit_web::json::JsonRejection`; its default response remains `400` for invalid JSON and body-read failure, `413` for an exceeded JSON budget, and `415` for an unsupported media type. This application response only handles `BoundedJson` rejections; middleware-generated responses, such as request-limit rejection, are not automatically replaced.
