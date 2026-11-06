@@ -31,7 +31,9 @@
 pub enum WsSendError {
     /// The queue lacks item or remaining byte capacity for the message.
     Backpressure,
-    /// The message payload exceeds the configured total outbound byte budget.
+    /// The message exceeds a WebSocket control-frame limit or the configured
+    /// total outbound byte budget. Ping/Pong payloads are limited to 125 bytes;
+    /// a Close reason is limited to 123 UTF-8 bytes.
     MessageTooLarge,
     /// The send queue is closed or the session has started shutting down.
     Closed,

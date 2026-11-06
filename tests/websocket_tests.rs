@@ -584,6 +584,92 @@ async fn test_queue_rejects_message_count_and_byte_overflow() {
     );
 }
 
+#[tokio_test]
+async fn test_outbound_control_frame_boundaries() {
+    async fn upgrade(
+        State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,
+        headers: HeaderMap,
+        uri: axum::http::Uri,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, move |session| async move {
+            if uri.path() == "/close" {
+                assert_eq!(
+                    session.try_send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1000,
+                        reason: "x".repeat(124).into(),
+                    }))),
+                    Err(WsSendError::MessageTooLarge)
+                );
+                session
+                    .try_send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1000,
+                        reason: "x".repeat(123).into(),
+                    })))
+                    .unwrap();
+                session.closed().await;
+                return;
+            }
+            assert_eq!(
+                session.try_send(Message::Ping(vec![0; 126].into())),
+                Err(WsSendError::MessageTooLarge)
+            );
+            assert_eq!(
+                session.try_send(Message::Pong(vec![0; 126].into())),
+                Err(WsSendError::MessageTooLarge)
+            );
+            session.try_send(Message::Ping(vec![1; 125].into())).unwrap();
+            session.try_send(Message::Pong(vec![2; 125].into())).unwrap();
+            session.try_send(Message::text("control-frame-sentinel")).unwrap();
+            session.closed().await;
+        })
+    }
+
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let app = Router::new()
+        .route("/{*path}", get(upgrade))
+        .with_state((WsUpgradePolicy::new(), server.context()));
+    let serving = AbortOnDrop(spawn(
+        server
+            .serve(app, pending::<()>())
+            .with_subscriber(tracing::dispatcher::get_default(Clone::clone)),
+    ));
+
+    let (mut peer, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    for (expected_opcode, expected_byte) in [(9, 1), (10, 2)] {
+        let (opcode, payload) = timeout(Duration::from_secs(1), read_server_frame(&mut peer))
+            .await
+            .expect("legal boundary control frame should arrive");
+        assert_eq!(opcode, expected_opcode);
+        assert_eq!(payload.len(), 125);
+        assert!(payload.iter().all(|byte| *byte == expected_byte));
+    }
+    let (opcode, payload) = timeout(Duration::from_secs(1), read_server_frame(&mut peer))
+        .await
+        .expect("session should continue with the text sentinel");
+    assert_eq!(opcode, 1);
+    assert_eq!(payload, b"control-frame-sentinel");
+    send_masked_close(&mut peer).await;
+    drop(peer);
+
+    let (mut peer, status) = handshake_path(address, "/close", None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    let (opcode, payload) = timeout(Duration::from_secs(1), read_server_frame(&mut peer))
+        .await
+        .expect("legal Close boundary should be transmitted");
+    assert_eq!(opcode, 8);
+    assert_eq!(payload.len(), 125);
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1000);
+    assert_eq!(&payload[2..], vec![b'x'; 123].as_slice());
+    send_masked_close(&mut peer).await;
+    drop(peer);
+    drop(serving);
+}
+
 #[test]
 fn test_ws_errors_implement_standard_error() {
     fn invalid_policy() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

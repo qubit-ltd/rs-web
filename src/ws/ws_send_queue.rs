@@ -130,9 +130,12 @@ impl WsSendQueue {
     /// # Errors
     ///
     /// Returns [`WsSendError::Closed`] if the queue is closed,
-    /// [`WsSendError::MessageTooLarge`] if the message exceeds the total byte
-    /// budget, or [`WsSendError::Backpressure`] if the queue lacks message
-    /// count or remaining byte capacity. These checks occur in that order.
+    /// [`WsSendError::MessageTooLarge`] if a Ping/Pong payload exceeds 125
+    /// bytes, a Close reason exceeds 123 UTF-8 bytes, or the message exceeds
+    /// the configured total byte budget. Returns [`WsSendError::Backpressure`]
+    /// if the queue lacks message count or remaining byte capacity. These
+    /// checks occur in that order after the closed check. Protocol limits
+    /// count bytes; payloads are rejected without truncation.
     /// Success means only that the message entered the queue, not that it was
     /// delivered; a message still pending at closure may be discarded.
     pub fn try_send(&self, message: Message) -> Result<(), WsSendError> {
@@ -141,7 +144,7 @@ impl WsSendQueue {
         if state.closed {
             return Err(WsSendError::Closed);
         }
-        if bytes > self.max_bytes {
+        if exceeds_control_frame_limit(&message) || bytes > self.max_bytes {
             return Err(WsSendError::MessageTooLarge);
         }
         if state.messages.len() + state.in_flight_messages >= self.max_messages
@@ -196,6 +199,29 @@ impl WsSendQueue {
             state.in_flight_messages += 1;
         }
         message
+    }
+}
+
+/// Returns whether a control frame exceeds the WebSocket protocol payload
+/// limit.
+///
+/// Ping and Pong payloads are limited to 125 bytes. A Close reason shares the
+/// control frame's 125-byte payload with its two-byte status code, leaving 123
+/// UTF-8 bytes for the reason.
+///
+/// # Parameters
+///
+/// * `message` - Outbound frame to inspect.
+/// # Returns
+///
+/// `true` when a Ping/Pong payload or Close reason exceeds its protocol limit.
+#[must_use]
+#[inline]
+fn exceeds_control_frame_limit(message: &Message) -> bool {
+    match message {
+        Message::Ping(payload) | Message::Pong(payload) => payload.len() > 125,
+        Message::Close(Some(frame)) => frame.reason.len() > 123,
+        _ => false,
     }
 }
 
@@ -259,6 +285,106 @@ mod tests {
         assert_eq!(
             count_limited.try_send(Message::text("12345")),
             Err(WsSendError::MessageTooLarge)
+        );
+    }
+
+    #[test]
+    fn test_control_frame_protocol_boundaries_and_rejections() {
+        use axum::extract::ws::CloseFrame;
+
+        let queue = WsSendQueue::new(16, 4096);
+        for (message, accepted) in [
+            (Message::Ping(vec![0; 125].into()), true),
+            (Message::Ping(vec![0; 126].into()), false),
+            (Message::Pong(vec![0; 125].into()), true),
+            (Message::Pong(vec![0; 126].into()), false),
+            (
+                Message::Close(Some(CloseFrame {
+                    code: 1000,
+                    reason: "a".repeat(123).into(),
+                })),
+                true,
+            ),
+            (
+                Message::Close(Some(CloseFrame {
+                    code: 1000,
+                    reason: "a".repeat(124).into(),
+                })),
+                false,
+            ),
+            (
+                Message::Close(Some(CloseFrame {
+                    code: 1000,
+                    reason: "你".repeat(41).into(),
+                })),
+                true,
+            ),
+            (
+                Message::Close(Some(CloseFrame {
+                    code: 1000,
+                    reason: "你".repeat(42).into(),
+                })),
+                false,
+            ),
+            (Message::Close(None), true),
+        ] {
+            let before_len = queue.len();
+            let before_bytes = queue.state.lock().unwrap().queued_bytes;
+            let result = queue.try_send(message);
+            if accepted {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert_eq!(result, Err(WsSendError::MessageTooLarge));
+                assert_eq!(queue.len(), before_len);
+                assert_eq!(queue.state.lock().unwrap().queued_bytes, before_bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn test_control_frame_protocol_error_precedence_and_rejection_has_no_side_effects() {
+        use axum::extract::ws::CloseFrame;
+
+        let full = WsSendQueue::new(1, 1024);
+        full.try_send(Message::text("held")).unwrap();
+        let before_bytes = full.state.lock().unwrap().queued_bytes;
+        assert_eq!(
+            full.try_send(Message::Ping(vec![0; 126].into())),
+            Err(WsSendError::MessageTooLarge)
+        );
+        assert_eq!(full.len(), 1);
+        assert_eq!(full.state.lock().unwrap().queued_bytes, before_bytes);
+
+        let closed = WsSendQueue::new(1, 1024);
+        closed.close();
+        assert_eq!(
+            closed.try_send(Message::Pong(vec![0; 126].into())),
+            Err(WsSendError::Closed)
+        );
+
+        let queue = WsSendQueue::new(2, 1024);
+        assert_eq!(
+            queue.try_send(Message::Close(Some(CloseFrame {
+                code: 1000,
+                reason: "x".repeat(124).into()
+            }))),
+            Err(WsSendError::MessageTooLarge)
+        );
+        assert!(queue.is_empty());
+        queue.try_send(Message::text("legal")).unwrap();
+        assert_eq!(queue.len(), 1);
+
+        let budget_limited = WsSendQueue::new(1, 124);
+        assert_eq!(
+            budget_limited.try_send(Message::Ping(vec![0; 125].into())),
+            Err(WsSendError::MessageTooLarge)
+        );
+
+        let remaining_capacity = WsSendQueue::new(2, 125);
+        remaining_capacity.try_send(Message::Ping(vec![0; 125].into())).unwrap();
+        assert_eq!(
+            remaining_capacity.try_send(Message::Ping(vec![0; 125].into())),
+            Err(WsSendError::Backpressure)
         );
     }
 
