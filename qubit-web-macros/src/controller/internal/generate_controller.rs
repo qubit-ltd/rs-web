@@ -31,13 +31,11 @@ pub(in crate::controller) fn generate(model: ControllerModel) -> syn::Result<Tok
         runtime,
         axum,
         instance_name: instance_name_option,
-        controller_name,
         methods,
         controller_states,
         conditional_errors,
         ..
     } = model;
-    let controller_name = controller_name.expect("validation checks the named controller type");
     let instance_name = instance_name_option.expect("validation assigns the controller wrapper name");
     let mut declarations = Vec::new();
     let mut methods_with_handlers: Vec<(ControllerMethod, syn::Ident)> = Vec::new();
@@ -45,8 +43,7 @@ pub(in crate::controller) fn generate(model: ControllerModel) -> syn::Result<Tok
         let Some(ImplItem::Fn(source_method)) = implementation.items.get(method.item_index) else {
             unreachable!("validated method index must point to an impl method")
         };
-        let handler_name = controller_name.to_string().to_lowercase();
-        let handler = format_ident!("__qubit_controller_handler_{}_{}", handler_name, generated_index);
+        let handler = format_ident!("__qubit_controller_handler_{}", generated_index);
         let cfg_attr = cfg_attribute(&method.cfg);
         let handler_tokens = make_handler(source_method, &handler, &instance_name, &self_ty, &axum);
         declarations.push(quote! { #cfg_attr #handler_tokens });

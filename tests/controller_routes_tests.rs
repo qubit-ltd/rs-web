@@ -32,6 +32,40 @@ use qubit_web::rest_controller;
 use tokio::sync::Semaphore;
 use tower::ServiceExt;
 
+#[allow(non_camel_case_types)]
+struct r#type;
+
+#[rest_controller("/raw-controller")]
+impl r#type {
+    #[get_mapping("/one")]
+    async fn one(&self) -> &'static str {
+        "one"
+    }
+
+    #[get_mapping("/two")]
+    async fn two(&self) -> &'static str {
+        "two"
+    }
+}
+
+#[tokio::test]
+async fn test_raw_identifier_controller_routes() {
+    let app = ControllerRoutes::<()>::new()
+        .add(Arc::new(r#type))
+        .expect("valid raw identifier controller")
+        .finish();
+    for (path, expected) in [("/raw-controller/one", "one"), ("/raw-controller/two", "two")] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64).await.unwrap();
+        assert_eq!(body.as_ref(), expected.as_bytes());
+    }
+}
+
 struct HeadGetOnly;
 
 #[rest_controller("/head-contract")]
