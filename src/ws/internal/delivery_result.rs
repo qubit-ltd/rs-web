@@ -7,12 +7,15 @@
 // =============================================================================
 /// Result of forwarding a frame to the bounded application channel.
 pub(in crate::ws) enum DeliveryResult {
-    /// Internal item implementation detail.
+    /// The frame was enqueued; the reader may continue receiving.
     Delivered,
-    /// Internal item implementation detail.
+    /// The application receiver is gone; the reader closes the outbound queue
+    /// and exits.
     ReceiverClosed,
-    /// Internal item implementation detail.
+    /// Shutdown cancellation won the delivery race; the reader begins close
+    /// handling with a deadline.
     Cancelled,
-    /// Internal item implementation detail.
+    /// The bounded send timed out (including an unrepresentable deadline); the
+    /// reader sets close code 1013 and begins close handling.
     TimedOut,
 }

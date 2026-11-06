@@ -31,7 +31,8 @@ use crate::WebServerError;
 /// # Parameters
 ///
 /// * `listener` - Bound TCP listener served by this server.
-/// * `context` - Task context used to register a waker or carry request state.
+/// * `context` - Server session context used to close admission, notify
+///   shutdown waiters, and read the shared shutdown deadline.
 /// * `graceful` - Hyper graceful-shutdown watcher for accepted connections.
 /// * `completion` - Shared completion state updated when the guard is dropped.
 /// * `connection_tasks` - Executor tracking Hyper tasks for accepted

@@ -6,13 +6,14 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use tokio::time::Instant;
-/// Mutable server session counts and shutdown completion history.
+/// Session tracker state protected by the tracker's mutex.
 #[derive(Debug)]
 pub(in crate::server::web_server) struct SessionState {
-    /// Internal item implementation detail.
+    /// Number of registered session guards not yet dropped.
     pub(in crate::server::web_server) active: usize,
-    /// Internal item implementation detail.
+    /// Whether shutdown has closed admission to new sessions.
     pub(in crate::server::web_server) draining: bool,
-    /// Internal item implementation detail.
+    /// Completion instants recorded after admission closes; used to reconstruct
+    /// how many sessions were still active at the shutdown deadline.
     pub(in crate::server::web_server) completed_during_shutdown: Vec<Instant>,
 }

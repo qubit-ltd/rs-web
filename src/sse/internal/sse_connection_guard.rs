@@ -31,6 +31,8 @@ impl SseConnectionGuard {
     ///   dropped.
     /// * `session` - Registered session retained for the SSE connection
     ///   lifetime.
+    /// * `cancellation` - Producer cancellation token cancelled when the
+    ///   response stream ends or is dropped and this guard is released.
     pub(in crate::sse) fn new(
         active_connections: Arc<AtomicUsize>,
         session: SessionGuard,

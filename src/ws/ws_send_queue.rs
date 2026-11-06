@@ -67,12 +67,17 @@ impl std::fmt::Debug for WsSendQueue {
 }
 
 impl WsSendQueue {
-    /// Creates a queue whose item and byte limits must both be satisfied.
+    /// Creates a queue bounded by message count and total payload bytes.
     ///
     /// # Parameters
     ///
-    /// * `max_messages` - Maximum message capacity, including in-flight sends;
-    /// * `max_bytes` - Maximum total payload byte capacity. Zero permits
+    /// * `max_messages` - Maximum queued plus in-flight message count. Zero
+    ///   rejects every message with [`WsSendError::Backpressure`].
+    /// * `max_bytes` - Maximum total payload bytes. Zero permits only
+    ///   zero-payload messages.
+    ///
+    /// [`Self::try_send`] checks errors in this order: [`WsSendError::Closed`],
+    /// [`WsSendError::MessageTooLarge`], then [`WsSendError::Backpressure`].
     /// # Returns
     ///
     /// An empty queue with the supplied capacity bounds.

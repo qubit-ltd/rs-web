@@ -33,7 +33,8 @@ impl InboundMessage {
     ///
     /// * `message` - Inbound WebSocket frame retained for delivery.
     /// * `bytes` - Buffered byte count charged to inbound state.
-    /// * `state` - Shared inbound accounting state released when the message is
+    /// * `state` - Shared inbound accounting state that receives the byte
+    ///   reservation when this wrapper is dropped.
     pub(in crate::ws) fn new(message: Message, bytes: usize, state: Arc<InboundState>) -> Self {
         Self {
             message: Some(message),

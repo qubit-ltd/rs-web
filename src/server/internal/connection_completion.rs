@@ -39,7 +39,8 @@ impl ConnectionCompletion {
     /// Reports whether all registered transports completed by `deadline`.
     /// # Parameters
     ///
-    /// * `deadline` - Optional absolute instant that bounds this operation.
+    /// * `deadline` - Absolute deadline by which all registered transports must
+    ///   have completed.
     pub(super) fn completed_by(&self, deadline: Instant) -> bool {
         let state = self.lock_state();
         state.active == 0 && state.last_completed.is_none_or(|completed| completed <= deadline)
@@ -48,7 +49,7 @@ impl ConnectionCompletion {
     ///
     /// # Parameters
     ///
-    /// * `completed` - Completion instant used to update active and completed
+    /// * `completed` - Instant at which a registered transport completed.
     pub(super) fn record_completion(&self, completed: Instant) {
         let mut state = self.lock_state();
         state.active = state.active.saturating_sub(1);

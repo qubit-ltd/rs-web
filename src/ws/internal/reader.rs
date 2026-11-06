@@ -46,13 +46,16 @@ fn reader_deadline(
 ///
 /// # Parameters
 ///
-/// * `stream` - Socket half read by the session task.
-/// * `incoming` - Bounded channel used to deliver frames to the application.
-/// * `queue` - Shared outbound queue used to wake the writer and reject sends
-/// * `lifecycle` - Shared cancellation, close-code and deadline policy.
-/// * `close_ack` - Signal used to coordinate peer close acknowledgement.
-/// * `idle_timeout` - Maximum time without a received frame or successful
-/// * `context` - Server context whose session state is updated.
+/// * `stream` - Socket read half from which peer frames are received.
+/// * `incoming` - Bounded channel receiving budgeted frames for the
+///   application.
+/// * `queue` - Outbound queue closed on reader exit and notified for close or
+///   ping handling.
+/// * `lifecycle` - Shared cancellation, close code, and shutdown deadlines.
+/// * `close_ack` - One-shot signal sent when a peer close frame is observed.
+/// * `idle_timeout` - Maximum idle interval and maximum wait to deliver a
+///   frame.
+/// * `context` - Inbound byte accounting and shared session resource lifetime.
 pub(in crate::ws) async fn reader_loop(
     mut stream: SplitStream<WebSocket>,
     incoming: mpsc::Sender<super::InboundMessage>,
@@ -222,9 +225,11 @@ fn close_code_for_read_error(error: &Error) -> u16 {
 /// # Parameters
 ///
 /// * `delivery` - Result of attempting to forward one inbound frame.
-/// * `queue` - Outbound queue closed when inbound delivery terminates.
+/// * `queue` - Outbound queue closed when the receiver is gone or delivery
+///   cannot continue.
 /// * `lifecycle` - Shared shutdown and close state for this session.
-/// * `deadline` - Absolute instant that bounds the wait or operation.
+/// * `deadline` - Close deadline set when cancellation or timeout starts close
+///   handling; unchanged for delivery or receiver closure.
 fn handle_delivery(
     delivery: DeliveryResult,
     queue: &WsSendQueue,
@@ -266,7 +271,7 @@ fn handle_delivery(
 /// * `incoming` - Bounded channel consumed by the application session.
 /// * `shutdown` - Token that interrupts delivery during shutdown.
 /// * `message` - Frame or read error to deliver.
-/// * `idle_timeout` - Maximum time the application channel may remain full.
+/// * `idle_timeout` - Maximum time allowed for the bounded channel send.
 /// # Returns
 ///
 /// The outcome of delivery, cancellation, receiver closure, or timeout.

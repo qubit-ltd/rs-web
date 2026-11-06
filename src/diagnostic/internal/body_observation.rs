@@ -39,9 +39,9 @@ impl BodyObservation {
     /// * `method` - HTTP method used for the request.
     /// * `route` - Route label used for diagnostics.
     /// * `connection_id` - Identifier attached to this connection.
-    /// * `bytes` - Number of message or body bytes charged to the resource
-    ///   budget.
-    /// * `started` - Time at which response-body observation began.
+    /// * `bytes` - Optional parsed request Content-Length; a declared length,
+    ///   not observed bytes or budget accounting.
+    /// * `started` - Time request diagnostics began, before the handler runs.
     pub(crate) fn shared(
         method: Method,
         route: String,
@@ -60,9 +60,9 @@ impl BodyObservation {
     /// * `method` - HTTP method used for the request.
     /// * `route` - Route label used for diagnostics.
     /// * `connection_id` - Identifier attached to this connection.
-    /// * `bytes` - Number of message or body bytes charged to the resource
-    ///   budget.
-    /// * `started` - Time at which response-body observation began.
+    /// * `bytes` - Optional parsed request Content-Length; a declared length,
+    ///   not observed bytes or budget accounting.
+    /// * `started` - Time request diagnostics began, before the handler runs.
     pub(crate) fn new(
         method: Method,
         route: String,

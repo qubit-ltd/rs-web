@@ -28,11 +28,13 @@ use tokio::time::timeout_at;
 /// # Parameters
 ///
 /// * `deadline` - Mutable per-session deadline slot.
-/// * `server_deadline` - Optional shared server deadline, which takes
-/// * `timeout` - Fallback grace period when the server has no deadline.
+/// * `server_deadline` - Optional shared server shutdown deadline. When set, it
+///   is the candidate deadline; otherwise the fallback is used.
+/// * `timeout` - Fallback grace period measured from now when no server
+///   deadline is set. If adding it overflows, the candidate is immediate.
 /// # Returns
 ///
-/// The earlier of the current and newly computed deadlines.
+/// The earlier of the deadline already stored and the candidate deadline.
 #[must_use]
 pub(in crate::ws) fn get_close_deadline(
     deadline: &Mutex<Option<Instant>>,

@@ -67,7 +67,8 @@ impl InboundState {
     /// Returns a wrapper's reserved payload bytes to this connection's budget.
     /// # Parameters
     ///
-    /// * `bytes` - Number of message or body bytes charged to the resource
+    /// * `bytes` - Reserved payload byte count to return to the connection
+    ///   budget.
     pub(in crate::ws) fn release(&self, bytes: usize) {
         let mut used = self.used_bytes.lock().unwrap_or_else(PoisonError::into_inner);
         *used = used.saturating_sub(bytes);

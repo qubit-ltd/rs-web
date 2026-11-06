@@ -13,8 +13,9 @@ use crate::server::SessionGuard;
 /// Connection capacity and server session registration shared by both I/O
 /// tasks.
 ///
-/// The permit and guard are released only after the reader and writer have both
-/// dropped their `Arc` references to this value.
+/// The permit and session guard are released when the final reader or writer
+/// reference drops this value. Only after releasing both, its cancellation
+/// token is signalled so observers can learn that connection capacity is free.
 pub(in crate::ws) struct SessionResources {
     /// Internal item implementation detail.
     resources: Option<(OwnedSemaphorePermit, SessionGuard)>,
@@ -26,15 +27,17 @@ impl SessionResources {
     /// Holds the resources reserved for one admitted WebSocket connection.
     /// # Parameters
     ///
-    /// * `permit` - Owned capacity permit transferred to the request or
+    /// * `permit` - Owned capacity permit retained for this connection.
     /// * `session` - Registered server session retained for the connection
+    ///   lifetime.
     pub(in crate::ws) fn new(permit: OwnedSemaphorePermit, session: SessionGuard) -> Self {
         Self {
             resources: Some((permit, session)),
             closed: CancellationToken::new(),
         }
     }
-    /// Returns the cancellation token signalled when resources close.
+    /// Returns a token cancelled after the final shared resource reference is
+    /// dropped and the capacity permit and session guard are released.
     pub(in crate::ws) fn closed_token(&self) -> CancellationToken {
         self.closed.clone()
     }
