@@ -152,9 +152,15 @@ impl WsSession {
     ///
     /// Returns [`WsSendError::Closed`] after shutdown,
     /// [`WsSendError::MessageTooLarge`] if the message exceeds the total byte
-    /// budget, or [`WsSendError::Backpressure`] if the queue lacks message
-    /// count or remaining byte capacity. A message accepted before shutdown
-    /// may be discarded if it is still pending when the session closes;
+    /// budget, or if a Ping/Pong payload exceeds 125 bytes or a Close reason
+    /// exceeds 123 UTF-8 bytes. These control-frame limits are measured in
+    /// bytes and cannot be relaxed by increasing the queue budget. The code
+    /// does not distinguish which limit was exceeded. Shrink, split, or
+    /// reject oversized data messages; shorten oversized control-frame
+    /// content rather than fragmenting it. Returns
+    /// [`WsSendError::Backpressure`] if the queue lacks message count or
+    /// remaining byte capacity. A message accepted before shutdown may be
+    /// discarded if it is still pending when the session closes;
     /// queue checks follow the order listed, after the session shutdown check.
     /// Success does not confirm network delivery.
     /// Once the writer starts processing a queued Close frame, the queue is
