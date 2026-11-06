@@ -118,13 +118,14 @@ Controller 路径捕获使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧�
 - WebSocket 的 `queue_limits` 配置出站队列；`inbound_queue_limits` 单独配置入站预算，默认每连接最多排队 64 条消息和累计 1 MiB payload。通道满时最多等待至 `idle_timeout`，字节预算不足则立即以 `1013` 关闭。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，另有每个活跃连接最多一条 1 MiB 协议重组消息；该估算不含分配开销和应用自有内存，也不是 I/O 结束后仍被 handler 或 session 保留的内存上限。
 - `WsSendError::MessageTooLarge` 表示出站消息永久超出预算；错误处理与迁移说明见[用户指南](doc/user_guide.zh_CN.md)。
 - 启用 HTTPS 需要 `tls` 与有效证书，也可由部署方配置可信反向代理。停服由应用发起，并遵守服务端配置的截止时间。
+- `ServerOptions::validate_detailed()` 提供安全的字段和原因码，旧 `validate()` 错误类型保持不变。TLS 默认仍使用绑定时快照；需要新握手使用显式重载配置时，使用 `TlsConfig::from_reloadable_rustls` 并保留 `RustlsConfig` clone。校验与轮换合同见[用户指南](doc/user_guide.zh_CN.md)。
 - `serve` 已开始运行后，丢弃其 future 或 abort 所在任务会关闭受管会话登记并通知现有会话，但无法等待异步排空或生成停服报告；后续清理需要 Tokio runtime 继续运行。优雅停服请完成 shutdown future 并等待 `serve` 返回。
 
 限额细节、TLS 配置、生命周期行为和排障方法见[中文用户指南](doc/user_guide.zh_CN.md)或[英文用户指南](doc/user_guide.md)。更多背景可查阅 [API 文档](https://docs.rs/qubit-web)、[历史中文设计记录](doc/2026-10-08-rs-web-design.md)和[生命周期设计摘要](doc/2026-10-09-rs-web-lifecycle-design.en.md)。
 
 期限采用 Tokio 协作式取消，不让出执行权的同步工作会延迟检查和清理。HTTP/HTTPS handler 可通过 Axum `ConnectInfo<SocketAddr>` 提取直接 TCP 对端；代理与执行边界见[用户指南](doc/user_guide.zh_CN.md)。
 
-[固定互操作 workflow](.github/workflows/downstream-interop.yml) 保留固定消费者基线；独立的[当前消费者 WS/WSS workflow](.github/workflows/downstream-current-interop.yml) 每周或手动检查 rs-websocket `main`，也覆盖当前消费者的 TLS WebSocket 场景。
+[固定互操作 workflow](.github/workflows/downstream-interop.yml) 保留固定消费者基线。独立的[当前消费者 WS/WSS workflow](.github/workflows/downstream-current-interop.yml) 会在 PR 修改 `src/**`、`qubit-web-macros/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`tests/**`、`scripts/check-downstream-interop.py`、`.infra/**` 或 `.github/workflows/downstream*interop.yml` 时运行，也会在每周一 03:17 UTC 和手动触发时检查 rs-websocket `main`。该 job 设置了 `continue-on-error`，因此它是非阻断兼容性信号；整体 workflow 显示绿色不能证明该检查通过，应查看 job/step outcome 和 summary。固定基线与当前 `main` 是两项独立信号。
 
 ## 测试
 

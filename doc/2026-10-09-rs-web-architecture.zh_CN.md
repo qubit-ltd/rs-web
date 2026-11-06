@@ -6,6 +6,8 @@
 
 原生 Axum 路由使用 `RequestLimitLayer::new(limits)`、`StreamAdmissionLayer::new(limits)` 或 `StreamAdmissionLayer::from_state(state)`；这些构造器不再接受 Router 状态类型参数。原先显式写了 turbofish 的调用需要删除类型参数。`WsSession::close()` 可幂等调用，取消等待后可以重试；关闭后 `recv()` 返回 `None`。未匹配路由的诊断只记录固定标记 `<unmatched>`。请求头期限或 SSE 保活间隔若为零或无法表示，会以 `InvalidConfig` 拒绝。
 
+`ServerOptions::validate_detailed()` 返回首个无效 listener 字段及稳定原因码，不包含配置值；旧 `validate()` 仍返回 `WebServerError::InvalidConfig`。HTTPS 默认保留绑定时 TLS 快照。显式使用 `TlsConfig::from_reloadable_rustls` 后，每条新连接握手前会取得一次当前 rustls 配置快照；应用通过自己保留的 `RustlsConfig` clone 更新配置。
+
 ## 请求路径与模块关系
 
 `WebServer` 持有已绑定的 TCP listener、每个服务实例的传输策略和共享的 `ServerContext`。它接收并限制传输连接，可选执行 TLS 握手，再将连接适配为支持 upgrade 的 Hyper 连接。Hyper 将请求交给应用的 Axum `Router<()>`。
@@ -64,6 +66,8 @@ SSE 和 WebSocket 都是长连接路由，不应套用短请求并发/期限中�
 停服开始时，服务停止接收 socket、关闭受管会话登记入口、通知已有会话，并使用同一个绝对期限等待 HTTP connection task 和受管 SSE/WS 会话。期限由 `ServerOptions` 设置，并由 `ServerContext` 提供给 WebSocket 会话；`WsUpgradePolicy` 不再单独设置停服期限。无法表示的停服期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，服务会先取消会话并回收连接任务，再返回错误。只有两组任务都按期结束，`ShutdownReport::graceful` 才为 `true`。报告记录未结束的受管会话，但不保证任意应用后台工作也已停止。`WebServer` 拥有并跟踪连接任务，Hyper/hyper-util 驱动各连接。本实现尚不提供具有明确定义且可证明的强制关闭连接计数，因此 `forced_connections` 为 `None`。
 
 `ConfiguredWeb` 解析应用显式传入的配置对象，并分别返回 `ServerOptions` 与 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；把配置值传给 `with_http_limits` 可替换该策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。启用 `config` 时，传输配置默认值为 `transport.max_connections = 1024`、`transport.idle_timeout_ms = 30000`、`transport.request_header_timeout_ms = 10000` 和每条 HTTP/2 连接 `transport.http2_max_concurrent_streams = 200`。请求头期限必须为正且能表示为 Tokio 截止时间；它同时用于 HTTP/1 请求头和 TLS 握手，不限制 HTTP/2 请求头块。流数值须为正 u32。可选的 `transport.http1_max_buffer_bytes` 和 `transport.http2_max_header_list_bytes` 省略时沿用 Hyper 默认值，显式值分别至少为 8192 和正 u32。HTTP 策略键包括 `http.max_body_bytes`、`http.max_concurrent_requests` 和 `http.request_timeout_ms`。两个并发配置键的有效范围都是 `1..=tokio::sync::Semaphore::MAX_PERMITS`；无效值通过 `ConfigOptionsError::field()` 指向原配置键。TLS 是可选项，通过独立的 `TlsConfig` 配置；PEM 加载失败会归并为 `TlsInvalid`，不会暴露密钥材料或路径。
+
+如需在线轮换 TLS，宿主保留 `axum_server::tls_rustls::RustlsConfig` 的 clone，把另一个 clone 交给 `TlsConfig::from_reloadable_rustls`，并在绑定后调用该配置的重载方法。PEM 重载失败会保留最近一次成功配置。已经取得握手快照的连接及已建立的 HTTP、SSE、WSS 连接不受更新影响；重载顺序由宿主负责。
 
 ## 失败阶段与应用责任
 

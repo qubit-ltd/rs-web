@@ -32,6 +32,16 @@ let context = server.context();
 
 The transport and short-request concurrency values must be within `1..=tokio::sync::Semaphore::MAX_PERMITS`; zero and larger values are rejected with `WebServerError::InvalidConfig`. The cap applies per `WebServer`; it covers accepted sockets, TLS handshakes, and HTTP connection futures. It is held until the HTTP transport future ends. Upgraded WebSocket sessions are governed by `WsUpgradePolicy` after Hyper completes the upgrade.
 
+For a batch of native listener settings, `validate_detailed()` identifies the first invalid field and a stable reason code without exposing the configured value. Its field order is shutdown timeout, request-header timeout, transport idle timeout, transport connection capacity, HTTP/1 parser buffer, and HTTP/2 header-list budget. The existing `validate()` still returns `WebServerError::InvalidConfig`, and binding performs its own checks:
+
+```rust,ignore
+let options = ServerOptions::new("127.0.0.1:3001".parse()?)
+    .with_request_header_timeout(Duration::ZERO);
+if let Err(error) = options.validate_detailed() {
+    eprintln!("invalid {} ({})", error.field(), error.code());
+}
+```
+
 Transport connections with no active request or response body close after 30 seconds by default. Choose a different positive duration when the deployment needs another idle policy:
 
 ```rust
@@ -368,7 +378,18 @@ let server = WebServer::bind_https(options, tls).await?;
 
 Use a certificate trusted by clients, or terminate TLS at a trusted edge and configure the application accordingly. Repository test fixtures are self-signed test material, not deployment credentials. HTTPS uses the same Router; WebSocket upgrades on it use WSS.
 
-When `WebServer::bind_https` constructs the HTTPS server, it captures the underlying rustls configuration. A reload on the external `RustlsConfig` completed before binding, without racing the bind, can be observed by that server. A reload after `bind_https` completes does not refresh the configuration used by that server's later handshakes. Coordinate shutting down and recreating the server to apply a new certificate or TLS configuration; rebinding the same address is not guaranteed to be seamless. If reload and bind run concurrently, the selected configuration version is unspecified, so order them in the application.
+`TlsConfig::from_pem_files` and `TlsConfig::from_rustls` keep the existing bind-time snapshot behavior. A reload completed before binding can be observed; a reload after binding does not change that server's later handshakes. To rotate settings online, keep a clone of an `axum_server::tls_rustls::RustlsConfig` and explicitly use `TlsConfig::from_reloadable_rustls`:
+
+```rust,ignore
+let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(certificate_chain, private_key).await?;
+let server = WebServer::bind_https(
+    options,
+    TlsConfig::from_reloadable_rustls(rustls.clone()),
+).await?;
+rustls.reload_from_pem_file(next_certificate_chain, next_private_key).await?;
+```
+
+The application must declare `axum-server` as a direct dependency to use `RustlsConfig`. A successful reload applies to handshakes that take their configuration snapshot afterward; each handshake reads one snapshot, so a reload racing that read may leave that handshake on the previous configuration. Existing HTTP, SSE, and WSS connections retain their negotiated TLS state. A failed PEM reload leaves the last successfully loaded configuration active. Applications that retain snapshot mode must still coordinate shutdown and rebinding; seamless rebinding of the same address is not guaranteed.
 
 ## Run, observe, and stop the service
 

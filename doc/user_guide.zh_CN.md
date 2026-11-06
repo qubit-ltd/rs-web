@@ -46,6 +46,16 @@ let context = server.context();
 
 传输连接数与短请求并发数必须处于 `1..=tokio::sync::Semaphore::MAX_PERMITS`；传入 0 或更大值会得到 `WebServerError::InvalidConfig`。额度覆盖已接受的 socket、TLS 握手和 HTTP 连接 future；HTTP transport future 结束后，升级出的 WebSocket 不再占用这项额度，由 `WsUpgradePolicy` 管理。SSE 仍占用 HTTP transport 额度。
 
+批量配置原生 listener 选项后，可调用 `validate_detailed()` 获取首个无效字段和稳定原因码；错误不会暴露配置值。检查顺序为停服期限、请求头期限、传输空闲期限、传输连接容量、HTTP/1 解析缓冲区和 HTTP/2 header-list 预算。现有 `validate()` 仍返回 `WebServerError::InvalidConfig`，绑定时也会继续执行自己的检查：
+
+```rust,ignore
+let options = ServerOptions::new("127.0.0.1:3001".parse()?)
+    .with_request_header_timeout(Duration::ZERO);
+if let Err(error) = options.validate_detailed() {
+    eprintln!("invalid {} ({})", error.field(), error.code());
+}
+```
+
 连接在没有活跃请求或响应体时，默认空闲 30 秒后关闭。部署需要其他回收周期时，可设置一个大于零的期限：
 
 ```rust
@@ -361,7 +371,18 @@ let server = WebServer::bind_https(options, tls).await?;
 
 部署时应使用客户端信任的证书，或在可信边缘终止 TLS 并由应用明确处理相关配置。仓库测试证书是自签名 fixture，不能直接作为部署凭据。同一个 Router 可用于 HTTPS；其 WebSocket 升级自然使用 WSS。
 
-`WebServer::bind_https` 构造 HTTPS server 时会取得底层 rustls 配置快照。若外部 `RustlsConfig` 的重载在绑定完成前结束，且没有与绑定并发，该次 server 可以看到新配置。在 `bind_https` 完成后再重载，不会刷新该 server 后续握手使用的配置。要应用新证书或 TLS 配置，应用应协调关闭并重新创建 server；不保证同一地址可以无缝重绑。若重载与绑定并发，使用哪一版配置没有确定保证，应用应自行排序。
+`TlsConfig::from_pem_files` 和 `TlsConfig::from_rustls` 保留原有绑定时快照行为。绑定前已完成的重载可以被新 server 观察到；绑定后重载不会改变该 server 后续握手。若要在线轮换，应保留 `axum_server::tls_rustls::RustlsConfig` 的 clone，并显式使用 `TlsConfig::from_reloadable_rustls`：
+
+```rust,ignore
+let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(certificate_chain, private_key).await?;
+let server = WebServer::bind_https(
+    options,
+    TlsConfig::from_reloadable_rustls(rustls.clone()),
+).await?;
+rustls.reload_from_pem_file(next_certificate_chain, next_private_key).await?;
+```
+
+使用 `RustlsConfig` 的应用需把 `axum-server` 声明为直接依赖。成功重载后，之后取得配置快照的新握手会使用新配置；重载与快照读取并发时，该次握手仍可能使用旧配置。每次握手只读取一次快照；已有 HTTP、SSE 和 WSS 连接保留已协商的 TLS 状态。PEM 重载失败会保留最近一次成功配置。继续使用快照模式的应用仍须协调停服和重新绑定；不能保证同一地址无缝重绑。
 
 ## 运行、观察和关闭
 

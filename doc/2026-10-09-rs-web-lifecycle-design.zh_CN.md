@@ -26,6 +26,10 @@ SSE 与 WebSocket 容量限制属于彼此独立的策略域，不是整个服�
 
 `ServerOptions::transport_idle_timeout` 默认 30 秒，且不能为零。配置键是 `transport.idle_timeout_ms`，缺省值为 `30000`。TCP/TLS 连接在没有活跃 handler 或响应体时达到空闲期限后关闭；这也包括尚未发送首个 HTTP/2 请求的连接。handler 和响应体活跃期间，空闲计时暂停，因此长连接 SSE 不会被误判为空闲。HTTP/2 PING 不会重置请求活动时间。独立的 `request_header_timeout` 仍为 HTTP/1 请求头及 TLS 握手设置 10 秒期限；空闲期限不会中断停滞中的活跃请求。
 
+## TLS 配置更新
+
+`TlsConfig::from_pem_files` 和 `TlsConfig::from_rustls` 保留绑定时快照合同。显式使用 `TlsConfig::from_reloadable_rustls` 后，server 会保留共享的 `RustlsConfig` 句柄，并在每条新连接握手前取得一次当前配置快照；已经取得快照的握手以及现有 HTTP、SSE、WSS 连接保留当前 TLS 状态。更新与快照选择并发时，受影响的握手可能仍使用旧版本。宿主在握手热路径之外执行配置重载；PEM 重载失败会保留最近一次成功配置。该机制不监控文件、不监听信号，也不协调多个进程间的更新。
+
 ## WebSocket 队列与入站交付
 
 WebSocket 发送队列的所有克隆共享关闭状态。对端或会话关闭后，`try_send` 会返回 `Closed`；成功入队不保证消息已通过网络送达。出站 `queue_limits` 与入站 `inbound_queue_limits(messages, bytes)` 分开配置。入站默认每连接最多排队 64 条消息、累计 1 MiB payload；reader 等待通道空位时最多另持有一条消息，且同样计入字节预算。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，每个活跃连接另最多有一条 1 MiB 协议重组消息。该估算不含分配开销和应用自有内存，也不限定 I/O 结束后仍被 handler 或 session 保留的内存。字节预算不足以容纳新消息时，消息会被丢弃并立即以关闭码 `1013` 关闭；仅通道槽满时，`WsUpgradePolicy::idle_timeout` 限制无进展等待时间，到期后以 `1013`、原因 `inbound backpressure` 关闭。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应用应持续接收消息，并在收到后再转交较长的业务处理。
