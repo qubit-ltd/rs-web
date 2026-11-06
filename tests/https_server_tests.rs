@@ -31,16 +31,28 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::ConnectInfo;
+#[cfg(feature = "ws")]
+use axum::extract::State;
 #[cfg(all(feature = "tls", feature = "ws"))]
 use axum::extract::ws::Message;
 #[cfg(all(feature = "tls", feature = "ws"))]
 use axum::extract::ws::WebSocket;
 #[cfg(all(feature = "tls", feature = "ws"))]
 use axum::extract::ws::WebSocketUpgrade;
+#[cfg(feature = "ws")]
+use axum::http::HeaderMap;
+#[cfg(feature = "ws")]
+use axum::response::Response;
 use axum::routing::get;
+#[cfg(feature = "ws")]
+use qubit_web::ServerContext;
 use qubit_web::ServerOptions;
 use qubit_web::WebServer;
+#[cfg(feature = "ws")]
+use qubit_web::WsUpgradePolicy;
 use qubit_web::tls::TlsConfig;
+#[cfg(feature = "ws")]
+use qubit_web::ws::WsSession;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener as TokioTcpListener;
@@ -218,6 +230,310 @@ async fn tls_reload_after_bind_keeps_bound_snapshot() {
     let (first, second) = result.expect("both TLS handshakes should succeed");
     assert_eq!(first, Some(b"http/1.1".to_vec()));
     assert_eq!(second, Some(b"http/1.1".to_vec()));
+}
+
+#[tokio_test]
+async fn tls_reloadable_config_applies_alpn_updates_after_bind() {
+    let (external, client) = tls_snapshot_configs().await.expect("TLS configs should build");
+    let tls = TlsConfig::from_reloadable_rustls(external.clone());
+    let server = WebServer::bind_https(ServerOptions::new("127.0.0.1:0".parse().unwrap()), tls)
+        .await
+        .expect("HTTPS listener binds");
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = spawn(server.serve(Router::new(), async {
+        let _ = shutdown_rx.await;
+    }));
+
+    let result = async {
+        let before = negotiated_alpn(address, Arc::clone(&client)).await?;
+        external.reload_from_config(reloaded_h2_config(&external));
+        let after = negotiated_alpn(address, client).await?;
+        Ok::<_, TestError>((before, after))
+    }
+    .await;
+
+    let _ = shutdown_tx.send(());
+    let report = time::timeout(Duration::from_secs(3), serving)
+        .await
+        .expect("server shutdown should complete")
+        .expect("server task should not panic")
+        .expect("server should report shutdown");
+    assert!(report.graceful);
+    let (before, after) = result.expect("TLS handshakes should succeed");
+    assert_eq!(before, Some(b"http/1.1".to_vec()));
+    assert_eq!(after, Some(b"h2".to_vec()));
+}
+
+fn certificate_der(path: PathBuf) -> rustls::pki_types::CertificateDer<'static> {
+    let pem = std::fs::read(path).expect("certificate fixture should be readable");
+    rustls::pki_types::CertificateDer::pem_slice_iter(&pem)
+        .next()
+        .expect("fixture should contain a certificate")
+        .expect("certificate PEM should parse")
+}
+
+async fn connected_peer_certificate(
+    address: SocketAddr,
+    client: Arc<rustls::ClientConfig>,
+) -> Result<Vec<u8>, TestError> {
+    let tcp = time::timeout(Duration::from_secs(3), TokioTcpStream::connect(address)).await??;
+    let name = rustls::pki_types::ServerName::try_from("localhost")?.to_owned();
+    let stream = time::timeout(Duration::from_secs(3), TlsConnector::from(client).connect(name, tcp)).await??;
+    Ok(stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .ok_or("server sent no certificate")?[0]
+        .as_ref()
+        .to_vec())
+}
+
+async fn rotation_test_configs() -> Result<(axum_server::tls_rustls::RustlsConfig, Arc<rustls::ClientConfig>), TestError>
+{
+    let config =
+        axum_server::tls_rustls::RustlsConfig::from_pem_file(fixture("https-h2-cert.pem"), fixture("https-h2-key.pem"))
+            .await?;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certificate_der(fixture("https-h2-cert.pem")))?;
+    roots.add(certificate_der(fixture("rotation-b-cert.pem")))?;
+    let mut client = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client.resumption = rustls::client::Resumption::disabled();
+    Ok((config, Arc::new(client)))
+}
+
+#[tokio_test]
+async fn reloadable_tls_rotates_certificates_and_retains_last_good_config() {
+    let (external, client) = rotation_test_configs().await.expect("rotation configs should load");
+    let server = WebServer::bind_https(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()),
+        TlsConfig::from_reloadable_rustls(external.clone()),
+    )
+    .await
+    .expect("reloadable HTTPS listener binds");
+    let address = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = spawn(server.serve(Router::new(), async {
+        let _ = shutdown_rx.await;
+    }));
+
+    let a = certificate_der(fixture("https-h2-cert.pem"));
+    let b = certificate_der(fixture("rotation-b-cert.pem"));
+    let result = async {
+        let before = connected_peer_certificate(address, Arc::clone(&client)).await?;
+        assert_eq!(before, a.as_ref());
+        external
+            .reload_from_pem_file(fixture("rotation-b-cert.pem"), fixture("rotation-b-key.pem"))
+            .await?;
+        let after = connected_peer_certificate(address, Arc::clone(&client)).await?;
+        assert_eq!(after, b.as_ref());
+        let failed = external
+            .reload_from_pem_file(fixture("rotation-b-cert.pem"), fixture("https-h2-key.pem"))
+            .await;
+        assert!(failed.is_err(), "mismatched certificate and key must fail reload");
+        let after_failure = connected_peer_certificate(address, client).await?;
+        assert_eq!(after_failure, b.as_ref());
+        Ok::<_, TestError>(())
+    }
+    .await;
+
+    let _ = shutdown_tx.send(());
+    let report = time::timeout(Duration::from_secs(3), serving)
+        .await
+        .expect("server shutdown should complete")
+        .expect("server task should not panic")
+        .expect("server should report shutdown");
+    assert!(report.graceful);
+    result.expect("certificate rotation and failed-reload retention should work");
+}
+
+#[tokio_test]
+async fn reloadable_tls_uses_configuration_reloaded_before_serve_starts() {
+    let (external, client) = rotation_test_configs().await.expect("rotation configs should load");
+    let server = WebServer::bind_https(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()),
+        TlsConfig::from_reloadable_rustls(external.clone()),
+    )
+    .await
+    .expect("reloadable HTTPS listener binds");
+    let address = server.local_addr();
+    let b = certificate_der(fixture("rotation-b-cert.pem"));
+    external
+        .reload_from_pem_file(fixture("rotation-b-cert.pem"), fixture("rotation-b-key.pem"))
+        .await
+        .expect("B config should load before serving starts");
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = spawn(server.serve(Router::new(), async {
+        let _ = shutdown_rx.await;
+    }));
+    let observed = connected_peer_certificate(address, client).await;
+    let _ = shutdown_tx.send(());
+    let report = time::timeout(Duration::from_secs(3), serving)
+        .await
+        .expect("server shutdown should complete")
+        .expect("server task should not panic")
+        .expect("server should report shutdown");
+    assert!(report.graceful);
+    assert_eq!(observed.expect("first handshake should succeed"), b.as_ref());
+}
+
+#[cfg(feature = "ws")]
+async fn wss_echo_once(
+    stream: &mut tokio_rustls::client::TlsStream<TokioTcpStream>,
+    message: &[u8],
+) -> Result<Vec<u8>, TestError> {
+    time::timeout(Duration::from_secs(3), async {
+        let mask = [0x12_u8, 0x39, 0x7a, 0x45];
+        let mut frame = vec![0x81, 0x80 | message.len() as u8];
+        frame.extend_from_slice(&mask);
+        frame.extend(message.iter().enumerate().map(|(i, byte)| *byte ^ mask[i % 4]));
+        stream.write_all(&frame).await?;
+        let mut header = [0; 2];
+        stream.read_exact(&mut header).await?;
+        let length = match header[1] & 0x7f {
+            126 => {
+                let mut length = [0; 2];
+                stream.read_exact(&mut length).await?;
+                u16::from_be_bytes(length) as usize
+            }
+            127 => {
+                let mut length = [0; 8];
+                stream.read_exact(&mut length).await?;
+                u64::from_be_bytes(length) as usize
+            }
+            length => length as usize,
+        };
+        let mut payload = vec![0; length];
+        stream.read_exact(&mut payload).await?;
+        Ok::<_, TestError>(payload)
+    })
+    .await?
+}
+
+#[cfg(feature = "ws")]
+async fn establish_wss(
+    address: SocketAddr,
+    client: Arc<rustls::ClientConfig>,
+) -> Result<tokio_rustls::client::TlsStream<TokioTcpStream>, TestError> {
+    let tcp = time::timeout(Duration::from_secs(3), TokioTcpStream::connect(address)).await??;
+    let name = rustls::pki_types::ServerName::try_from("localhost")?.to_owned();
+    let mut stream = time::timeout(Duration::from_secs(3), TlsConnector::from(client).connect(name, tcp)).await??;
+    stream
+        .write_all(b"GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
+        .await?;
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        time::timeout(Duration::from_secs(3), stream.read_exact(&mut byte)).await??;
+        response.push(byte[0]);
+    }
+    if !response.starts_with(b"HTTP/1.1 101") {
+        return Err(format!(
+            "unexpected WSS upgrade response: {}",
+            String::from_utf8_lossy(&response)
+        )
+        .into());
+    }
+    Ok(stream)
+}
+
+#[cfg(feature = "ws")]
+async fn managed_wss_upgrade(
+    State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    policy.on_upgrade(ws, &headers, context, |mut session: WsSession| async move {
+        while let Some(Ok(message)) = session.recv().await {
+            if session.try_send(message).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+#[cfg(feature = "ws")]
+#[tokio_test]
+async fn reloadable_tls_keeps_existing_wss_session_and_rotates_new_sessions() {
+    let (external, client) = rotation_test_configs().await.expect("rotation configs should load");
+    let server = WebServer::bind_https(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()),
+        TlsConfig::from_reloadable_rustls(external.clone()),
+    )
+    .await
+    .expect("reloadable HTTPS listener binds");
+    let address = server.local_addr();
+    let policy = WsUpgradePolicy::new();
+    let context = server.context();
+    let app = Router::new()
+        .route("/ws", get(managed_wss_upgrade))
+        .with_state((policy.clone(), context.clone()));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = spawn(server.serve(app, async {
+        let _ = shutdown_rx.await;
+    }));
+
+    let result = async {
+        let mut existing = establish_wss(address, Arc::clone(&client)).await?;
+        time::timeout(Duration::from_secs(3), async {
+            while policy.active_connections() != 1 || context.active_sessions() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("existing WSS session should register and hold its resources");
+        assert_eq!(
+            wss_echo_once(&mut existing, b"session-before").await?,
+            b"session-before"
+        );
+        external
+            .reload_from_pem_file(fixture("rotation-b-cert.pem"), fixture("rotation-b-key.pem"))
+            .await?;
+        assert_eq!(wss_echo_once(&mut existing, b"session-after").await?, b"session-after");
+        let mut new_session = establish_wss(address, client).await?;
+        time::timeout(Duration::from_secs(3), async {
+            while policy.active_connections() != 2 || context.active_sessions() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("new WSS session should register and hold its resources");
+        let peer = new_session
+            .get_ref()
+            .1
+            .peer_certificates()
+            .expect("new session has peer certificate");
+        assert_eq!(
+            peer[0].as_ref(),
+            certificate_der(fixture("rotation-b-cert.pem")).as_ref()
+        );
+        assert_eq!(wss_echo_once(&mut new_session, b"new-session").await?, b"new-session");
+        drop(existing);
+        drop(new_session);
+        time::timeout(Duration::from_secs(3), async {
+            while policy.active_connections() != 0 || context.active_sessions() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("closed WSS peers should release session and connection resources");
+        Ok::<_, TestError>(())
+    }
+    .await;
+
+    let _ = shutdown_tx.send(());
+    let report = time::timeout(Duration::from_secs(3), serving)
+        .await
+        .expect("server shutdown should complete")
+        .expect("server task should not panic")
+        .expect("server should report shutdown");
+    assert!(report.graceful);
+    assert_eq!(policy.active_connections(), 0);
+    assert_eq!(context.active_sessions(), 0);
+    result.expect("existing WSS session should survive rotation and new session should use B");
 }
 
 #[tokio_test]

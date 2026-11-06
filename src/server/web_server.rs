@@ -22,8 +22,6 @@ use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-#[cfg(feature = "tls")]
-use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 use tracing::Instrument;
 use tracing::instrument::WithSubscriber;
@@ -66,6 +64,9 @@ mod session_registration_error;
 mod session_tracker;
 #[path = "shutdown_report.rs"]
 mod shutdown_report;
+#[cfg(feature = "tls")]
+#[path = "internal/tls_acceptor_source.rs"]
+mod tls_acceptor_source;
 use accept_loop::run_accept_loop;
 use accept_retry::AcceptRetry;
 use connection_activity::ConnectionActivity;
@@ -79,6 +80,8 @@ pub use server_context::ServerContext;
 pub use session_guard::SessionGuard;
 pub use session_registration_error::SessionRegistrationError;
 pub use shutdown_report::ShutdownReport;
+#[cfg(feature = "tls")]
+use tls_acceptor_source::TlsAcceptorSource;
 
 use crate::ServerOptions;
 use crate::WebServerError;
@@ -111,7 +114,7 @@ pub struct WebServer {
     context: ServerContext,
     /// TLS acceptor when this server was created from HTTPS configuration.
     #[cfg(feature = "tls")]
-    tls_acceptor: Option<TlsAcceptor>,
+    tls_acceptor: Option<TlsAcceptorSource>,
 }
 
 impl std::fmt::Debug for WebServer {
@@ -160,13 +163,9 @@ impl WebServer {
     }
 
     /// Binds an HTTPS socket after validating options and TLS credentials.
-    /// The underlying rustls configuration is snapshotted while constructing
-    /// the bound server. A reload completed before this method finishes can
-    /// be observed by this binding, but a reload afterward does not update the
-    /// server's handshakes. Concurrent reload and binding operations have no
-    /// guaranteed ordering and must be coordinated by the application. Apply
-    /// a new configuration by coordinating shutdown and a new bind; seamless
-    /// rebinding of the same address is not guaranteed.
+    /// `TlsConfig::from_rustls` snapshots its configuration at bind time;
+    /// `TlsConfig::from_reloadable_rustls` takes one current snapshot before
+    /// each new connection handshake.
     ///
     /// # Parameters
     ///
@@ -219,7 +218,11 @@ impl WebServer {
             local_addr,
             options,
             context,
-            tls_acceptor: Some(TlsAcceptor::from(config.rustls_config().get_inner())),
+            tls_acceptor: Some(if config.is_reloadable() {
+                TlsAcceptorSource::Reloadable(config.rustls_config())
+            } else {
+                TlsAcceptorSource::Snapshot(tokio_rustls::TlsAcceptor::from(config.rustls_config().get_inner()))
+            }),
         })
     }
 
@@ -358,7 +361,8 @@ impl WebServer {
                         let _completion_guard = completion_guard;
                         let _permit = permit;
                         #[cfg(feature = "tls")]
-                        if let Some(acceptor) = tls_acceptor {
+                        if let Some(source) = tls_acceptor {
+                            let acceptor = source.for_handshake();
                             let accepted = tokio::select! {
                                 biased;
                                 _ = cancellation.cancelled() => return,

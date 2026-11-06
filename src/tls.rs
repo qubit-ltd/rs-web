@@ -44,6 +44,8 @@ use crate::WebServerError;
 pub struct TlsConfig {
     /// Parsed rustls settings shared with HTTPS server instances.
     inner: RustlsConfig,
+    /// Whether each connection should read the shared config before handshake.
+    reloadable: bool,
 }
 
 impl TlsConfig {
@@ -73,7 +75,10 @@ impl TlsConfig {
         let inner = RustlsConfig::from_pem_file(certificate_chain, private_key)
             .await
             .map_err(|_| WebServerError::TlsInvalid)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            reloadable: false,
+        })
     }
 
     /// Creates TLS settings from an already constructed axum-server rustls
@@ -98,7 +103,34 @@ impl TlsConfig {
     /// the same address is not guaranteed to be seamless.
     #[inline]
     pub fn from_rustls(config: RustlsConfig) -> Self {
-        Self { inner: config }
+        Self {
+            inner: config,
+            reloadable: false,
+        }
+    }
+
+    /// Creates TLS settings that use the latest supplied Rustls configuration
+    /// for each new connection handshake.
+    ///
+    /// Keep a clone of `config` to call its reload methods after binding. Each
+    /// handshake takes one configuration snapshot before it begins; existing
+    /// connections retain their negotiated TLS state. Failed PEM reloads
+    /// leave the last successfully loaded configuration active.
+    ///
+    /// # Parameters
+    ///
+    /// * `config` - Shared rustls settings that the application can reload.
+    ///
+    /// # Returns
+    ///
+    /// TLS settings that use the current config snapshot for each new
+    /// handshake.
+    #[inline]
+    pub fn from_reloadable_rustls(config: RustlsConfig) -> Self {
+        Self {
+            inner: config,
+            reloadable: true,
+        }
     }
 
     /// Returns a clone of the validated rustls config for the HTTPS transport.
@@ -110,6 +142,16 @@ impl TlsConfig {
     #[inline]
     pub(crate) fn rustls_config(&self) -> RustlsConfig {
         self.inner.clone()
+    }
+
+    /// Reports whether the HTTPS listener should read the config before each
+    /// handshake.
+    ///
+    /// # Returns
+    ///
+    /// `true` when this setting uses the explicitly reloadable source.
+    pub(crate) fn is_reloadable(&self) -> bool {
+        self.reloadable
     }
 }
 
