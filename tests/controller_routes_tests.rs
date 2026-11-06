@@ -32,6 +32,241 @@ use qubit_web::rest_controller;
 use tokio::sync::Semaphore;
 use tower::ServiceExt;
 
+struct HeadGetOnly;
+
+#[rest_controller("/head-contract")]
+impl HeadGetOnly {
+    #[get_mapping("")]
+    async fn get(&self) -> Response {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("x-handler", "get")
+            .body(Body::from("get-body"))
+            .unwrap()
+    }
+}
+
+struct HeadGetFirst;
+
+#[rest_controller("/head-contract")]
+impl HeadGetFirst {
+    #[get_mapping("")]
+    async fn get(&self) -> Response {
+        head_contract_response(StatusCode::OK, "get", "get-body")
+    }
+
+    #[route("", method = "HEAD")]
+    async fn head(&self) -> Response {
+        head_contract_response(StatusCode::ACCEPTED, "head", "head-body")
+    }
+}
+
+struct HeadFirstGet;
+
+#[rest_controller("/head-contract")]
+impl HeadFirstGet {
+    #[route("", method = "HEAD")]
+    async fn head(&self) -> Response {
+        head_contract_response(StatusCode::ACCEPTED, "head", "head-body")
+    }
+
+    #[get_mapping("")]
+    async fn get(&self) -> Response {
+        head_contract_response(StatusCode::OK, "get", "get-body")
+    }
+}
+
+struct CrossHeadGet;
+
+#[rest_controller("/head-contract")]
+impl CrossHeadGet {
+    #[get_mapping("")]
+    async fn get(&self) -> Response {
+        head_contract_response(StatusCode::OK, "get", "get-body")
+    }
+}
+
+struct CrossHeadOnly;
+
+#[rest_controller("/head-contract")]
+impl CrossHeadOnly {
+    #[route("", method = "HEAD")]
+    async fn head(&self) -> Response {
+        head_contract_response(StatusCode::ACCEPTED, "head", "head-body")
+    }
+}
+
+fn head_contract_response(status: StatusCode, handler: &'static str, body: &'static str) -> Response {
+    Response::builder()
+        .status(status)
+        .header("x-handler", handler)
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn assert_head_contract(app: Router, expected_head: (&'static str, StatusCode)) {
+    let head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri("/head-contract")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.status(), expected_head.1);
+    assert_eq!(head.headers()["x-handler"], expected_head.0);
+    assert!(axum::body::to_bytes(head.into_body(), 64).await.unwrap().is_empty());
+
+    let get = app
+        .oneshot(Request::get("/head-contract").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(get.headers()["x-handler"], "get");
+    assert_eq!(axum::body::to_bytes(get.into_body(), 64).await.unwrap(), "get-body");
+}
+
+#[tokio::test]
+async fn test_head_contract_get_only_uses_implicit_head() {
+    let app = ControllerRoutes::<()>::new()
+        .add(Arc::new(HeadGetOnly))
+        .unwrap()
+        .finish();
+    assert_head_contract(app, ("get", StatusCode::OK)).await;
+}
+
+#[tokio::test]
+async fn test_head_contract_same_controller_get_first_prefers_explicit_head() {
+    let app = ControllerRoutes::<()>::new()
+        .add(Arc::new(HeadGetFirst))
+        .unwrap()
+        .finish();
+    assert_head_contract(app, ("head", StatusCode::ACCEPTED)).await;
+}
+
+#[tokio::test]
+async fn test_head_contract_same_controller_head_first_prefers_explicit_head() {
+    let app = ControllerRoutes::<()>::new()
+        .add(Arc::new(HeadFirstGet))
+        .unwrap()
+        .finish();
+    assert_head_contract(app, ("head", StatusCode::ACCEPTED)).await;
+}
+
+#[tokio::test]
+async fn test_head_contract_cross_controller_get_first_prefers_explicit_head() {
+    let app = ControllerRoutes::<()>::new()
+        .add(Arc::new(CrossHeadGet))
+        .unwrap()
+        .add(Arc::new(CrossHeadOnly))
+        .unwrap()
+        .finish();
+    assert_head_contract(app, ("head", StatusCode::ACCEPTED)).await;
+}
+
+#[tokio::test]
+async fn test_head_contract_cross_controller_head_first_prefers_explicit_head() {
+    let app = ControllerRoutes::<()>::new()
+        .add(Arc::new(CrossHeadOnly))
+        .unwrap()
+        .add(Arc::new(CrossHeadGet))
+        .unwrap()
+        .finish();
+    assert_head_contract(app, ("head", StatusCode::ACCEPTED)).await;
+}
+
+#[tokio::test]
+async fn test_head_contract_releases_concurrency_limit_after_head_response() {
+    let app = ControllerRoutes::<()>::new()
+        .with_http_limits(HttpLimits::default().with_max_concurrent_requests(1).unwrap())
+        .add(Arc::new(HeadGetOnly))
+        .unwrap()
+        .finish();
+    let head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri("/head-contract")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    assert!(axum::body::to_bytes(head.into_body(), 64).await.unwrap().is_empty());
+
+    let get = tokio::time::timeout(
+        Duration::from_secs(1),
+        app.oneshot(Request::get("/head-contract").body(Body::empty()).unwrap()),
+    )
+    .await
+    .expect("GET should proceed after the HEAD response releases its permit")
+    .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(axum::body::to_bytes(get.into_body(), 64).await.unwrap(), "get-body");
+}
+
+#[tokio::test]
+async fn test_head_contract_explicit_head_releases_concurrency_limit_after_response() {
+    let app = ControllerRoutes::<()>::new()
+        .with_http_limits(HttpLimits::default().with_max_concurrent_requests(1).unwrap())
+        .add(Arc::new(HeadGetFirst))
+        .unwrap()
+        .finish();
+    let head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri("/head-contract")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::ACCEPTED);
+    assert_eq!(head.headers()["x-handler"], "head");
+    assert!(axum::body::to_bytes(head.into_body(), 64).await.unwrap().is_empty());
+
+    let get = tokio::time::timeout(
+        Duration::from_secs(1),
+        app.oneshot(Request::get("/head-contract").body(Body::empty()).unwrap()),
+    )
+    .await
+    .expect("GET should proceed after the explicit HEAD response releases its permit")
+    .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(axum::body::to_bytes(get.into_body(), 64).await.unwrap(), "get-body");
+}
+
+#[test]
+fn test_head_contract_duplicate_head_across_controllers_is_reported() {
+    struct OtherHead;
+    #[rest_controller("/head-contract")]
+    impl OtherHead {
+        #[route("", method = "HEAD")]
+        async fn head(&self) -> &'static str {
+            "head"
+        }
+    }
+
+    let result = ControllerRoutes::<()>::new()
+        .add(Arc::new(CrossHeadOnly))
+        .unwrap()
+        .add(Arc::new(OtherHead));
+    assert!(matches!(
+        result,
+        Err(ControllerRouteError::DuplicateMethod {
+            method: "HEAD",
+            path: "/head-contract"
+        })
+    ));
+}
+
 static INVALID_PATH_REGISTER_CALLED: AtomicBool = AtomicBool::new(false);
 
 #[test]

@@ -1,0 +1,7 @@
+error: duplicate controller route: HEAD /items
+  --> tests/ui/controller_duplicate_head.rs:20:5
+   |
+20 | /     async fn second(&self) -> &'static str {
+21 | |         "second"
+22 | |     }
+   | |_____^
