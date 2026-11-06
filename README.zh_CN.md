@@ -78,13 +78,11 @@ curl -i -X POST http://127.0.0.1:3000/admin/shutdown
 
 健康检查返回 `200 OK`，正文为 `ok`；停服路由返回 `202 Accepted`，并通知传给 `serve` 的关闭 future。示例仅绑定 loopback。请求限额只安装在短请求 `/health` 上；`WebServer` 直接运行传入的 Router，不会自动安装 HTTP 限额。停服路由没有认证，仅供本机演示，不能对外开放。
 
-每条 HTTP/2 连接默认允许同时开启 200 个流。可通过 `ServerOptions::with_http2_max_concurrent_streams` 设置每连接上限，也可在启用 `config` 时使用 `transport.http2_max_concurrent_streams`。该协议流上限不是进程级请求数、连接数或内存上限。
-
-`ServerOptions` 还可选限制 HTTP/1 解析缓冲区（最小 8192 字节）和 HTTP/2 解压后 header list（正 `u32` 字节）；两项默认沿用 Hyper 默认值。启用 `config` 时，对应配置键为 `transport.http1_max_buffer_bytes` 和 `transport.http2_max_header_list_bytes`。两种协议计量不同，也都不是进程内存上限。详细边界与拒绝行为见[用户指南](doc/user_guide.zh_CN.md#传输与协议请求头预算)。WebSocket 写入失败会发出脱敏的 `websocket_io_failure` tracing 事件；成功入队仍不表示消息已通过网络送达。
+HTTP/2 流数、可选的 HTTP/1 与 HTTP/2 请求头预算，以及 WebSocket 写入诊断均在[用户指南](doc/user_guide.zh_CN.md#传输与协议请求头预算)中说明，包含各自的适用范围和运行边界。
 
 另一个独立的内存 CRUD 示例可用 `cargo run --example controller_crud --all-features` 启动。`/users` 属于该示例，并不存在于上面的最小服务中；创建用户会返回 `201 Created`。在 [`examples/controller_crud.rs`](examples/controller_crud.rs) 可查看如何用 `ControllerRoutes::with_http_limits` 替换 Controller 短路由的默认限额。原生 Axum 路由需要在选定的短路由分支安装 `RequestLimitLayer::new(http_limits)`，并在 SSE/WS 分支安装 `StreamAdmissionLayer`。Controller 的 `sse` 和 `ws` 路由使用独立的流式接纳预算。
 
-启用 `config` feature 后，`ConfiguredWeb::from_config` 会分别返回 `ServerOptions` 和 `HttpLimits`。Controller 短路由已有 `HttpLimits::default()`；将配置所得限额传给 `with_http_limits` 可替换默认策略。原生 Axum 路由需在选定的短路由分支安装 `RequestLimitLayer`，并在 SSE/WS 分支安装 `StreamAdmissionLayer`；`WebServer` 不会替 Router 应用限额。
+启用 `config` feature 后，`ConfiguredWeb::from_config` 会分别返回 `ServerOptions` 和 `HttpLimits`。如何将两者应用于 Controller 与原生 Axum 路由，见[用户指南](doc/user_guide.zh_CN.md#装配普通接口与长连接)；`WebServer` 不会替 Router 添加路由限额。
 
 ## 流式示例
 
@@ -114,7 +112,7 @@ Controller 路径捕获使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧�
 `WsSession::close()` 可重复调用；如果等待期间取消了 close future，可以再次调用完成关闭。显式关闭后，`recv()` 返回 `None`。`WsSession::closed()` 提供一个 owned 通知：两个受管 I/O 任务释放资源后 future 才会就绪，应用可将它与可取消工作一起 select，并调用 `close()` 释放队列中的入站消息。它不会自动结束 handler 或应用自行启动的任务。传输读取错误可通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；宿主停服可能直接取消 handler，不保证交付该错误。未匹配请求的诊断日志只使用固定标记 `<unmatched>`，不会记录请求 URI 或秘密信息。`request_header_timeout` 和 SSE keep-alive interval 若为零或无法表示为 Tokio 截止时间，会以 `WebServerError::InvalidConfig` 拒绝。
 
 - Controller 的 `short` 路由默认使用 `HttpLimits::default()`；原生 Axum 路由必须在需要限额的短请求分支上显式安装 `RequestLimitLayer`。`WebServer` 不会替传入的 Router 自动添加路由限额。
-- Controller 的 `sse`/`ws` 路由共用 builder 的 `StreamAdmissionState`；添加路由前可用 `with_stream_admission_limits` 替换预算。原生 Axum 分支必须显式安装 `StreamAdmissionLayer`：`new` 创建独立预算，`from_state` 可共享预算。默认每个状态域最多缓冲 1 MiB/请求、接纳 256 个请求，并在响应头产生前限时 10 秒；请求体缓冲理论上限为每个状态域 256 MiB，另有请求和运行时开销。`RequestLimitLayer` 仍是独立的短请求策略。传输连接数和 SSE/WS 会话额度另行计算；SSE 也占用 HTTP 连接。
+- Controller 的 `sse`/`ws` 路由共用 builder 的 `StreamAdmissionState`；添加路由前可用 `with_stream_admission_limits` 替换预算。原生 Axum 分支必须显式安装 `StreamAdmissionLayer`：`new` 创建独立预算，`from_state` 可共享预算。默认每个状态域最多缓冲 1 MiB/请求、接纳 256 个请求，并在响应头产生前限时 10 秒。256 MiB 是并发请求体载荷的估算，不是缓冲分配或进程峰值；增量缓冲会在复制后释放已处理的数据帧，但仍有 Vec 增长余量、扩容期间的临时共存、当前帧、trailers、分配器和传输开销。`RequestLimitLayer` 仍是独立的短请求策略。传输连接数和 SSE/WS 会话额度另行计算；SSE 也占用 HTTP 连接。
 - 认证、授权、业务状态，以及流式数据的保存和重放由应用负责。WebSocket 升级前必须先完成认证；Origin 检查只限制浏览器来源。示例 token 和无认证停服入口仅供 loopback 演示。
 - `DiagnosticLayer::new()` 记录请求及响应头元数据。需要响应体终止结果时，在 `RequestLimitLayer` 外侧显式安装 `DiagnosticLayer::with_body_diagnostics()`；事件使用允许列表字段，不含正文或错误文本，也不声称客户端已断连或网络已送达。
 - WebSocket 的 `queue_limits` 配置出站队列；`inbound_queue_limits` 单独配置入站预算，默认每连接最多排队 64 条消息和累计 1 MiB payload。通道满时最多等待至 `idle_timeout`，字节预算不足则立即以 `1013` 关闭。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，另有每个活跃连接最多一条 1 MiB 协议重组消息；该估算不含分配开销和应用自有内存，也不是 I/O 结束后仍被 handler 或 session 保留的内存上限。

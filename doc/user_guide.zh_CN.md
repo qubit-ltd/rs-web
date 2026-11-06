@@ -237,7 +237,7 @@ let app = Router::new()
     .route("/ws", get(websocket).layer(StreamAdmissionLayer::from_state(shared)));
 ```
 
-可运行的 [`prompt_stream` 示例](../examples/prompt_stream.rs)现已采用同样的装配方式：原生 SSE 和 WebSocket 路由拿到的是同一个 `StreamAdmissionState` 的克隆。使用默认限额时，这个共享状态每个请求最多缓冲 1 MiB 请求体，同时最多接纳 256 个请求；从开始接纳到 handler 生成响应头的期限为 10 秒。响应头就绪后期限即结束，不覆盖后续 SSE 流，也不覆盖 WebSocket 升级后的会话。会话容量仍分别由 `SseConnectionPolicy` 和 `WsUpgradePolicy` 管理。
+可运行的 [`prompt_stream` 示例](../examples/prompt_stream.rs)现已采用同样的装配方式：原生 SSE 和 WebSocket 路由拿到的是同一个 `StreamAdmissionState` 的克隆。使用默认限额时，这个共享状态每个请求最多缓冲 1 MiB 请求体，同时最多接纳 256 个请求；从开始接纳到 handler 生成响应头的期限为 10 秒。256 MiB 是并发请求体载荷的估算，不是缓冲分配或进程峰值上限。增量缓冲在复制后释放已处理的数据帧，但 Vec 增长余量、扩容期间的临时共存、当前帧、trailers、分配器行为和传输缓冲仍会占用额外资源。响应头就绪后期限即结束，不覆盖后续 SSE 流，也不覆盖 WebSocket 升级后的会话。会话容量仍分别由 `SseConnectionPolicy` 和 `WsUpgradePolicy` 管理。
 
 Layer 构造器不再接收 Router 状态类型参数。旧调用只需去掉 turbofish：
 
@@ -253,7 +253,7 @@ StreamAdmissionLayer::from_state(shared.clone());
 
 每次调用 `StreamAdmissionLayer::new(limits)` 都会创建独立容量域。`ControllerRoutes` 会让同一 builder 中的 `sse`/`ws` 路由共用一个状态域；添加 Controller 前调用 `with_stream_admission_limits(limits)` 可替换默认预算。`with_http_limits` 只配置 `short` 路由，因此 builder 中短请求和流式接纳额度彼此独立。
 
-每个流式接纳状态域默认允许单个请求体缓冲 1 MiB、同时接纳 256 个请求，并在 handler 生成响应头前限时 10 秒。请求体缓冲的理论上限为每个状态域 256 MiB，另加请求和运行时开销；请按内存预算调低请求体或并发上限。layer 会在 handler 运行前收齐请求体，因此超限或读取失败的 body 不会进入 handler。SSE 响应体和 WebSocket 会话不受该接纳期限限制。
+每个流式接纳状态域默认允许单个请求体缓冲 1 MiB、同时接纳 256 个请求，并在 handler 生成响应头前限时 10 秒。256 MiB 是并发请求体载荷的估算，不是缓冲分配或进程峰值上限。增量缓冲在复制后释放已处理的数据帧，但 Vec 增长余量、扩容期间的临时共存、当前帧、trailers、分配器行为和传输缓冲仍会占用额外资源；请按内存预算调低请求体或并发上限。layer 会在 handler 运行前收齐请求体，因此超限或读取失败的 body 不会进入 handler。SSE 响应体和 WebSocket 会话不受该接纳期限限制。
 
 该 layer 会为 handler 保留请求 trailers。缓冲时可能合并输入的数据帧；配置的请求体预算只计算数据字节，trailers 不计入此字节限额，layer 也没有单独设置 trailers 内存上限。
 
@@ -416,6 +416,8 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 
 ## 容量估算与故障定位
 
+WebSocket writer 对 sink 写入或控制帧刷新失败，每个 writer 至多发出一次结构化 `websocket_io_failure` warning，包括对端 Close 后有界收尾 flush 的真实错误。事件带有 `direction=write` 和 `operation=send` 或 `flush`，不会记录 payload 或底层错误文本。对端关闭后的 flush 成功不会报警；取消和等待关闭确认超时也不作为写失败记录。`WsSession::try_send` 成功仍只表示消息已入队，不代表网络送达。
+
 传输连接与长连接要分别预算。例如 transport 上限设为 256，SSE 策略再允许 80 个会话、WebSocket 策略允许 80 个会话；这些策略上限彼此独立，部署时还要结合文件描述符、内存、TLS CPU 和业务处理能力评估。transport 上限按 `WebServer` 实例计算，不是进程级总额度。SSE 仍是 HTTP transport future，会持续占用 transport 额度；WebSocket 完成 HTTP upgrade 后释放这项额度。
 
 transport 许可用满后，accept loop 会在 accept 新 socket 前等待。客户端可能留在操作系统 listen backlog 中，也可能连接失败；尚未 accept 的连接没有 HTTP handler，因此不能保证返回 503。backlog 行为取决于部署平台，不应当作应用响应。
@@ -424,7 +426,7 @@ accept 遇到 socket I/O 错误时，`InvalidInput`、`PermissionDenied`、`Unsu
 
 `request_header_timeout` 默认 10 秒，用于限制 HTTP/1 请求头；零值或 Tokio 无法通过 `Instant::checked_add` 表示的期限（包括 `Duration::MAX`）会以 `WebServerError::InvalidConfig` 拒绝。SSE keep-alive interval 也必须是正数且可表示。未匹配请求的诊断日志只使用固定标记 `<unmatched>`，不会记录 URI、查询参数或秘密信息。HTTPS TLS 握手也沿用该期限。`transport_idle_timeout` 默认 30 秒，在 handler 和响应体都不活跃时回收空闲 HTTP/1/2 连接。活跃请求停滞不会由空闲期限中断；此类情况应使用路由限额或部署层策略处理。`HttpLimits::with_request_timeout` 与传输空闲期限不同：Controller `short` 路由默认使用该请求期限，原生 Axum 路由则只有显式安装 `RequestLimitLayer` 后才使用。
 
-WebSocket 的 `idle_timeout` 必须为正且能构造 Tokio deadline；不可表示时返回新增的 `WsPolicyError::IdleTimeoutTooLarge`。穷尽匹配 `WsPolicyError` 的调用方需增加该分支或使用兜底分支。`queue_limits` 配置出站队列；`inbound_queue_limits(messages, bytes)` 单独配置入站队列及每连接累计 payload 字节预算，默认是 64 条排队消息和 1 MiB。reader 等待通道空位时最多另持有一条消息，该 payload 也计入相同字节预算。通道满时最多等待至 `idle_timeout`，然后以关闭码 `1013`（原因 `inbound backpressure`）关闭；若剩余字节预算不足以容纳消息，则立即以 `1013` 关闭。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，每个活跃连接还最多有一条 1 MiB 协议重组消息。该估算不含分配开销和应用自有内存，也不限制 I/O 结束后仍被 handler 或 session 保留的内存。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应定期读取消息，再将较长处理交给应用任务。传输读取错误通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；显式 `close()` 会清除待交付错误，此后 `recv()` 返回 `None`。宿主停服可能直接取消 handler，不保证交付该错误。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达。准入依次检查：队列关闭时返回 `Closed`，消息超过总字节预算时返回 `MessageTooLarge`，条数或剩余字节容量不足时返回 `Backpressure`。应用可按策略对 `Backpressure` 退避；同一消息的 `MessageTooLarge` 不会因重试恢复，应缩小、分块或拒绝；`Closed` 后停止发送。新增枚举变体会影响穷尽匹配，且原先对单条超限消息断言 `Backpressure` 的测试需要迁移。对端或会话关闭时会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。WebSocket sink 写入或控制帧刷新失败时，writer 至多发出一次 `websocket_io_failure` warning，并带有 `direction=write` 与 `operation=send` 或 `flush`；不会记录 payload 或底层错误文本。该诊断不会把 `try_send` 变成送达确认。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。通过 `try_send` 排队的 Close 会保留其关闭码和原因；writer 开始处理该帧时会关闭出站队列，后续发送返回 `Closed`，其后的排队消息可能丢弃，等待对端确认的时间受共享关闭 deadline 限制。writer 取出该 Close 前成功的 `try_send` 仍只表示入队。
+WebSocket 的 `idle_timeout` 必须为正且能构造 Tokio deadline；不可表示时返回新增的 `WsPolicyError::IdleTimeoutTooLarge`。穷尽匹配 `WsPolicyError` 的调用方需增加该分支或使用兜底分支。`queue_limits` 配置出站队列；`inbound_queue_limits(messages, bytes)` 单独配置入站队列及每连接累计 payload 字节预算，默认是 64 条排队消息和 1 MiB。reader 等待通道空位时最多另持有一条消息，该 payload 也计入相同字节预算。通道满时最多等待至 `idle_timeout`，然后以关闭码 `1013`（原因 `inbound backpressure`）关闭；若剩余字节预算不足以容纳消息，则立即以 `1013` 关闭。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，每个活跃连接还最多有一条 1 MiB 协议重组消息。该估算不含分配开销和应用自有内存，也不限制 I/O 结束后仍被 handler 或 session 保留的内存。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应定期读取消息，再将较长处理交给应用任务。传输读取错误通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；显式 `close()` 会清除待交付错误，此后 `recv()` 返回 `None`。宿主停服可能直接取消 handler，不保证交付该错误。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达。准入依次检查：队列关闭时返回 `Closed`，消息超过总字节预算时返回 `MessageTooLarge`，条数或剩余字节容量不足时返回 `Backpressure`。应用可按策略对 `Backpressure` 退避；同一消息的 `MessageTooLarge` 不会因重试恢复，应缩小、分块或拒绝；`Closed` 后停止发送。新增枚举变体会影响穷尽匹配，且原先对单条超限消息断言 `Backpressure` 的测试需要迁移。对端或会话关闭时会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。通过 `try_send` 排队的 Close 会保留其关闭码和原因；writer 开始处理该帧时会关闭出站队列，后续发送返回 `Closed`，其后的排队消息可能丢弃，等待对端确认的时间受共享关闭 deadline 限制。writer 取出该 Close 前成功的 `try_send` 仍只表示入队。
 
 如果要在 WebSocket I/O 结束后停止可取消的业务操作，可等待 `WsSession::closed()`。它返回 owned future，因此不借用 session，可以和应用操作一起 select：
 
