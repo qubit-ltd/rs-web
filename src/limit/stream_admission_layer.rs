@@ -89,9 +89,12 @@ impl StreamAdmissionLayer {
     /// An Axum middleware layer that buffers the complete request body before
     /// running the handler and holds a permit until response headers exist.
     /// With default limits, the body is at most 1 MiB and up to 256 admissions
-    /// share the layer's state domain, for a theoretical body-buffer budget of
-    /// 256 MiB plus request/runtime overhead. Independent layers have
-    /// independent budgets.
+    /// share the layer's state domain, for an estimated concurrent payload of
+    /// 256 MiB. This is not a bound on buffer allocations or process peak
+    /// memory. Incremental buffering releases each prior data-frame owner after
+    /// copying it, while vector growth, temporary coexistence during growth,
+    /// the current frame, trailers, allocator behavior, and transport buffers
+    /// remain additional costs. Independent layers have independent budgets.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(
         limits: super::stream_admission_limits::StreamAdmissionLimits,
@@ -186,15 +189,31 @@ async fn buffer_then_run(
     maximum: usize,
 ) -> Result<Response, WebRejection> {
     let (parts, body) = request.into_parts();
-    let collected = Limited::new(body, maximum).collect().await.map_err(|error| {
-        if error.is::<http_body_util::LengthLimitError>() {
-            WebRejection::BodyTooLarge
-        } else {
-            WebRejection::BodyReadFailed
+    let mut body = Limited::new(body, maximum);
+    let mut buffer = Vec::new();
+    let mut trailers: Option<axum::http::HeaderMap> = None;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|error| {
+            if error.is::<http_body_util::LengthLimitError>() {
+                WebRejection::BodyTooLarge
+            } else {
+                WebRejection::BodyReadFailed
+            }
+        })?;
+        match frame.into_data() {
+            Ok(data) => buffer.extend_from_slice(&data),
+            Err(frame) => {
+                if let Ok(next_trailers) = frame.into_trailers() {
+                    if let Some(current) = &mut trailers {
+                        current.extend(next_trailers);
+                    } else {
+                        trailers = Some(next_trailers);
+                    }
+                }
+            }
         }
-    })?;
-    let trailers = collected.trailers().cloned();
-    let bytes = collected.to_bytes();
+    }
+    let bytes = axum::body::Bytes::from(buffer);
     let replay = match trailers {
         Some(trailers) => Body::new(BufferedRequestBody::new(bytes, trailers)),
         None => Body::from(bytes),

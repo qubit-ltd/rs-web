@@ -8,6 +8,7 @@
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::task::Context;
@@ -32,6 +33,103 @@ use qubit_web::WebRejection;
 use tower::ServiceExt;
 
 const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
+
+struct CountingOwner {
+    bytes: Vec<u8>,
+    active: Arc<AtomicUsize>,
+}
+
+impl CountingOwner {
+    fn new(bytes: Vec<u8>, active: Arc<AtomicUsize>) -> Self {
+        active.fetch_add(1, Ordering::SeqCst);
+        Self { bytes, active }
+    }
+}
+
+impl AsRef<[u8]> for CountingOwner {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for CountingOwner {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct OwnerFramesBody {
+    remaining: usize,
+    active: Arc<AtomicUsize>,
+    owners_live_before_frame: Arc<Mutex<Vec<usize>>>,
+}
+
+impl HttpBody for OwnerFramesBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        if self.remaining == 0 {
+            return Poll::Ready(None);
+        }
+        self.owners_live_before_frame
+            .lock()
+            .unwrap()
+            .push(self.active.load(Ordering::SeqCst));
+        self.remaining -= 1;
+        let owner = CountingOwner::new(vec![b'x'], self.active.clone());
+        Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from_owner(owner)))))
+    }
+}
+
+#[test]
+fn test_backing_owner_counter_tracks_bytes_lifetime() {
+    let active = Arc::new(AtomicUsize::new(0));
+    let bytes = Bytes::from_owner(CountingOwner::new(vec![b'x'], active.clone()));
+    assert_eq!(active.load(Ordering::SeqCst), 1);
+    drop(bytes);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_fragmented_admission_does_not_retain_prior_frame_owners() {
+    const FRAMES: usize = 8;
+    let active = Arc::new(AtomicUsize::new(0));
+    let owners_live_before_frame = Arc::new(Mutex::new(Vec::new()));
+    async fn inspect(body: Bytes) -> String {
+        assert_eq!(body, Bytes::from(vec![b'x'; FRAMES]));
+        body.len().to_string()
+    }
+    let limits = StreamAdmissionLimits::default().with_max_body_bytes(FRAMES).unwrap();
+    let response = Router::new()
+        .route("/", post(inspect))
+        .layer(StreamAdmissionLayer::new(limits))
+        .oneshot(
+            Request::post("/")
+                .body(Body::new(OwnerFramesBody {
+                    remaining: FRAMES,
+                    active: active.clone(),
+                    owners_live_before_frame: owners_live_before_frame.clone(),
+                }))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 16).await.unwrap(),
+        FRAMES.to_string()
+    );
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        *owners_live_before_frame.lock().unwrap(),
+        vec![0; FRAMES],
+        "each prior frame's backing owner should be dropped before polling the next frame"
+    );
+}
 
 struct DataAndTrailersBody {
     state: u8,
@@ -59,6 +157,16 @@ impl HttpBody for DataAndTrailersBody {
                 }
                 let mut trailers = HeaderMap::new();
                 trailers.insert("x-check", "preserved".parse().unwrap());
+                trailers.append("x-check", "preserved-too".parse().unwrap());
+                Poll::Ready(Some(Ok(hyper::body::Frame::trailers(trailers))))
+            }
+            2 => {
+                self.state = 3;
+                if self.fail_after_data {
+                    return Poll::Ready(None);
+                }
+                let mut trailers = HeaderMap::new();
+                trailers.insert("x-second", "second-frame".parse().unwrap());
                 Poll::Ready(Some(Ok(hyper::body::Frame::trailers(trailers))))
             }
             _ => Poll::Ready(None),
@@ -70,7 +178,13 @@ impl HttpBody for DataAndTrailersBody {
 async fn test_admission_preserves_request_trailers() {
     async fn inspect(_: State<()>, request: Request<Body>) -> StatusCode {
         let collected = request.into_body().collect().await.unwrap();
-        assert_eq!(collected.trailers().unwrap()["x-check"], "preserved");
+        let trailers = collected.trailers().unwrap();
+        let values = trailers.get_all("x-check");
+        assert_eq!(
+            values.iter().map(|value| value.to_str().unwrap()).collect::<Vec<_>>(),
+            vec!["preserved", "preserved-too"]
+        );
+        assert_eq!(trailers["x-second"], "second-frame");
         assert_eq!(collected.to_bytes(), Bytes::from_static(b"request"));
         StatusCode::OK
     }
@@ -99,7 +213,13 @@ async fn test_trailer_body_limit_and_read_failure_keep_admission_rejections() {
     async fn inspect(State(calls): State<Arc<AtomicUsize>>, request: Request<Body>) -> StatusCode {
         calls.fetch_add(1, Ordering::SeqCst);
         let collected = request.into_body().collect().await.unwrap();
-        assert_eq!(collected.trailers().unwrap()["x-check"], "preserved");
+        let trailers = collected.trailers().unwrap();
+        let values = trailers.get_all("x-check");
+        assert_eq!(
+            values.iter().map(|value| value.to_str().unwrap()).collect::<Vec<_>>(),
+            vec!["preserved", "preserved-too"]
+        );
+        assert_eq!(trailers["x-second"], "second-frame");
         assert_eq!(collected.to_bytes(), Bytes::from_static(b"request"));
         StatusCode::OK
     }
@@ -282,6 +402,21 @@ impl HttpBody for PendingBody {
     }
 }
 
+struct SignalledPendingBody(Arc<tokio::sync::Notify>);
+
+impl HttpBody for SignalledPendingBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        self.0.notify_one();
+        Poll::Pending
+    }
+}
+
 struct PendingStream;
 
 impl Stream for PendingStream {
@@ -326,6 +461,34 @@ async fn test_pending_request_body_times_out_before_handler_runs() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let next = router
+        .oneshot(Request::post("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(next.status(), StatusCode::OK);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_cancelled_admission_releases_capacity_for_next_request() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let limits = StreamAdmissionLimits::default()
+        .with_max_concurrent_admissions(1)
+        .unwrap()
+        .with_admission_timeout(Duration::from_secs(5))
+        .unwrap();
+    let router = app(limits, calls.clone());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let request = router.clone().oneshot(
+        Request::post("/")
+            .body(Body::new(SignalledPendingBody(entered.clone())))
+            .unwrap(),
+    );
+    let first = tokio::spawn(request);
+    entered.notified().await;
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+
     let next = router
         .oneshot(Request::post("/").body(Body::empty()).unwrap())
         .await
