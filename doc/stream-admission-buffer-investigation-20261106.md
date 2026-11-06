@@ -56,7 +56,24 @@ To add a bounded concurrency check, a disposable integration test ran against th
 
 Each run completed below the 3-second deadline; no admission timed out. These single samples show the expected capacity boundary and successful accepted request count, but are not a throughput benchmark and do not establish a meaningful performance difference between implementations. After each load run, a separate one-capacity loopback server received a partial HTTP/1 chunked upload whose client connection was dropped, followed by a complete 64 KiB request. Both baseline and incremental-copy runs returned HTTP 200 for the follow-up, called the handler once, and observed 65 DATA frames total (one partial-upload frame plus 64 follow-up frames), showing that the failed partial request released its admission permit.
 
-The temporary integration-test fixtures were removed from both checkouts after the runs. This bounded concurrency matrix covered HTTP/1 only; concurrent HTTP/2 behavior and network-process RSS remain unmeasured. The earlier single-request HTTP/2 result above does not substitute for those measurements.
+The temporary integration-test fixtures were removed from both checkouts after the runs. The bounded concurrency checks cover HTTP/1 and HTTP/2; network-process RSS under concurrency remains unmeasured.
+
+## Bounded concurrent HTTP/2 loopback load
+
+A second disposable integration test exercised cleartext HTTP/2 prior-knowledge loopback connections using Hyper's HTTP/2 server and an HTTP/2-only Hyper client. Each batch used one pooled client and concurrent streams, with a fixed 64 KiB request body emitted as 64 1 KiB body items, a 1 ms delay per item, an 8-admission limit, and a 3-second absolute admission timeout. The same fixture ran against detached worktrees at baseline `d599ad24a0fda2f563b4b744c9bde9cd0446a954` and implementation `921964612dc5aa00c2e6565b28289974e8f55bd9`. In both worktrees, `cargo test --test stream_admission_h2_concurrent_experiment -- --nocapture` exited 0 without warnings. The temporary test files and worktrees were removed after verifying both worktrees were clean.
+
+| Implementation | Concurrent streams | HTTP 200 / admitted | HTTP 503 / capacity rejected | Timeouts | Handler calls | Delivered DATA frames | Batch elapsed ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline | 2 | 2 | 0 | 0 | 2 | 130 | 176.787 |
+| baseline | 4 | 4 | 0 | 0 | 4 | 260 | 177.946 |
+| baseline | 8 | 8 | 0 | 0 | 8 | 520 | 221.984 |
+| baseline | 10 | 8 | 2 | 0 | 8 | 520 | 219.976 |
+| incremental copy | 2 | 2 | 0 | 0 | 2 | 130 | 174.493 |
+| incremental copy | 4 | 4 | 0 | 0 | 4 | 260 | 162.836 |
+| incremental copy | 8 | 8 | 0 | 0 | 8 | 520 | 222.025 |
+| incremental copy | 10 | 8 | 2 | 0 | 8 | 520 | 227.942 |
+
+Hyper delivered 65 DATA frames per admitted 64 KiB request in these runs; counts are the wrapper's observed frames, not the number of client body items. All batches completed below 3 seconds. These single samples validate admission/rejection counts for this local HTTP/2 shape, not comparative throughput. For cancellation recovery, the test aborted a partial request stream after the server observed DATA, then sent a complete 64 KiB stream through the same client. Baseline returned HTTP 200, called the handler once, observed 66 frames total, and completed in 140.205 ms; incremental copy returned HTTP 200, called the handler once, observed 66 frames, and completed in 135.152 ms. The 66 frames comprise the partial stream and the follow-up request; the follow-up passed with a one-permit capacity domain.
 
 ## Downstream WebSocket interoperability
 
