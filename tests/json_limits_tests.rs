@@ -7,17 +7,29 @@
 // =============================================================================
 #![cfg(feature = "json")]
 
+use std::collections::VecDeque;
 use std::io;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::task::Context;
+use std::task::Poll;
 
 use axum::Extension;
 use axum::Router;
 use axum::body::Body;
+use axum::body::Bytes;
 use axum::body::to_bytes;
+use axum::extract::FromRequest;
+use axum::http::HeaderMap;
 use axum::http::Request;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::post;
 use futures_util::stream;
+use hyper::body::Body as HttpBody;
 use qubit_web::json::BoundedJson;
 use qubit_web::json::JsonLimits;
 use qubit_web::json::json_response;
@@ -25,7 +37,142 @@ use serde::Serialize;
 use serde::Serializer;
 use serde::de::IgnoredAny;
 use serde::ser::SerializeStruct;
+use tokio::sync::Notify;
 use tower::ServiceExt;
+
+struct CountingOwner {
+    bytes: Vec<u8>,
+    active: Arc<AtomicUsize>,
+}
+
+impl CountingOwner {
+    fn new(bytes: Vec<u8>, active: Arc<AtomicUsize>) -> Self {
+        active.fetch_add(1, Ordering::SeqCst);
+        Self { bytes, active }
+    }
+}
+
+impl AsRef<[u8]> for CountingOwner {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for CountingOwner {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct OwnerFramesBody {
+    bytes: &'static [u8],
+    index: usize,
+    active: Arc<AtomicUsize>,
+    owners_live_before_frame: Arc<Mutex<Vec<usize>>>,
+}
+
+impl HttpBody for OwnerFramesBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        if self.index == self.bytes.len() {
+            return Poll::Ready(None);
+        }
+        self.owners_live_before_frame
+            .lock()
+            .unwrap()
+            .push(self.active.load(Ordering::SeqCst));
+        let byte = self.bytes[self.index];
+        self.index += 1;
+        let owner = CountingOwner::new(vec![byte], self.active.clone());
+        Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from_owner(owner)))))
+    }
+}
+
+fn owner_frames_body(
+    bytes: &'static [u8],
+    active: Arc<AtomicUsize>,
+    owners_live_before_frame: Arc<Mutex<Vec<usize>>>,
+) -> Body {
+    Body::new(OwnerFramesBody {
+        bytes,
+        index: 0,
+        active,
+        owners_live_before_frame,
+    })
+}
+
+enum ScriptedFrame {
+    Data(&'static [u8]),
+    Error(&'static str),
+    Trailers,
+}
+
+struct ScriptedBody {
+    frames: VecDeque<ScriptedFrame>,
+    active: Arc<AtomicUsize>,
+}
+
+impl HttpBody for ScriptedBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let Some(frame) = self.frames.pop_front() else {
+            return Poll::Ready(None);
+        };
+        match frame {
+            ScriptedFrame::Data(data) => {
+                let owner = CountingOwner::new(data.to_vec(), self.active.clone());
+                Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from_owner(owner)))))
+            }
+            ScriptedFrame::Error(message) => Poll::Ready(Some(Err(io::Error::other(message)))),
+            ScriptedFrame::Trailers => Poll::Ready(Some(Ok(hyper::body::Frame::trailers(HeaderMap::new())))),
+        }
+    }
+}
+
+struct PendingOwnerBody {
+    active: Arc<AtomicUsize>,
+    pending: Arc<Notify>,
+    dropped: Arc<Notify>,
+    state: u8,
+}
+
+impl HttpBody for PendingOwnerBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        match self.state {
+            0 => {
+                self.state = 1;
+                let owner = CountingOwner::new(b"1".to_vec(), self.active.clone());
+                Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from_owner(owner)))))
+            }
+            _ => {
+                self.pending.notify_one();
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl Drop for PendingOwnerBody {
+    fn drop(&mut self) {
+        self.dropped.notify_one();
+    }
+}
 
 struct FailingPayload;
 
@@ -223,6 +370,168 @@ async fn test_body_read_failure_is_not_reported_as_budget_exceeded() {
 async fn test_accepts_input_exactly_at_byte_budget() {
     let limits = JsonLimits::default().with_max_input_bytes(2).unwrap();
     assert_eq!(send_with_limits("42", limits).await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_fragmented_json_releases_prior_frame_owners() {
+    const JSON: &[u8] = b"12345678";
+    let active = Arc::new(AtomicUsize::new(0));
+    let owners_live_before_frame = Arc::new(Mutex::new(Vec::new()));
+    let limits = JsonLimits::default().with_max_input_bytes(8).unwrap();
+    let response = Router::new()
+        .route("/", post(echo_number))
+        .layer(Extension(limits))
+        .oneshot(
+            Request::post("/")
+                .header("content-type", "application/json")
+                .body(owner_frames_body(
+                    JSON,
+                    active.clone(),
+                    owners_live_before_frame.clone(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(to_bytes(response.into_body(), usize::MAX).await.unwrap(), "12345678");
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        *owners_live_before_frame.lock().unwrap(),
+        vec![0; JSON.len()],
+        "each frame owner should be dropped before polling the next frame"
+    );
+}
+
+#[tokio::test]
+async fn test_input_budget_stops_at_ninth_frame_without_reading_tenth() {
+    let active = Arc::new(AtomicUsize::new(0));
+    let owners_live_before_frame = Arc::new(Mutex::new(Vec::new()));
+    let body = owner_frames_body(b"12345678X!", active.clone(), owners_live_before_frame.clone());
+    let limits = JsonLimits::default().with_max_input_bytes(8).unwrap();
+    let mut request = Request::post("/")
+        .header("content-type", "application/json")
+        .body(body)
+        .unwrap();
+    request.extensions_mut().insert(limits);
+    let rejection = BoundedJson::<u64>::from_request(request, &()).await.unwrap_err();
+    let response = axum::response::IntoResponse::into_response(rejection);
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(
+        String::from_utf8(body.to_vec())
+            .unwrap()
+            .contains("json_budget_exceeded")
+    );
+    assert_eq!(owners_live_before_frame.lock().unwrap().len(), 9);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_body_read_failure_after_data_is_private_and_releases_owners() {
+    let sentinel = "private-read-error-sentinel";
+    let active = Arc::new(AtomicUsize::new(0));
+    let body = Body::new(ScriptedBody {
+        frames: VecDeque::from([ScriptedFrame::Data(b"42"), ScriptedFrame::Error(sentinel)]),
+        active: active.clone(),
+    });
+    let response = Router::new()
+        .route("/", post(echo_number))
+        .oneshot(
+            Request::post("/")
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("json_body_read_failed"));
+    assert!(!body.contains(sentinel));
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_empty_data_frames_and_trailers_do_not_change_json_input() {
+    let active = Arc::new(AtomicUsize::new(0));
+    let body = Body::new(ScriptedBody {
+        frames: VecDeque::from([
+            ScriptedFrame::Data(b""),
+            ScriptedFrame::Data(b"4"),
+            ScriptedFrame::Data(b""),
+            ScriptedFrame::Data(b"2"),
+            ScriptedFrame::Trailers,
+        ]),
+        active: active.clone(),
+    });
+    let response = Router::new()
+        .route("/", post(echo_number))
+        .oneshot(
+            Request::post("/")
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(to_bytes(response.into_body(), usize::MAX).await.unwrap(), "42");
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_empty_data_only_is_invalid_json() {
+    let active = Arc::new(AtomicUsize::new(0));
+    let body = Body::new(ScriptedBody {
+        frames: VecDeque::from([ScriptedFrame::Data(b""), ScriptedFrame::Data(b"")]),
+        active: active.clone(),
+    });
+    let response = Router::new()
+        .route("/", post(echo_number))
+        .oneshot(
+            Request::post("/")
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8(body.to_vec()).unwrap().contains("invalid_json"));
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_cancelling_fragmented_json_releases_body_and_frame_owner() {
+    let active = Arc::new(AtomicUsize::new(0));
+    let pending = Arc::new(Notify::new());
+    let dropped = Arc::new(Notify::new());
+    let body = Body::new(PendingOwnerBody {
+        active: active.clone(),
+        pending: pending.clone(),
+        dropped: dropped.clone(),
+        state: 0,
+    });
+    let request = Request::post("/")
+        .header("content-type", "application/json")
+        .body(body)
+        .unwrap();
+    let task = tokio::spawn(async move { BoundedJson::<u64>::from_request(request, &()).await });
+    pending.notified().await;
+    task.abort();
+    let result = task.await;
+
+    assert!(result.unwrap_err().is_cancelled());
+    dropped.notified().await;
+    assert_eq!(active.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

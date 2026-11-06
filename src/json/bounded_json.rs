@@ -9,10 +9,12 @@
 //! guarantee a CPU time bound for user-provided `Deserialize` implementations;
 //! decoding is synchronous and does not yield to Tokio while it runs.
 
-use axum::body::to_bytes;
+use axum::body::Bytes;
 use axum::extract::FromRequest;
 use axum::extract::Request;
 use axum::http::header;
+use http_body_util::BodyExt;
+use http_body_util::Limited;
 use qubit_json::decode::JsonDecodeErrorKind;
 use qubit_json::decode::JsonDecoder;
 use serde::de::DeserializeOwned;
@@ -99,13 +101,21 @@ where
             return Err(JsonRejection::UnsupportedMediaType);
         }
         let (_, body) = request.into_parts();
-        let bytes = to_bytes(body, limits.max_input_bytes.get()).await.map_err(|error| {
-            if std::error::Error::source(&error).is_some_and(|source| source.is::<http_body_util::LengthLimitError>()) {
-                JsonRejection::BudgetExceeded
-            } else {
-                JsonRejection::BodyReadFailed
+        let mut body = Limited::new(body, limits.max_input_bytes.get());
+        let mut buffer = Vec::new();
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|error| {
+                if error.is::<http_body_util::LengthLimitError>() {
+                    JsonRejection::BudgetExceeded
+                } else {
+                    JsonRejection::BodyReadFailed
+                }
+            })?;
+            if let Ok(data) = frame.into_data() {
+                buffer.extend_from_slice(&data);
             }
-        })?;
+        }
+        let bytes = Bytes::from(buffer);
         let mut decoder = JsonDecoder::with_limits(limits.decode_limits());
         decoder.decode_utf8::<T>(&bytes).map(BoundedJson).map_err(|error| {
             if error.kind() == JsonDecodeErrorKind::Budget {
