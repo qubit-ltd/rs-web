@@ -12,6 +12,10 @@ use std::time::Duration;
 
 use crate::WebServerError;
 
+/// Detailed validation error for [`ServerOptions`].
+pub mod server_options_validation_error;
+pub use server_options_validation_error::ServerOptionsValidationError;
+
 /// Validated settings used before a server starts accepting connections.
 ///
 /// # Examples
@@ -310,25 +314,53 @@ impl ServerOptions {
     /// timeout deadline cannot be represented by Tokio, or the transport
     /// capacity exceeds `tokio::sync::Semaphore::MAX_PERMITS`.
     pub fn validate(&self) -> Result<(), WebServerError> {
-        if self.shutdown_timeout.is_zero()
-            || tokio::time::Instant::now().checked_add(self.shutdown_timeout).is_none()
-            || self.request_header_timeout.is_zero()
-            || tokio::time::Instant::now()
-                .checked_add(self.request_header_timeout)
-                .is_none()
-            || self.transport_idle_timeout.is_zero()
-            || tokio::time::Instant::now()
-                .checked_add(self.transport_idle_timeout)
-                .is_none()
-        {
-            return Err(WebServerError::InvalidConfig);
+        self.validate_detailed().map_err(|_| WebServerError::InvalidConfig)
+    }
+
+    /// Checks the configured limits and reports the first invalid field.
+    ///
+    /// Fields are checked in this order: shutdown timeout, request-header
+    /// timeout, transport idle timeout, transport connection capacity, HTTP/1
+    /// parser buffer, then HTTP/2 header-list budget. Timeouts share one clock
+    /// reading for this validation call. A successful result does not replace
+    /// the runtime deadline checks performed when the server operates.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when all configured limits are valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first invalid field and a stable reason code without
+    /// including the configured value.
+    pub fn validate_detailed(&self) -> Result<(), ServerOptionsValidationError> {
+        let now = tokio::time::Instant::now();
+        for (field, timeout) in [
+            ("shutdown_timeout", self.shutdown_timeout),
+            ("request_header_timeout", self.request_header_timeout),
+            ("transport_idle_timeout", self.transport_idle_timeout),
+        ] {
+            if timeout.is_zero() {
+                return Err(ServerOptionsValidationError::new(field, "zero"));
+            }
+            if now.checked_add(timeout).is_none() {
+                return Err(ServerOptionsValidationError::new(field, "deadline_unrepresentable"));
+            }
         }
         if self.max_transport_connections.get() > tokio::sync::Semaphore::MAX_PERMITS {
-            return Err(WebServerError::InvalidConfig);
+            return Err(ServerOptionsValidationError::new(
+                "max_transport_connections",
+                "capacity_too_large",
+            ));
         }
-        if self.http1_max_buffer_bytes.is_some_and(|bytes| bytes < 8192) || self.http2_max_header_list_bytes == Some(0)
-        {
-            return Err(WebServerError::InvalidConfig);
+        if self.http1_max_buffer_bytes.is_some_and(|bytes| bytes < 8192) {
+            return Err(ServerOptionsValidationError::new(
+                "http1_max_buffer_bytes",
+                "below_minimum",
+            ));
+        }
+        if self.http2_max_header_list_bytes == Some(0) {
+            return Err(ServerOptionsValidationError::new("http2_max_header_list_bytes", "zero"));
         }
         Ok(())
     }
@@ -336,6 +368,8 @@ impl ServerOptions {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::ServerOptions;
 
     #[test]
@@ -348,5 +382,87 @@ mod tests {
         let mut invalid = defaults.clone();
         invalid.http2_max_header_list_bytes = Some(0);
         assert!(matches!(invalid.validate(), Err(crate::WebServerError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_detailed_validation_reports_all_fields_and_reason_codes() {
+        let address = "127.0.0.1:8080".parse().unwrap();
+        let defaults = ServerOptions::new(address);
+        let cases = [
+            (
+                defaults.clone().with_shutdown_timeout(Duration::ZERO),
+                "shutdown_timeout",
+                "zero",
+            ),
+            (
+                defaults.clone().with_shutdown_timeout(Duration::MAX),
+                "shutdown_timeout",
+                "deadline_unrepresentable",
+            ),
+            (
+                defaults.clone().with_request_header_timeout(Duration::ZERO),
+                "request_header_timeout",
+                "zero",
+            ),
+            (
+                defaults.clone().with_request_header_timeout(Duration::MAX),
+                "request_header_timeout",
+                "deadline_unrepresentable",
+            ),
+            (
+                defaults.clone().with_transport_idle_timeout(Duration::ZERO),
+                "transport_idle_timeout",
+                "zero",
+            ),
+            (
+                defaults.clone().with_transport_idle_timeout(Duration::MAX),
+                "transport_idle_timeout",
+                "deadline_unrepresentable",
+            ),
+        ];
+        for (options, field, code) in cases {
+            let error = options.validate_detailed().unwrap_err();
+            assert_eq!((error.field(), error.code()), (field, code));
+        }
+
+        let mut invalid = defaults.clone();
+        invalid.max_transport_connections =
+            std::num::NonZeroUsize::new(tokio::sync::Semaphore::MAX_PERMITS + 1).unwrap();
+        let error = invalid.validate_detailed().unwrap_err();
+        assert_eq!(
+            (error.field(), error.code()),
+            ("max_transport_connections", "capacity_too_large")
+        );
+
+        let mut invalid = defaults.clone();
+        invalid.http1_max_buffer_bytes = Some(8191);
+        let error = invalid.validate_detailed().unwrap_err();
+        assert_eq!(
+            (error.field(), error.code()),
+            ("http1_max_buffer_bytes", "below_minimum")
+        );
+
+        let mut invalid = defaults.clone();
+        invalid.http2_max_header_list_bytes = Some(0);
+        let error = invalid.validate_detailed().unwrap_err();
+        assert_eq!((error.field(), error.code()), ("http2_max_header_list_bytes", "zero"));
+    }
+
+    #[test]
+    fn test_detailed_validation_accepts_defaults_and_boundaries() {
+        let address = "127.0.0.1:8080".parse().unwrap();
+        ServerOptions::new(address).validate_detailed().unwrap();
+        ServerOptions::new(address)
+            .with_shutdown_timeout(Duration::from_nanos(1))
+            .with_request_header_timeout(Duration::from_nanos(1))
+            .with_transport_idle_timeout(Duration::from_nanos(1))
+            .with_max_transport_connections(tokio::sync::Semaphore::MAX_PERMITS)
+            .unwrap()
+            .with_http1_max_buffer_bytes(8192)
+            .unwrap()
+            .with_http2_max_header_list_bytes(1)
+            .unwrap()
+            .validate_detailed()
+            .unwrap();
     }
 }

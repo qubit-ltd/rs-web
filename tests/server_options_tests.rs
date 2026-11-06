@@ -113,3 +113,25 @@ fn test_rejects_unrepresentable_shutdown_timeout() {
         Err(qubit_web::WebServerError::InvalidConfig)
     ));
 }
+
+#[test]
+fn test_validate_detailed_reports_safe_first_error_and_preserves_legacy_error() {
+    let address = "127.0.0.1:8080".parse().unwrap();
+    let options = ServerOptions::new(address)
+        .with_request_header_timeout(Duration::ZERO)
+        .with_transport_idle_timeout(Duration::ZERO);
+
+    let error = options.validate_detailed().unwrap_err();
+    assert_eq!(error.field(), "request_header_timeout");
+    assert_eq!(error.code(), "zero");
+    assert_eq!(error.to_string(), "invalid server option request_header_timeout (zero)");
+    assert_eq!(
+        format!("{error:?}"),
+        "ServerOptionsValidationError { field: \"request_header_timeout\", code: \"zero\" }"
+    );
+    assert!(std::error::Error::source(&error).is_none());
+    assert!(matches!(
+        options.validate(),
+        Err(qubit_web::WebServerError::InvalidConfig)
+    ));
+}

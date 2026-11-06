@@ -132,6 +132,7 @@ pub use mvc::ControllerRouteError;
 pub use mvc::ControllerRoutes;
 pub use mvc::RouteMetadata;
 pub use options::ServerOptions;
+pub use options::ServerOptionsValidationError;
 pub use qubit_web_macros::delete;
 pub use qubit_web_macros::delete_mapping;
 pub use qubit_web_macros::get;
