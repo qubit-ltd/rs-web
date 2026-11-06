@@ -29,6 +29,7 @@ use tokio::sync::oneshot;
 use super::internal::PolicyInner;
 use super::internal::SessionLifecycle;
 use super::internal::UpgradeLifecycle;
+use super::internal::observe_io_task;
 use super::internal::reader_loop;
 use super::internal::server_shutting_down_response;
 use super::internal::writer_loop;
@@ -498,13 +499,16 @@ impl WsUpgradePolicy {
                 let closed = resources.closed_token();
                 let writer_resources = resources.clone();
                 let writer = spawn(async move {
-                    writer_loop(
-                        sink,
-                        writer_queue,
-                        writer_notify,
-                        writer_lifecycle,
-                        close_ack_receiver,
-                        writer_resources,
+                    observe_io_task(
+                        "writer",
+                        writer_loop(
+                            sink,
+                            writer_queue,
+                            writer_notify,
+                            writer_lifecycle,
+                            close_ack_receiver,
+                            writer_resources,
+                        ),
                     )
                     .await;
                 });
@@ -522,14 +526,17 @@ impl WsUpgradePolicy {
                 let reader_inbound_state = inbound_state.clone();
                 let reader_resources = resources.clone();
                 let reader = spawn(async move {
-                    reader_loop(
-                        stream,
-                        incoming_tx,
-                        reader_queue,
-                        reader_lifecycle,
-                        close_ack_sender,
-                        idle_timeout,
-                        super::internal::ReaderContext::new(reader_inbound_state, reader_resources),
+                    observe_io_task(
+                        "reader",
+                        reader_loop(
+                            stream,
+                            incoming_tx,
+                            reader_queue,
+                            reader_lifecycle,
+                            close_ack_sender,
+                            idle_timeout,
+                            super::internal::ReaderContext::new(reader_inbound_state, reader_resources),
+                        ),
                     )
                     .await;
                 });

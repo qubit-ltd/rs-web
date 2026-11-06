@@ -229,6 +229,7 @@ impl Drop for WsSession {
 mod tests {
     use std::future::Future;
     use std::future::pending;
+    use std::io::Write;
     use std::sync::Arc;
     use std::task::Poll;
     use std::time::Duration;
@@ -239,12 +240,58 @@ mod tests {
     use tokio::task::yield_now;
     use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::fmt::MakeWriter;
 
     use super::InboundMessage;
     use super::InboundState;
     use super::WsSession;
     use crate::ws::WsSendError;
     use crate::ws::WsSendQueue;
+
+    #[derive(Clone, Default)]
+    struct SharedLog {
+        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+        written: Arc<tokio::sync::Notify>,
+    }
+
+    struct LogWriter(SharedLog);
+
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.bytes.lock().unwrap().extend_from_slice(bytes);
+            self.0.written.notify_one();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedLog {
+        type Writer = LogWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            LogWriter(self.clone())
+        }
+    }
+
+    impl SharedLog {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.bytes.lock().unwrap()).into_owned()
+        }
+
+        fn subscriber(&self) -> tracing::Dispatch {
+            tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .with_max_level(tracing::Level::WARN)
+                    .with_target(true)
+                    .with_ansi(false)
+                    .with_writer(self.clone())
+                    .finish(),
+            )
+        }
+    }
 
     fn session(writer: tokio::task::JoinHandle<()>, reader: tokio::task::JoinHandle<()>) -> WsSession {
         let (_incoming_tx, incoming) = mpsc::channel::<InboundMessage>(1);
@@ -400,5 +447,45 @@ mod tests {
         assert!(session.writer.is_none());
         assert!(session.reader.is_none());
         drop(incoming_tx);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_joins_observed_panic_once() {
+        let log = SharedLog::default();
+        let dispatch = log.subscriber();
+        let writer = tokio::spawn(
+            async {
+                crate::ws::internal::observe_io_task("writer", async { panic!("private-ws-panic-sentinel") }).await;
+            }
+            .with_subscriber(dispatch),
+        );
+        let mut session = session(writer, tokio::spawn(pending::<()>()));
+        session.close().await;
+        let output = log.contents();
+        assert_eq!(output.matches("websocket_task_panic").count(), 1, "{output}");
+        assert!(!output.contains("private-ws-panic-sentinel"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn test_drop_keeps_observation_alive_until_io_task_panics() {
+        let log = SharedLog::default();
+        let dispatch = log.subscriber();
+        let (release_tx, release_rx) = oneshot::channel();
+        let writer = tokio::spawn(
+            async move {
+                let _ = release_rx.await;
+                crate::ws::internal::observe_io_task("writer", async { panic!("private-ws-panic-sentinel") }).await;
+            }
+            .with_subscriber(dispatch),
+        );
+        let session = session(writer, tokio::spawn(pending::<()>()));
+        drop(session);
+        release_tx.send(()).unwrap();
+        if !log.contents().contains("websocket_task_panic") {
+            log.written.notified().await;
+        }
+        let output = log.contents();
+        assert_eq!(output.matches("websocket_task_panic").count(), 1, "{output}");
+        assert!(!output.contains("private-ws-panic-sentinel"), "{output}");
     }
 }
