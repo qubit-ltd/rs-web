@@ -18,7 +18,7 @@ use super::connection_completion_state::ConnectionCompletionState;
 /// Shared O(1) record of active transports and their latest completion time.
 #[derive(Clone, Debug, Default)]
 pub(super) struct ConnectionCompletion {
-    /// Internal item implementation detail.
+    /// Shared active-transport count and latest task completion time.
     state: Arc<Mutex<ConnectionCompletionState>>,
 }
 

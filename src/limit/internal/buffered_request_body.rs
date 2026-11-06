@@ -48,9 +48,9 @@ impl BufferedRequestBody {
 }
 
 impl Body for BufferedRequestBody {
-    /// Internal Data implementation detail.
+    /// Buffered data frame payload type.
     type Data = Bytes;
-    /// Internal Error implementation detail.
+    /// This replay body does not produce errors.
     type Error = Infallible;
 
     /// Returns the next buffered frame, skipping empty data and replaying

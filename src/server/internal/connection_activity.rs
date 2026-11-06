@@ -23,7 +23,7 @@ use activity_lease::ActivityLease;
 /// Shared per-connection request activity counter.
 #[derive(Clone, Debug)]
 pub(super) struct ConnectionActivity {
-    /// Internal item implementation detail.
+    /// Publishes the number of active requests and retained response bodies.
     active: watch::Sender<usize>,
 }
 

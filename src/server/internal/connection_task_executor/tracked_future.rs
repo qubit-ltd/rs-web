@@ -29,9 +29,10 @@ impl<F> Future for TrackedFuture<F>
 where
     F: Future,
 {
-    /// Internal Output implementation detail.
+    /// Output is unit because the wrapped application output is dropped here.
     type Output = ();
-    /// Internal poll implementation detail.
+    /// Polls the application future and records completion after dropping its
+    /// output and future resources.
     ///
     /// # Parameters
     ///
@@ -57,7 +58,7 @@ where
 }
 
 impl<F> Drop for TrackedFuture<F> {
-    /// Releases the resources owned by this guard.
+    /// Drops the application future before recording task completion.
     fn drop(&mut self) {
         self.future.take();
         self.completion.take();

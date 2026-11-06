@@ -28,9 +28,9 @@ struct LimitedRequestBody {
 }
 
 impl hyper::body::Body for LimitedRequestBody {
-    /// Internal Data implementation detail.
+    /// HTTP body data frame payload type.
     type Data = Bytes;
-    /// Internal Error implementation detail.
+    /// I/O error used for upstream failures and byte-budget rejection.
     type Error = std::io::Error;
 
     /// Polls one frame and rejects data frames that exceed the cumulative

@@ -13,8 +13,9 @@ use super::session_state::SessionState;
 /// Shared mutable session registration and draining state.
 #[derive(Debug)]
 pub(in crate::server::web_server) struct SessionTrackerInner {
-    /// Internal item implementation detail.
+    /// Protects the active registration count, draining gate, and shutdown
+    /// completion timestamps.
     pub(in crate::server::web_server) state: Mutex<SessionState>,
-    /// Internal item implementation detail.
+    /// Publishes the active count whenever a session is registered or dropped.
     pub(in crate::server::web_server) updates: watch::Sender<usize>,
 }

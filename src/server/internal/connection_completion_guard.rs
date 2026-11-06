@@ -9,7 +9,8 @@ use super::connection_completion::ConnectionCompletion;
 
 /// Records transport completion when an accepted connection task exits.
 pub(super) struct ConnectionCompletionGuard {
-    /// Internal item implementation detail.
+    /// Tracker whose active count and latest completion time this guard
+    /// updates.
     completion: ConnectionCompletion,
 }
 
@@ -17,14 +18,15 @@ impl ConnectionCompletionGuard {
     /// Constructs the guard or state object from its owned resources.
     /// # Parameters
     ///
-    /// * `completion` - Shared completion tracker updated when this guard is
+    /// * `completion` - Shared completion tracker updated when this guard
+    ///   drops.
     pub(super) fn new(completion: ConnectionCompletion) -> Self {
         Self { completion }
     }
 }
 
 impl Drop for ConnectionCompletionGuard {
-    /// Releases the resources owned by this guard.
+    /// Records the task exit time and decrements the active transport count.
     fn drop(&mut self) {
         self.completion.record_completion(tokio::time::Instant::now());
     }

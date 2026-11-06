@@ -24,7 +24,7 @@ use super::session_registration_error::SessionRegistrationError;
 /// Atomically tracks managed sessions and the shutdown admission gate.
 #[derive(Clone, Debug)]
 pub(crate) struct SessionTracker {
-    /// Internal item implementation detail.
+    /// Shared mutex-protected registration state and active-count updates.
     inner: Arc<SessionTrackerInner>,
 }
 

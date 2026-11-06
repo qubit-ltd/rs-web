@@ -41,7 +41,7 @@ use super::session_tracker::SessionTrackerInner;
 #[derive(Debug)]
 #[must_use]
 pub struct SessionGuard {
-    /// Internal item implementation detail.
+    /// Shared tracker state updated when this registration is dropped.
     pub(super) inner: Arc<SessionTrackerInner>,
 }
 

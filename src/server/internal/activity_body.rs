@@ -40,15 +40,15 @@ impl ActivityBody {
 }
 
 impl HttpBody for ActivityBody {
-    /// Internal Data implementation detail.
+    /// HTTP response data frame payload type.
     type Data = Bytes;
-    /// Internal Error implementation detail.
+    /// Axum error returned by the wrapped response body.
     type Error = <Body as HttpBody>::Error;
 
     /// Polls the response body and releases its lease at completion or error.
     /// # Parameters
     ///
-    /// * `context` - Task context used to register a waker or carry request
+    /// * `context` - Poll context passed to the wrapped response body.
     fn poll_frame(
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,

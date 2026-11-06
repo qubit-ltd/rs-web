@@ -51,7 +51,7 @@ impl<S, E> Stream for SessionStream<S>
 where
     S: Stream<Item = Result<Event, E>>,
 {
-    /// Internal Item implementation detail.
+    /// SSE event result yielded by the application stream.
     type Item = Result<Event, E>;
     /// Polls the pinned application stream for its next event.
     ///

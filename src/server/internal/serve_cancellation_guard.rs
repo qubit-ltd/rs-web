@@ -9,9 +9,10 @@ use crate::server::ServerContext;
 
 /// Starts server cancellation if a running `serve` future is dropped.
 pub(super) struct ServeCancellationGuard {
-    /// Internal item implementation detail.
+    /// Server context whose admission gate and cancellation token are closed
+    /// if the serving future is dropped while armed.
     context: ServerContext,
-    /// Internal item implementation detail.
+    /// Whether dropping this guard should begin server shutdown.
     armed: bool,
 }
 
@@ -19,7 +20,8 @@ impl ServeCancellationGuard {
     /// Creates an armed guard for the serving future.
     /// # Parameters
     ///
-    /// * `context` - Task context used to register a waker or carry request
+    /// * `context` - Server context to shut down if the serving future is
+    ///   dropped.
     pub(super) fn new(context: ServerContext) -> Self {
         Self { context, armed: true }
     }
@@ -31,7 +33,8 @@ impl ServeCancellationGuard {
 }
 
 impl Drop for ServeCancellationGuard {
-    /// Releases the resources owned by this guard.
+    /// Begins server shutdown if normal serving cleanup did not disarm the
+    /// guard.
     fn drop(&mut self) {
         if self.armed {
             let _ = self.context.begin_shutdown();

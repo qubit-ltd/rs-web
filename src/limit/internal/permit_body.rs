@@ -69,9 +69,9 @@ impl Drop for PermitBody {
 }
 
 impl hyper::body::Body for PermitBody {
-    /// Internal Data implementation detail.
+    /// Axum body data frame payload type.
     type Data = Bytes;
-    /// Internal Error implementation detail.
+    /// Axum error returned by the wrapped body or generated on timeout.
     type Error = axum::Error;
 
     /// Polls the application body until completion or emits one deadline error.

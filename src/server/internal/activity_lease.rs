@@ -9,7 +9,7 @@ use tokio::sync::watch;
 
 /// One active request or response-body lifetime.
 pub(in crate::server::web_server) struct ActivityLease {
-    /// Internal item implementation detail.
+    /// Shared active-request counter decremented when this lease drops.
     active: watch::Sender<usize>,
 }
 

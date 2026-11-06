@@ -18,17 +18,18 @@ use super::body_termination::BodyTermination;
 
 /// Shared response-body observation state cloned by middleware and body tasks.
 pub(crate) struct BodyObservation {
-    /// Internal item implementation detail.
+    /// Allowlisted HTTP method captured for the termination event.
     method: String,
-    /// Internal item implementation detail.
+    /// Route label captured when request diagnostics begin.
     route: String,
-    /// Internal item implementation detail.
+    /// Connection identifier captured for the termination event.
     connection_id: String,
-    /// Internal item implementation detail.
+    /// Parsed request `Content-Length` declaration, if present; this is not
+    /// measured body traffic or limit accounting.
     bytes: Option<u64>,
-    /// Internal item implementation detail.
+    /// Start time used to calculate elapsed time when termination is recorded.
     started: Instant,
-    /// Internal item implementation detail.
+    /// Coordinates status, first terminal outcome, and one-time event claiming.
     state: Mutex<BodyObservationState>,
 }
 

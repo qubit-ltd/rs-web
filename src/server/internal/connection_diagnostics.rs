@@ -38,13 +38,13 @@ pub(super) fn record_task_result(result: Result<(), JoinError>, task_kind: &'sta
 /// state.
 #[derive(Default)]
 pub(super) struct ConnectionDiagnostics {
-    /// Internal item implementation detail.
+    /// Counts TLS handshake deadline expirations for power-of-two sampling.
     #[cfg(feature = "tls")]
     tls_handshake_timeouts: AtomicU64,
-    /// Internal item implementation detail.
+    /// Counts TLS acceptor failures for power-of-two sampling.
     #[cfg(feature = "tls")]
     tls_handshake_failures: AtomicU64,
-    /// Internal item implementation detail.
+    /// Counts HTTP connection failures for power-of-two sampling.
     http_connection_failures: AtomicU64,
 }
 

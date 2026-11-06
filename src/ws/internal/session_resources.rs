@@ -17,9 +17,11 @@ use crate::server::SessionGuard;
 /// reference drops this value. Only after releasing both, its cancellation
 /// token is signalled so observers can learn that connection capacity is free.
 pub(in crate::ws) struct SessionResources {
-    /// Internal item implementation detail.
+    /// Resources taken by `Drop` so the permit and session are released before
+    /// `closed` is cancelled.
     resources: Option<(OwnedSemaphorePermit, SessionGuard)>,
-    /// Internal item implementation detail.
+    /// Notifies waiters after the capacity permit and session registration are
+    /// released.
     closed: CancellationToken,
 }
 
@@ -44,7 +46,7 @@ impl SessionResources {
 }
 
 impl Drop for SessionResources {
-    /// Releases the resources owned by this guard.
+    /// Releases the permit and session before notifying cancellation waiters.
     fn drop(&mut self) {
         drop(self.resources.take());
         self.closed.cancel();
