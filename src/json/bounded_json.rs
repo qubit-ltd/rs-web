@@ -25,6 +25,14 @@ use super::json_rejection::JsonRejection;
 
 /// A request JSON value decoded under the selected [`JsonLimits`].
 ///
+/// While buffering, `BoundedJson` copies each data frame into a `Vec` and
+/// drops the frame's `Bytes` handle before polling the next frame. The input
+/// byte budget limits JSON payload bytes, not total memory: vector spare
+/// capacity, allocation growth, the current frame, transport buffering,
+/// decoding, and the resulting `T` can require additional memory.
+/// Deserialization remains synchronous, so these budgets do not bound CPU
+/// time in a custom `Deserialize` implementation.
+///
 /// This extractor is available with the `json` feature.
 ///
 /// # Type Parameters

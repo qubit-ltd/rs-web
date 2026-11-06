@@ -51,7 +51,7 @@ Controller 的 `sse`/`ws` 长连接路由使用独立于短请求 `LimitState` �
 
 `HttpLimits::default()` 为每个请求体设置 1 MiB 上限，为并发短请求设置 256 个额度，并为 handler 工作及响应体传输设置 30 秒期限。`ControllerRoutes::new()` 默认将此策略用于 Controller 的 `short` 路由；`with_http_limits` 替换默认值，后续添加的路由使用新策略。Controller 的 `sse` 和 `ws` 路由使用流式接纳策略，不使用短请求 layer。原生 Axum 分支需显式安装 `RequestLimitLayer`；`WebServer` 按原样服务 Router，不添加路由限额。中间件在选定路由读取请求体时累计字节；不会为了执行限制而读取本来未消费的请求体。容量耗尽、请求体超限和处理超时都有稳定的拒绝结果。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，layer 返回 HTTP 500 和代码 `invalid_configuration`。普通 handler 超时仍返回 `504 Gateway Timeout`。如果响应头已发送后期限到达，会立即丢弃应用响应体并归还短请求许可，但无法更改响应状态。启用响应体诊断时，即使传输不再轮询响应体，期限触发时也会发出超时事件；body error 本身仍只在之后再次轮询时观察到。未启用该观察器时，现有日志行为不变。传输背压可能推迟客户端观察到错误的时间；该期限不会关闭连接，TCP/HTTP/2 连接仍受独立传输策略管理。
 
-启用 `json` 时，`JsonLimits::default()` 分别将输入和输出 payload 限制为 1 MiB，嵌套深度限制为 64，值节点数限制为 100,000，数组元素数和对象成员数各限制为 10,000，键长度限制为 16 KiB，字符串长度限制为 256 KiB，数字文本长度限制为 128 字节。JSON 限制与通用 HTTP 请求体限制相互独立；两者同时生效时，应配置兼容的值。
+启用 `json` 时，`JsonLimits::default()` 分别将输入和输出 payload 限制为 1 MiB，嵌套深度限制为 64，值节点数限制为 100,000，数组元素数和对象成员数各限制为 10,000，键长度限制为 16 KiB，字符串长度限制为 256 KiB，数字文本长度限制为 128 字节。JSON 限制与通用 HTTP 请求体限制相互独立；两者同时生效时，应配置兼容的值。`BoundedJson` 会把每个输入数据帧复制到连续缓冲区，并在轮询下一帧前丢弃当前帧的 `Bytes` 句柄。输入字节上限只计算 payload，不限制进程总内存；`Vec` 容量与扩容、当前帧、传输缓冲、解码和应用值都会增加内存占用，因此它不是进程 RSS 上限。
 
 输入阶段中，`BoundedJson` 会通过 `JsonRejection::BudgetExceeded`（`413`）拒绝超限请求体或解码预算；格式错误的 JSON 和不支持的媒体类型分别产生不同的 extractor 拒绝结果。输出阶段中，`json_response` 会先完成整个响应的编码，再返回响应；输出预算或序列化失败通过 `JsonResponseError` 返回（错误码为 `json_output_budget_exceeded` 或 `json_encode_failed`）。应用负责处理 extractor 拒绝和响应编码错误；库不会替应用选择特定的降级响应。
 

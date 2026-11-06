@@ -190,6 +190,8 @@ curl -i http://127.0.0.1:3001/prompts \
 
 请求返回 HTTP 200，JSON 中包含 `accepted: true` 和 prompt。请求体在 4 MiB HTTP 上限内、但超过 2 MiB JSON 输入预算时，`BoundedJson` 返回 HTTP 413。若将 `max_string_bytes` 配置得低于 `max_input_bytes`，字符串超过单项预算时也返回 HTTP 413，即使整个 JSON 请求体仍在字节预算内。输出超过 4096 字节时返回上文固定 HTTP 500 错误码，且没有部分 JSON 正文。其他 `BoundedJson` 输入拒绝仍按其 400/413/415 行为处理（应用 handler 也可选择自己的映射）。4 MiB 请求 middleware 也可能在 handler 执行前独立拒绝超大请求体；handler 不会改写 middleware 响应。API 细节见 [`JsonLimits`](../src/json/json_limits.rs)、[`BoundedJson`](../src/json/bounded_json.rs)、[`json_response`](../src/json/json_response.rs) 和 [`JsonResponseError`](../src/json/json_response_error.rs)。
 
+读取 JSON 时，`BoundedJson` 会把每个数据帧复制到连续缓冲区，并在轮询下一帧前丢弃当前帧的 `Bytes` 句柄。`max_input_bytes` 限制的是 JSON 数据载荷，不是进程总内存：`Vec` 会保留未用容量，扩容时新旧分配可能短暂并存，当前帧、传输缓冲、解码过程和最终值也会占用内存。因此，这项预算不能视为进程 RSS 上限。解码仍是同步执行；字节和结构预算都不能限制自定义 `Deserialize` 实现消耗的 CPU 时间。本实现不改变公共 API，现有调用方无需迁移。
+
 ### 按 JSON 拒绝类别决定响应
 
 启用 `json` feature 后，handler 可接收 `Result<BoundedJson<T>, JsonRejection>`，针对每类失败返回应用自己的响应。公共类型路径为 `qubit_web::json::JsonRejection`。默认响应仍是：JSON 无效或请求体读取失败返回 `400`，JSON 预算超限返回 `413`，媒体类型不支持返回 `415`。这段 handler 只处理 `BoundedJson` 的拒绝；请求限额等中间件生成的响应不会自动改写成应用格式。
