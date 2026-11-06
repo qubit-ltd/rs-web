@@ -30,7 +30,8 @@ struct PermitBody {
     deadline: tokio::time::Instant,
     /// Deadline task cancelled when this wrapper finishes or is dropped.
     watcher: Option<JoinHandle<()>>,
-    /// Internal item implementation detail.
+    /// Optional shared recorder coordinating terminal body diagnostics with
+    /// the deadline watcher.
     observation: Option<Arc<BodyObservation>>,
 }
 

@@ -41,11 +41,13 @@ use std::time::Duration;
 #[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamAdmissionLimits {
-    /// Internal item implementation detail.
+    /// Maximum request data bytes buffered before the stream handler starts.
     max_body_bytes: NonZeroUsize,
-    /// Internal item implementation detail.
+    /// Maximum simultaneous admissions in one shared state domain, excluding
+    /// active sessions.
     max_concurrent_admissions: NonZeroUsize,
-    /// Internal item implementation detail.
+    /// Duration allowed for request buffering and handler execution through
+    /// response headers.
     admission_timeout: Duration,
 }
 

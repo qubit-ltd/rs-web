@@ -41,11 +41,12 @@ use super::stream_admission_limits::StreamAdmissionLimits;
 #[derive(Clone)]
 #[must_use]
 pub struct StreamAdmissionState {
-    /// Internal item implementation detail.
+    /// Per-request byte budget for buffering before handler execution.
     pub(super) max_body_bytes: usize,
-    /// Internal item implementation detail.
+    /// Admission deadline duration ending when response headers are produced.
     pub(super) admission_timeout: Duration,
-    /// Internal item implementation detail.
+    /// Admission capacity shared by clones and released when admission
+    /// completes; it does not count active sessions.
     pub(super) permits: Arc<Semaphore>,
 }
 
