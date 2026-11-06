@@ -265,6 +265,44 @@ async fn test_sse_admission_after_shutdown_is_rejected_without_leaking_capacity(
 }
 
 #[tokio_test]
+async fn test_sse_admission_error_supports_standard_propagation_and_preserves_response() {
+    fn propagate(error: SseAdmissionError) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Err(error)?;
+        Ok(())
+    }
+
+    fn assert_standard_error<T: std::error::Error + Send + Sync + 'static>() {}
+
+    assert_standard_error::<SseAdmissionError>();
+    for (error, display, code) in [
+        (
+            SseAdmissionError::CapacityExceeded,
+            "SSE connection capacity exceeded",
+            "capacity_exceeded",
+        ),
+        (
+            SseAdmissionError::ShuttingDown,
+            "server is shutting down",
+            "server_shutting_down",
+        ),
+    ] {
+        assert_eq!(error.to_string(), display);
+        assert!(std::error::Error::source(&error).is_none());
+        let boxed = propagate(error).expect_err("SSE rejection must propagate");
+        assert_eq!(boxed.downcast_ref::<SseAdmissionError>(), Some(&error));
+
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/problem+json");
+        let bytes = to_bytes(response.into_body(), 1024).await.expect("read rejection body");
+        let expected = format!(
+            "{{\"type\":\"about:blank\",\"title\":\"Service Unavailable\",\"status\":503,\"code\":\"{code}\"}}"
+        );
+        assert_eq!(bytes.as_ref(), expected.as_bytes());
+    }
+}
+
+#[tokio_test]
 async fn test_sse_disconnect_cancels_producer_and_does_not_block_short_requests() {
     let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
         .await
