@@ -21,8 +21,24 @@ use futures_util::stream;
 use qubit_web::json::BoundedJson;
 use qubit_web::json::JsonLimits;
 use qubit_web::json::json_response;
+use serde::Serialize;
+use serde::Serializer;
 use serde::de::IgnoredAny;
+use serde::ser::SerializeStruct;
 use tower::ServiceExt;
+
+struct FailingPayload;
+
+impl Serialize for FailingPayload {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut value = serializer.serialize_struct("FailingPayload", 2)?;
+        value.serialize_field("written", "partial-value")?;
+        Err(<S::Error as serde::ser::Error>::custom("private-json-error-sentinel"))
+    }
+}
 
 async fn echo_number(BoundedJson(value): BoundedJson<u64>) -> String {
     value.to_string()
@@ -257,6 +273,15 @@ async fn test_rejects_max_map_entries_budget() {
         send_with_limits("{\"a\":1,\"b\":2}", limits).await.status(),
         StatusCode::PAYLOAD_TOO_LARGE
     );
+}
+
+#[test]
+fn test_output_serializer_failure_is_private_and_returns_no_response() {
+    let error = json_response(&FailingPayload, &JsonLimits::default()).unwrap_err();
+    assert_eq!(error.code(), "json_encode_failed");
+    assert_eq!(error.to_string(), "json_encode_failed");
+    assert!(!format!("{error}").contains("private-json-error-sentinel"));
+    assert!(!format!("{error:?}").contains("private-json-error-sentinel"));
 }
 
 #[tokio::test]
