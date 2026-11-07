@@ -19,4 +19,6 @@ pub(super) enum SendOutcome {
     SinkError,
     /// Session shutdown cancellation won the send selection.
     Shutdown,
+    /// The ordinary send did not complete before its write deadline.
+    TimedOut,
 }

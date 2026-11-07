@@ -7,14 +7,27 @@
 // =============================================================================
 //! Outbound WebSocket writer loop.
 
+#[cfg(test)]
+use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
+#[cfg(test)]
+use std::task::Context;
+#[cfg(test)]
+use std::task::Poll;
+use std::time::Duration;
 
 use axum::extract::ws::Message;
 use futures_util::Sink;
 use futures_util::SinkExt;
 use tokio::select;
 use tokio::sync::Notify;
+#[cfg(test)]
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio::time::timeout_at;
@@ -31,6 +44,92 @@ use crate::ws::internal::CloseQueueOnDrop;
 use crate::ws::ws_send_queue::WsSendQueue;
 use crate::ws::ws_send_queue::message_size;
 
+#[cfg(test)]
+#[derive(Clone)]
+struct TestPendingObserver {
+    marker: Arc<[u8]>,
+    events: UnboundedSender<TestWriterEvent>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum TestWriterEvent {
+    SendStarted(Instant),
+    FlushPending(Instant),
+    FlushReady(Instant),
+}
+
+#[cfg(test)]
+static TEST_PENDING_OBSERVER: OnceLock<Mutex<Option<TestPendingObserver>>> = OnceLock::new();
+
+#[cfg(test)]
+fn current_test_pending_observer() -> Option<TestPendingObserver> {
+    TEST_PENDING_OBSERVER
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+#[cfg(test)]
+struct TestObservedSink<S> {
+    inner: S,
+    observer: Option<TestPendingObserver>,
+    target_send: bool,
+}
+
+#[cfg(test)]
+impl<S> TestObservedSink<S> {
+    fn new(inner: S, observer: Option<TestPendingObserver>) -> Self {
+        Self {
+            inner,
+            observer,
+            target_send: false,
+        }
+    }
+}
+
+#[cfg(test)]
+impl<S> Sink<Message> for TestObservedSink<S>
+where
+    S: Sink<Message> + Unpin,
+{
+    type Error = S::Error;
+
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.inner).poll_ready(cx)
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
+        let observer = self.observer.clone();
+        if let (Some(observer), Message::Binary(payload)) = (observer, &message)
+            && payload.starts_with(&observer.marker)
+        {
+            self.target_send = true;
+            let _ = observer.events.send(TestWriterEvent::SendStarted(Instant::now()));
+        }
+        Pin::new(&mut self.inner).start_send(message)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let result = Pin::new(&mut self.inner).poll_flush(cx);
+        if self.target_send
+            && let Some(observer) = &self.observer
+        {
+            let event = match &result {
+                Poll::Pending => TestWriterEvent::FlushPending(Instant::now()),
+                Poll::Ready(_) => TestWriterEvent::FlushReady(Instant::now()),
+            };
+            let _ = observer.events.send(event);
+        }
+        result
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.inner).poll_close(cx)
+    }
+}
+
 /// Drains the session queue through a sink until shutdown or a terminal error.
 ///
 /// The sink is generic so tests can exercise actual writer-loop behavior with
@@ -44,19 +143,23 @@ use crate::ws::ws_send_queue::message_size;
 /// * `sink` - WebSocket sink that receives or flushes frames.
 /// * `queue` - Queue whose messages or state are being processed.
 /// * `notify` - Notification used to wake the waiting task.
+/// * `idle_timeout` - Maximum duration for one ordinary send or flush attempt.
 /// * `lifecycle` - Shared cancellation, close-code, and deadline state.
 /// * `close_ack` - Signal indicating that the peer acknowledged the close
 /// * `_resources` - Connection permit and session guard retained for this task.
 pub(in crate::ws) async fn writer_loop<S>(
-    mut sink: S,
+    #[allow(unused_mut)] mut sink: S,
     queue: WsSendQueue,
     notify: Arc<Notify>,
+    idle_timeout: Duration,
     lifecycle: SessionLifecycle,
     mut close_ack: oneshot::Receiver<()>,
     _resources: Arc<SessionResources>,
 ) where
     S: Sink<Message> + Unpin,
 {
+    #[cfg(test)]
+    let mut sink = TestObservedSink::new(sink, current_test_pending_observer());
     let SessionLifecycle {
         shutdown,
         close_code,
@@ -91,10 +194,11 @@ pub(in crate::ws) async fn writer_loop<S>(
                     return;
                 }
                 _ = notify.notified() => {
+                    let flush_deadline = operation_deadline(idle_timeout);
                     let outcome = select! {
                         biased;
                         _ = &mut close_ack => ControlFlushOutcome::PeerCloseAcknowledged,
-                        result = flush_until(&mut sink, &shutdown, None) => ControlFlushOutcome::Flushed(result),
+                        result = flush_until(&mut sink, &shutdown, Some(flush_deadline)) => ControlFlushOutcome::Flushed(result),
                     };
                     match outcome {
                         ControlFlushOutcome::PeerCloseAcknowledged => {
@@ -116,6 +220,8 @@ pub(in crate::ws) async fn writer_loop<S>(
                             return;
                         }
                         ControlFlushOutcome::Flushed(FlushOutcome::TimedOut) => {
+                            queue.close();
+                            let _ = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
                             shutdown.cancel();
                             return;
                         }
@@ -133,33 +239,32 @@ pub(in crate::ws) async fn writer_loop<S>(
             queue.close();
             let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
             shutdown.cancel();
-            let sent = timeout_at(deadline, sink.send(message)).await;
+            let (sent_ok, send_failed) = match timeout_at(deadline, sink.send(message)).await {
+                Ok(Ok(())) => (true, false),
+                Ok(Err(_)) => (false, true),
+                Err(_) => (false, false),
+            };
             queue.finish_message(message_bytes);
-            match sent {
-                Ok(Ok(())) => {
-                    if matches!(timeout_at(deadline, &mut close_ack).await, Ok(Ok(())))
-                        && matches!(timeout_at(deadline, sink.flush()).await, Ok(Err(_)))
-                    {
-                        tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "flush");
-                    }
+            if sent_ok {
+                if matches!(timeout_at(deadline, &mut close_ack).await, Ok(Ok(())))
+                    && matches!(timeout_at(deadline, sink.flush()).await, Ok(Err(_)))
+                {
+                    tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "flush");
                 }
-                Ok(Err(_)) => {
-                    tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "send");
-                }
-                Err(_) => {}
+            } else if send_failed {
+                tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "send");
             }
             return;
         }
+        let send_deadline = operation_deadline(idle_timeout);
         let sent = select! {
             biased;
             _ = shutdown.cancelled() => SendOutcome::Shutdown,
             _ = &mut close_ack => SendOutcome::PeerCloseAcknowledged,
-            result = sink.send(message) => {
-                if result.is_ok() {
-                    SendOutcome::Sent
-                } else {
-                    SendOutcome::SinkError
-                }
+            result = timeout_at(send_deadline, sink.send(message)) => match result {
+                Ok(Ok(())) => SendOutcome::Sent,
+                Ok(Err(_)) => SendOutcome::SinkError,
+                Err(_) => SendOutcome::TimedOut,
             },
         };
         queue.finish_message(message_bytes);
@@ -190,8 +295,27 @@ pub(in crate::ws) async fn writer_loop<S>(
                 send_close_and_wait(&mut sink, &mut close_ack, close_code.load(Ordering::Acquire), deadline).await;
                 return;
             }
+            SendOutcome::TimedOut => {
+                queue.close();
+                let _ = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
+                shutdown.cancel();
+                return;
+            }
         }
     }
+}
+
+/// Computes one operation's absolute write deadline, using an immediate
+/// deadline if the configured duration cannot be represented from now.
+/// # Parameters
+///
+/// * `idle_timeout` - Maximum duration allowed for the ordinary write
+///   operation.
+/// # Returns
+///
+/// The absolute deadline, or the current instant if checked addition overflows.
+fn operation_deadline(idle_timeout: Duration) -> Instant {
+    Instant::now().checked_add(idle_timeout).unwrap_or_else(Instant::now)
 }
 /// Flushes the sink until completion, cancellation, or the optional deadline.
 /// # Parameters
@@ -233,17 +357,29 @@ where
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::net::SocketAddr;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::task::Context;
     use std::task::Poll;
     use std::time::Duration;
 
+    use axum::Router;
+    use axum::extract::State;
+    use axum::extract::WebSocketUpgrade;
     use axum::extract::ws::Message;
+    use axum::http::HeaderMap;
+    use axum::http::StatusCode;
+    use axum::response::Response;
+    use axum::routing::get;
     use futures_util::Sink;
     use futures_util::task::noop_waker_ref;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
     use tokio::sync::Notify;
     use tokio::sync::Semaphore;
     use tokio::sync::oneshot;
@@ -254,11 +390,16 @@ mod tests {
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::FlushOutcome;
+    use super::TEST_PENDING_OBSERVER;
+    use super::TestPendingObserver;
+    use super::TestWriterEvent;
     use super::flush_until;
+    use super::operation_deadline;
     use super::writer_loop;
     use crate::ServerOptions;
     use crate::WebServer;
     use crate::ws::WsSendQueue;
+    use crate::ws::WsUpgradePolicy;
     use crate::ws::internal::SessionLifecycle;
     use crate::ws::internal::SessionResources;
     use crate::ws::ws_send_error::WsSendError;
@@ -371,6 +512,7 @@ mod tests {
                     RecordingSink(recorded),
                     queue.clone(),
                     queue.notify.clone(),
+                    Duration::from_secs(60),
                     lifecycle,
                     ack_rx,
                     resources,
@@ -478,7 +620,16 @@ mod tests {
         let (ack_tx, ack_rx) = oneshot::channel();
         let writer = tokio::spawn(
             async move {
-                writer_loop(sink, queue.clone(), notify, lifecycle, ack_rx, resources).await;
+                writer_loop(
+                    sink,
+                    queue.clone(),
+                    notify,
+                    Duration::from_secs(60),
+                    lifecycle,
+                    ack_rx,
+                    resources,
+                )
+                .await;
                 queue
             }
             .with_subscriber(dispatch),
@@ -570,6 +721,7 @@ mod tests {
                     ReadyFlush(Some(Err(std::io::Error::other("secret-sentinel flush failure")))),
                     queue,
                     writer_notify,
+                    Duration::from_secs(60),
                     lifecycle,
                     ack_rx,
                     resources,
@@ -698,7 +850,16 @@ mod tests {
         };
         let writer = tokio::spawn(
             async move {
-                writer_loop(sink, queue.clone(), writer_notify, lifecycle, ack_rx, resources).await;
+                writer_loop(
+                    sink,
+                    queue.clone(),
+                    writer_notify,
+                    Duration::from_secs(60),
+                    lifecycle,
+                    ack_rx,
+                    resources,
+                )
+                .await;
                 queue
             }
             .with_subscriber(dispatch),
@@ -820,7 +981,16 @@ mod tests {
         ack_tx.send(()).expect("writer should retain acknowledgement receiver");
         tokio::spawn(
             async move {
-                writer_loop(SuccessfulSink, queue, notify, lifecycle, ack_rx, resources).await;
+                writer_loop(
+                    SuccessfulSink,
+                    queue,
+                    notify,
+                    Duration::from_secs(60),
+                    lifecycle,
+                    ack_rx,
+                    resources,
+                )
+                .await;
             }
             .with_subscriber(dispatch),
         )
@@ -914,6 +1084,7 @@ mod tests {
                     },
                     queue,
                     notify,
+                    Duration::from_secs(60),
                     lifecycle,
                     ack_rx,
                     resources,
@@ -995,7 +1166,16 @@ mod tests {
         let (_ack_tx, ack_rx) = oneshot::channel();
         let writer = tokio::spawn(
             async move {
-                writer_loop(SuccessfulSink, queue, notify, lifecycle, ack_rx, resources).await;
+                writer_loop(
+                    SuccessfulSink,
+                    queue,
+                    notify,
+                    Duration::from_secs(60),
+                    lifecycle,
+                    ack_rx,
+                    resources,
+                )
+                .await;
             }
             .with_subscriber(dispatch),
         );
@@ -1085,6 +1265,34 @@ mod tests {
         flush_polls: Arc<AtomicUsize>,
     }
 
+    struct PendingReady {
+        pending_ready: Arc<Notify>,
+        ready_polls: Arc<AtomicUsize>,
+    }
+
+    impl Sink<Message> for PendingReady {
+        type Error = std::io::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.ready_polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.pending_ready.notify_one();
+            }
+            Poll::Pending
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            unreachable!("start_send must not run while readiness is pending");
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     impl Sink<Message> for PendingSend {
         type Error = std::io::Error;
 
@@ -1106,6 +1314,477 @@ mod tests {
         fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
+    }
+
+    async fn assert_pending_send_times_out_after_one_idle_window<S>(
+        sink: S,
+        pending: Arc<Notify>,
+        poll_count: Arc<AtomicUsize>,
+    ) where
+        S: Sink<Message> + Unpin + Send + 'static,
+    {
+        const IDLE_WINDOW: Duration = Duration::from_millis(500);
+
+        let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .expect("test server should bind");
+        let context = server.context();
+        let session = context.try_register_session().expect("session should register");
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        let queue = WsSendQueue::new(2, 1024);
+        queue
+            .try_send(Message::binary(vec![1; 128]))
+            .expect("message should be queued");
+        let shutdown = CancellationToken::new();
+        let lifecycle = SessionLifecycle {
+            shutdown: shutdown.clone(),
+            close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
+            close_deadline: Arc::new(std::sync::Mutex::new(None)),
+            server_deadline: None,
+            shutdown_timeout: Duration::from_millis(100),
+        };
+        let resources = Arc::new(SessionResources::new(permit, session));
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let writer = tokio::spawn({
+            let queue = queue.clone();
+            async move {
+                writer_loop(
+                    sink,
+                    queue.clone(),
+                    queue.notify.clone(),
+                    IDLE_WINDOW,
+                    lifecycle,
+                    ack_rx,
+                    resources,
+                )
+                .await;
+            }
+        });
+
+        pending.notified().await;
+        assert_eq!(
+            poll_count.load(Ordering::SeqCst),
+            1,
+            "sink reached its controlled Pending point"
+        );
+        assert_eq!(queue.len(), 1, "the taken message remains in flight");
+        assert!(!shutdown.is_cancelled(), "the test did not initiate shutdown");
+        assert_eq!(
+            context.active_sessions(),
+            1,
+            "the pending writer retains session registration"
+        );
+        assert_eq!(
+            permits.available_permits(),
+            0,
+            "the pending writer retains connection capacity"
+        );
+
+        for _ in 0..4 {
+            tokio::time::advance(IDLE_WINDOW / 5).await;
+            queue.notify.notify_one();
+            tokio::task::yield_now().await;
+            assert!(
+                !writer.is_finished(),
+                "a pending write remains alive before its absolute deadline"
+            );
+            assert_eq!(queue.len(), 1, "the write has made no completion progress");
+            assert_eq!(
+                poll_count.load(Ordering::SeqCst),
+                1,
+                "no new sink poll or completion occurred"
+            );
+            assert!(
+                !shutdown.is_cancelled(),
+                "pending write did not cancel before its deadline"
+            );
+        }
+        tokio::time::advance(IDLE_WINDOW / 5).await;
+        tokio::task::yield_now().await;
+        drop(ack_tx);
+        timeout(Duration::from_secs(1), writer)
+            .await
+            .expect("writer should time out without external closure")
+            .expect("writer should not panic");
+        assert!(shutdown.is_cancelled(), "write timeout cancels the session token");
+        assert!(queue.is_empty(), "write timeout releases the in-flight queue charge");
+        assert_eq!(
+            context.active_sessions(),
+            0,
+            "write timeout releases session registration"
+        );
+        assert_eq!(
+            permits.available_permits(),
+            1,
+            "write timeout releases connection capacity"
+        );
+        drop(server);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_pending_ready_times_out_after_one_idle_window_without_external_close() {
+        let pending = Arc::new(Notify::new());
+        let polls = Arc::new(AtomicUsize::new(0));
+        assert_pending_send_times_out_after_one_idle_window(
+            PendingReady {
+                pending_ready: pending.clone(),
+                ready_polls: polls.clone(),
+            },
+            pending,
+            polls,
+        )
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_pending_flush_times_out_after_one_idle_window_without_external_close() {
+        let pending = Arc::new(Notify::new());
+        let polls = Arc::new(AtomicUsize::new(0));
+        assert_pending_send_times_out_after_one_idle_window(
+            PendingSend {
+                pending_flush: pending.clone(),
+                flush_polls: polls.clone(),
+            },
+            pending,
+            polls,
+        )
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_control_flush_times_out_after_one_idle_window_despite_new_notifications() {
+        const IDLE_WINDOW: Duration = Duration::from_millis(500);
+
+        let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .expect("test server should bind");
+        let context = server.context();
+        let session = context.try_register_session().expect("session should register");
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        let queue = WsSendQueue::new(1, 128);
+        let notify = queue.notify.clone();
+        let pending_flush = Arc::new(Notify::new());
+        let shutdown = CancellationToken::new();
+        let lifecycle = SessionLifecycle {
+            shutdown: shutdown.clone(),
+            close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
+            close_deadline: Arc::new(std::sync::Mutex::new(None)),
+            server_deadline: None,
+            shutdown_timeout: Duration::from_millis(100),
+        };
+        let resources = Arc::new(SessionResources::new(permit, session));
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let writer = tokio::spawn({
+            let queue = queue.clone();
+            let sink = PendingFlush {
+                polled: pending_flush.clone(),
+            };
+            async move {
+                writer_loop(sink, queue.clone(), notify, IDLE_WINDOW, lifecycle, ack_rx, resources).await;
+            }
+        });
+        queue.notify.notify_one();
+        pending_flush.notified().await;
+        assert!(!writer.is_finished(), "control flush should begin pending");
+
+        for _ in 0..4 {
+            tokio::time::advance(IDLE_WINDOW / 5).await;
+            queue.notify.notify_one();
+            tokio::task::yield_now().await;
+            assert!(
+                !writer.is_finished(),
+                "unrelated notifications do not shorten the flush deadline"
+            );
+            assert!(
+                !shutdown.is_cancelled(),
+                "control flush remains active before its deadline"
+            );
+        }
+        tokio::time::advance(IDLE_WINDOW / 5).await;
+        tokio::task::yield_now().await;
+        drop(ack_tx);
+        timeout(Duration::from_secs(1), writer)
+            .await
+            .expect("control flush should time out without external closure")
+            .expect("writer should not panic");
+
+        assert!(shutdown.is_cancelled(), "flush timeout cancels the session token");
+        assert!(queue.is_empty(), "flush timeout closes the outbound queue");
+        assert_eq!(
+            context.active_sessions(),
+            0,
+            "flush timeout releases session registration"
+        );
+        assert_eq!(
+            permits.available_permits(),
+            1,
+            "flush timeout releases connection capacity"
+        );
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn test_real_network_write_stall_times_out_and_releases_capacity() {
+        const IDLE_TIMEOUT: Duration = Duration::from_millis(500);
+        const MESSAGE_BYTES: usize = 32 * 1024 * 1024;
+        const STALL_MARKER: &[u8] = b"rs-web-write-stall-20261107";
+
+        type HandlerState = (
+            WsUpgradePolicy,
+            crate::server::ServerContext,
+            Arc<Notify>,
+            Arc<std::sync::atomic::AtomicUsize>,
+            Arc<std::sync::atomic::AtomicUsize>,
+        );
+
+        async fn upgrade(
+            State((policy, context, admitted, inbound, connection_count)): State<HandlerState>,
+            headers: HeaderMap,
+            ws: WebSocketUpgrade,
+        ) -> Response {
+            policy.on_upgrade(ws, &headers, context, move |mut session| async move {
+                if connection_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let mut payload = vec![0x5a; MESSAGE_BYTES];
+                    payload[..STALL_MARKER.len()].copy_from_slice(STALL_MARKER);
+                    session
+                        .try_send(Message::Binary(payload.into()))
+                        .expect("large server message should enter the bounded queue");
+                    admitted.notify_one();
+                } else {
+                    session
+                        .try_send(Message::text("second-session"))
+                        .expect("second session message should enter the bounded queue");
+                }
+                while let Some(Ok(message)) = session.recv().await {
+                    if matches!(message, Message::Text(_)) {
+                        inbound.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            })
+        }
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let observer = TestPendingObserver {
+            marker: Arc::from(STALL_MARKER),
+            events: event_tx,
+        };
+        let observer_slot = TEST_PENDING_OBSERVER.get_or_init(|| Mutex::new(None));
+        *observer_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
+        let _observer_guard = TestPendingObserverGuard(observer_slot);
+
+        let policy = WsUpgradePolicy::new()
+            .max_connections(1)
+            .max_frame_bytes(MESSAGE_BYTES)
+            .max_message_bytes(MESSAGE_BYTES)
+            .queue_limits(1, MESSAGE_BYTES)
+            .idle_timeout(IDLE_TIMEOUT);
+        let server = WebServer::bind_http(
+            ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(200)),
+        )
+        .await
+        .expect("test WebServer should bind");
+        let address = server.local_addr();
+        let context = server.context();
+        let shutdown = CancellationToken::new();
+        let admitted = Arc::new(Notify::new());
+        let inbound = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connection_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/ws",
+            get(upgrade).with_state((
+                policy.clone(),
+                context.clone(),
+                admitted.clone(),
+                inbound.clone(),
+                connection_count,
+            )),
+        );
+        let serve_shutdown = shutdown.clone();
+        let serving = tokio::spawn(async move { server.serve(app, serve_shutdown.cancelled_owned()).await });
+
+        let (client, status) = test_handshake(address).await;
+        assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+        admitted.notified().await;
+        let (client_read, client_write) = client.into_split();
+        let inbound_writer = tokio::spawn(async move {
+            let mut client_write = client_write;
+            let mut interval = tokio::time::interval(Duration::from_millis(50));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                test_send_masked_text(&mut client_write, b"inbound-progress").await;
+            }
+        });
+
+        let started = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match event_rx.recv().await {
+                    Some(TestWriterEvent::SendStarted(at)) => break at,
+                    Some(_) => {}
+                    None => panic!("writer observer channel closed before target send"),
+                }
+            }
+        })
+        .await
+        .expect("writer should start the marked network send");
+        let first_pending = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match event_rx.recv().await {
+                    Some(TestWriterEvent::FlushPending(at)) => break at,
+                    Some(TestWriterEvent::FlushReady(_)) => {
+                        panic!("large marked send completed before the stall window")
+                    }
+                    Some(TestWriterEvent::SendStarted(_)) => {}
+                    None => panic!("writer observer channel closed before Pending"),
+                }
+            }
+        })
+        .await
+        .expect("actual WebSocket sink should reach poll_flush Pending");
+        assert!(first_pending >= started);
+
+        let mut inbound_timeline = Vec::new();
+        let previous_inbound = inbound.load(Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let deadline = started + IDLE_TIMEOUT;
+            let midpoint = first_pending + (deadline - first_pending) / 2;
+            let mut sampled_midpoint = false;
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => break,
+                    _ = tokio::time::sleep_until(midpoint), if !sampled_midpoint => {
+                        let count = inbound.load(Ordering::SeqCst);
+                        assert!(count > previous_inbound, "application inbound count must advance while the write is pending");
+                        assert_eq!(policy.active_connections(), 1, "pending writer retains its policy permit before timeout");
+                        assert_eq!(context.active_sessions(), 1, "session remains registered before timeout");
+                        sampled_midpoint = true;
+                    }
+                    event = event_rx.recv() => match event {
+                        Some(TestWriterEvent::FlushPending(_)) => {},
+                        Some(TestWriterEvent::FlushReady(at)) => {
+                            panic!("large send completed before its write deadline at {at:?}")
+                        }
+                        Some(TestWriterEvent::SendStarted(_)) => {},
+                        None => panic!("writer observer channel closed during observation"),
+                    }
+                }
+            }
+            let count = inbound.load(Ordering::SeqCst);
+            assert!(count > previous_inbound, "application inbound count must advance during the write deadline");
+            inbound_timeline.push((1, tokio::time::Instant::now(), count));
+            assert!(
+                !shutdown.is_cancelled(),
+                "the server was not shut down during observation"
+            );
+        })
+        .await
+        .expect("write timeout observation must remain within the 15 second bound");
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while policy.active_connections() != 0 || context.active_sessions() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("write timeout should release both I/O tasks and session capacity");
+
+        let (second_client, second_status) = test_handshake(address).await;
+        assert_eq!(second_status, StatusCode::SWITCHING_PROTOCOLS);
+        drop(second_client);
+
+        inbound_writer.abort();
+        let _ = inbound_writer.await;
+        drop(client_read);
+        shutdown.cancel();
+        let report = tokio::time::timeout(Duration::from_secs(3), serving)
+            .await
+            .expect("server cleanup should be bounded")
+            .expect("server task should not panic")
+            .expect("server should report successful shutdown");
+        assert!(report.graceful, "server should finish cleanup within shutdown_timeout");
+        assert_eq!(
+            policy.active_connections(),
+            0,
+            "shutdown should release policy capacity"
+        );
+        assert_eq!(
+            context.active_sessions(),
+            0,
+            "shutdown should release session registration"
+        );
+        println!("writer_send_started={started:?}");
+        println!("writer_flush_pending={first_pending:?}");
+        println!("inbound_windows={inbound_timeline:?}");
+        println!("second_upgrade_status={second_status}");
+        println!("cleanup_active_connections={}", policy.active_connections());
+        println!("cleanup_active_sessions={}", context.active_sessions());
+    }
+
+    struct TestPendingObserverGuard(&'static Mutex<Option<TestPendingObserver>>);
+
+    impl Drop for TestPendingObserverGuard {
+        fn drop(&mut self) {
+            *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+    }
+
+    async fn test_handshake(address: SocketAddr) -> (TcpStream, StatusCode) {
+        let mut stream = TcpStream::connect(address).await.expect("test client should connect");
+        let request = format!(
+            "GET /ws HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("handshake request should write");
+        let mut response = Vec::new();
+        let mut byte = [0; 1];
+        while !response.ends_with(b"\r\n\r\n") {
+            tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut byte))
+                .await
+                .expect("handshake response should arrive")
+                .expect("handshake response should be readable");
+            response.push(byte[0]);
+        }
+        let status = String::from_utf8_lossy(&response)
+            .split_whitespace()
+            .nth(1)
+            .expect("response status should exist")
+            .parse::<u16>()
+            .expect("response status should be numeric");
+        (
+            stream,
+            StatusCode::from_u16(status).expect("response status should be valid"),
+        )
+    }
+
+    async fn test_send_masked_text(stream: &mut tokio::net::tcp::OwnedWriteHalf, text: &[u8]) {
+        assert!(text.len() < 126);
+        let mask = [7, 9, 3, 1];
+        let mut frame = vec![0x81, 0x80 | text.len() as u8];
+        frame.extend_from_slice(&mask);
+        frame.extend(text.iter().enumerate().map(|(i, byte)| byte ^ mask[i % 4]));
+        stream
+            .write_all(&frame)
+            .await
+            .expect("masked client frame should write");
+    }
+
+    #[test]
+    fn test_operation_deadline_is_immediate_when_duration_cannot_be_added() {
+        let deadline = operation_deadline(Duration::MAX);
+
+        assert!(deadline <= tokio::time::Instant::now());
     }
 
     #[tokio::test]
@@ -1141,7 +1820,16 @@ mod tests {
                 flush_polls,
             };
             async move {
-                writer_loop(sink, queue.clone(), queue.notify.clone(), lifecycle, ack_rx, resources).await;
+                writer_loop(
+                    sink,
+                    queue.clone(),
+                    queue.notify.clone(),
+                    Duration::from_secs(60),
+                    lifecycle,
+                    ack_rx,
+                    resources,
+                )
+                .await;
             }
         });
 
@@ -1251,7 +1939,16 @@ mod tests {
         let notify = queue.notify.clone();
         let writer = tokio::spawn(async move {
             let (_ack_tx, ack_rx) = oneshot::channel();
-            writer_loop(sink, queue.clone(), notify, lifecycle, ack_rx, resources).await;
+            writer_loop(
+                sink,
+                queue.clone(),
+                notify,
+                Duration::from_secs(60),
+                lifecycle,
+                ack_rx,
+                resources,
+            )
+            .await;
             queue
         });
 
@@ -1307,7 +2004,16 @@ mod tests {
         let notify = queue.notify.clone();
         let (ack_tx, ack_rx) = oneshot::channel();
         let writer = tokio::spawn(async move {
-            writer_loop(sink, queue.clone(), notify, lifecycle, ack_rx, resources).await;
+            writer_loop(
+                sink,
+                queue.clone(),
+                notify,
+                Duration::from_secs(60),
+                lifecycle,
+                ack_rx,
+                resources,
+            )
+            .await;
             queue
         });
 
@@ -1388,7 +2094,16 @@ mod tests {
         let resources = Arc::new(SessionResources::new(permit, session));
         let (ack_tx, ack_rx) = oneshot::channel();
         let writer = tokio::spawn(async move {
-            writer_loop(sink, queue.clone(), notify, lifecycle, ack_rx, resources).await;
+            writer_loop(
+                sink,
+                queue.clone(),
+                notify,
+                Duration::from_secs(60),
+                lifecycle,
+                ack_rx,
+                resources,
+            )
+            .await;
             queue
         });
         wake_writer.notify_one();

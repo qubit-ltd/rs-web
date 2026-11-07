@@ -272,10 +272,11 @@ impl WsUpgradePolicy {
         })
     }
 
-    /// Sets the maximum interval without inbound progress before closing.
+    /// Sets the inbound idle interval and per-operation outbound write limit.
     ///
     /// Configuration updates use copy-on-write, so existing policy clones
     /// retain their previous timeout. The supplied value is stored as-is and
+    /// the default policy value is 60 seconds.
     /// checked by [`validate`](Self::validate).
     ///
     /// # Parameters
@@ -283,7 +284,13 @@ impl WsUpgradePolicy {
     /// * `timeout` - Positive maximum interval for the reader to await a frame,
     ///   to deliver a frame while the application channel is full, and for
     ///   [`WsSession::recv`](super::WsSession::recv) to await an application
-    ///   message. Outbound sends do not refresh the reader's idle deadline.
+    ///   message. Each ordinary outbound send and notification flush also has
+    ///   this independent completion deadline. Inbound messages and unrelated
+    ///   queue notifications do not reset a write deadline; it bounds an
+    ///   operation's wait, not byte-level progress. A timed-out writer closes
+    ///   the session and drops its sink, so a Close frame is not guaranteed to
+    ///   reach a backpressured peer. Raising this value to support slow readers
+    ///   also lengthens inbound waits.
     /// # Returns
     ///
     /// The updated policy; zero and unrepresentable deadlines are reported by
@@ -495,6 +502,7 @@ impl WsUpgradePolicy {
                 let writer_notify = queue.notify.clone();
                 let (close_ack_sender, close_ack_receiver) = oneshot::channel();
                 let (sink, stream) = socket.split();
+                let idle_timeout = policy.inner.idle_timeout;
                 let resources = Arc::new(super::internal::SessionResources::new(permit, session_guard));
                 let closed = resources.closed_token();
                 let writer_resources = resources.clone();
@@ -505,6 +513,7 @@ impl WsUpgradePolicy {
                             sink,
                             writer_queue,
                             writer_notify,
+                            idle_timeout,
                             writer_lifecycle,
                             close_ack_receiver,
                             writer_resources,
@@ -522,7 +531,6 @@ impl WsUpgradePolicy {
                     shutdown_timeout,
                 };
                 let reader_queue = queue.clone();
-                let idle_timeout = policy.inner.idle_timeout;
                 let reader_inbound_state = inbound_state.clone();
                 let reader_resources = resources.clone();
                 let reader = spawn(async move {
