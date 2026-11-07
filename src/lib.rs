@@ -162,6 +162,10 @@ pub use ws::WsPolicyError;
 /// WebSocket send error; requires the `ws` feature.
 #[cfg(feature = "ws")]
 pub use ws::WsSendError;
+/// Recoverable WebSocket send failure retaining its original message; requires
+/// the `ws` feature.
+#[cfg(feature = "ws")]
+pub use ws::WsSendFailure;
 /// Bounded WebSocket outgoing message queue; requires the `ws` feature.
 #[cfg(feature = "ws")]
 pub use ws::WsSendQueue;

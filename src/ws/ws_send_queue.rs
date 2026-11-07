@@ -17,6 +17,7 @@ use tokio::sync::Notify;
 
 use super::internal::QueueState;
 use super::ws_send_error::WsSendError;
+use super::ws_send_failure::WsSendFailure;
 
 /// A nonblocking bounded queue for outbound WebSocket messages.
 ///
@@ -77,7 +78,8 @@ impl WsSendQueue {
     ///   zero-payload messages.
     ///
     /// [`Self::try_send`] checks errors in this order: [`WsSendError::Closed`],
-    /// [`WsSendError::MessageTooLarge`], then [`WsSendError::Backpressure`].
+    /// [`WsSendError::InvalidCloseCode`], [`WsSendError::MessageTooLarge`],
+    /// then [`WsSendError::Backpressure`].
     /// # Returns
     ///
     /// An empty queue with the supplied capacity bounds.
@@ -125,11 +127,14 @@ impl WsSendQueue {
     /// * `message` - Text, binary, ping, pong, or close message to enqueue.
     /// # Returns
     ///
-    /// `Ok(())` when accepted into the queue.
+    /// `Ok(())` when accepted into the queue. On rejection, the message is
+    /// discarded; use [`Self::try_send_recoverable`] to retain it.
     ///
     /// # Errors
     ///
     /// Returns [`WsSendError::Closed`] if the queue is closed,
+    /// [`WsSendError::InvalidCloseCode`] if a Close frame uses a code a server
+    /// cannot send,
     /// [`WsSendError::MessageTooLarge`] if a Ping/Pong payload exceeds 125
     /// bytes, a Close reason exceeds 123 UTF-8 bytes, or the message exceeds
     /// the configured total byte budget. Returns [`WsSendError::Backpressure`]
@@ -139,18 +144,48 @@ impl WsSendQueue {
     /// Success means only that the message entered the queue, not that it was
     /// delivered; a message still pending at closure may be discarded.
     pub fn try_send(&self, message: Message) -> Result<(), WsSendError> {
+        self.try_send_recoverable(message).map_err(|failure| failure.kind())
+    }
+
+    /// Attempts to enqueue a message and returns ownership if it is rejected.
+    ///
+    /// Admission uses the same order as [`Self::try_send`]: closed queue,
+    /// invalid server Close code, message limits, then remaining queue
+    /// capacity. A successful result means only that the message entered the
+    /// queue; it may still be discarded if the session closes before writing.
+    ///
+    /// # Parameters
+    ///
+    /// * `message` - Outbound message to enqueue.
+    /// # Returns
+    ///
+    /// `Ok(())` if accepted, or a [`WsSendFailure`] owning the original
+    /// message if rejected.
+    /// # Errors
+    ///
+    /// Returns a failure with kind [`WsSendError::Closed`],
+    /// [`WsSendError::InvalidCloseCode`], [`WsSendError::MessageTooLarge`], or
+    /// [`WsSendError::Backpressure`]. The rejected message is retained without
+    /// cloning, truncation, or re-encoding.
+    pub fn try_send_recoverable(&self, message: Message) -> Result<(), WsSendFailure> {
         let bytes = message_size(&message);
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.closed {
-            return Err(WsSendError::Closed);
+            return Err(WsSendFailure::new(WsSendError::Closed, message));
+        }
+        if let Message::Close(Some(frame)) = &message {
+            let code = tungstenite::protocol::frame::coding::CloseCode::from(frame.code);
+            if !code.is_allowed() || frame.code == 1010 {
+                return Err(WsSendFailure::new(WsSendError::InvalidCloseCode, message));
+            }
         }
         if exceeds_control_frame_limit(&message) || bytes > self.max_bytes {
-            return Err(WsSendError::MessageTooLarge);
+            return Err(WsSendFailure::new(WsSendError::MessageTooLarge, message));
         }
         if state.messages.len() + state.in_flight_messages >= self.max_messages
             || bytes > self.max_bytes.saturating_sub(state.queued_bytes)
         {
-            return Err(WsSendError::Backpressure);
+            return Err(WsSendFailure::new(WsSendError::Backpressure, message));
         }
         state.queued_bytes += bytes;
         state.messages.push_back(message);
@@ -386,6 +421,180 @@ mod tests {
             remaining_capacity.try_send(Message::Ping(vec![0; 125].into())),
             Err(WsSendError::Backpressure)
         );
+    }
+
+    #[test]
+    fn test_invalid_close_code_is_rejected_without_queue_side_effects() {
+        use axum::extract::ws::CloseFrame;
+
+        let queue = WsSendQueue::new(4, 1024);
+        for code in [0, 999, 1004, 1005, 1006, 1010, 1015, 5000, 65535] {
+            let result = queue.try_send(Message::Close(Some(CloseFrame {
+                code,
+                reason: "private-close-reason".into(),
+            })));
+            assert_eq!(result, Err(WsSendError::InvalidCloseCode), "code {code}");
+            assert!(queue.is_empty(), "code {code}");
+            assert_eq!(queue.state.lock().unwrap().queued_bytes, 0, "code {code}");
+        }
+
+        for code in [1000, 1001, 1002, 1011, 3000, 4000, 4999] {
+            let legal = WsSendQueue::new(1, 1024);
+            legal
+                .try_send(Message::Close(Some(CloseFrame {
+                    code,
+                    reason: "legal".into(),
+                })))
+                .unwrap();
+            assert_eq!(legal.len(), 1, "code {code}");
+        }
+        let no_code = WsSendQueue::new(1, 1024);
+        no_code.try_send(Message::Close(None)).unwrap();
+        assert_eq!(no_code.len(), 1);
+
+        let full = WsSendQueue::new(1, 1024);
+        full.try_send(Message::text("held")).unwrap();
+        let before_bytes = full.state.lock().unwrap().queued_bytes;
+        assert_eq!(
+            full.try_send(Message::Close(Some(CloseFrame {
+                code: 1005,
+                reason: "x".repeat(124).into(),
+            }))),
+            Err(WsSendError::InvalidCloseCode)
+        );
+        assert_eq!(full.len(), 1);
+        assert_eq!(full.state.lock().unwrap().queued_bytes, before_bytes);
+        let closed = WsSendQueue::new(1, 1024);
+        closed.close();
+        assert_eq!(
+            closed.try_send(Message::Close(Some(CloseFrame {
+                code: 1005,
+                reason: "short".into(),
+            }))),
+            Err(WsSendError::Closed)
+        );
+
+        let reusable = WsSendQueue::new(1, 1024);
+        assert_eq!(
+            reusable.try_send(Message::Close(Some(CloseFrame {
+                code: 1005,
+                reason: "short".into(),
+            }))),
+            Err(WsSendError::InvalidCloseCode)
+        );
+        reusable.try_send(Message::text("still-open")).unwrap();
+        assert_eq!(reusable.len(), 1);
+    }
+
+    #[test]
+    fn test_recoverable_send_returns_rejected_message_and_preserves_binary_storage() {
+        use axum::body::Bytes;
+        use axum::extract::ws::CloseFrame;
+
+        let binary = Bytes::from_static(b"recover-this-binary");
+        let binary_ptr = binary.as_ptr();
+        let message = Message::Binary(binary);
+        let failure = WsSendQueue::new(0, 1024).try_send_recoverable(message).unwrap_err();
+        assert_eq!(failure.kind(), WsSendError::Backpressure);
+        match failure.into_message() {
+            Message::Binary(bytes) => assert_eq!(bytes.as_ptr(), binary_ptr),
+            other => panic!("expected original binary message, got {other:?}"),
+        }
+
+        for (message, expected_variant) in [
+            (Message::Ping(Bytes::from_static(b"ping")), "ping"),
+            (Message::Pong(Bytes::from_static(b"pong")), "pong"),
+            (
+                Message::Close(Some(CloseFrame {
+                    code: 1000,
+                    reason: "close-reason".into(),
+                })),
+                "close-some",
+            ),
+            (Message::Close(None), "close-none"),
+        ] {
+            let failure = WsSendQueue::new(0, 1024).try_send_recoverable(message).unwrap_err();
+            assert_eq!(failure.kind(), WsSendError::Backpressure);
+            match (expected_variant, failure.into_message()) {
+                ("ping", Message::Ping(bytes)) => assert_eq!(&bytes[..], b"ping"),
+                ("pong", Message::Pong(bytes)) => assert_eq!(&bytes[..], b"pong"),
+                ("close-some", Message::Close(Some(frame))) => {
+                    assert_eq!(frame.code, 1000);
+                    assert_eq!(frame.reason.as_str(), "close-reason");
+                }
+                ("close-none", Message::Close(None)) => {}
+                (expected, message) => panic!("expected {expected}, got {message:?}"),
+            }
+        }
+
+        let cases = [
+            (
+                WsSendQueue::new(1, 0),
+                Message::text("too-large"),
+                WsSendError::MessageTooLarge,
+            ),
+            (
+                WsSendQueue::new(1, 1024),
+                Message::Close(Some(CloseFrame {
+                    code: 1005,
+                    reason: "invalid-code".into(),
+                })),
+                WsSendError::InvalidCloseCode,
+            ),
+        ];
+        for (queue, message, expected) in cases {
+            let failure = queue.try_send_recoverable(message).unwrap_err();
+            let (kind, message) = failure.into_parts();
+            assert_eq!(kind, expected);
+            match (expected, message) {
+                (WsSendError::MessageTooLarge, Message::Text(text)) => {
+                    assert_eq!(text.as_str(), "too-large");
+                }
+                (WsSendError::InvalidCloseCode, Message::Close(Some(frame))) => {
+                    assert_eq!(frame.code, 1005);
+                    assert_eq!(frame.reason.as_str(), "invalid-code");
+                }
+                (kind, message) => panic!("unexpected recovered pair {kind:?}, {message:?}"),
+            }
+        }
+
+        let closed = WsSendQueue::new(1, 1024);
+        closed.close();
+        let message = Message::text("closed-original");
+        let failure = closed.try_send_recoverable(message).unwrap_err();
+        assert_eq!(failure.kind(), WsSendError::Closed);
+        assert!(matches!(failure.message(), Message::Text(text) if text.as_str() == "closed-original"));
+    }
+
+    #[test]
+    fn test_legacy_and_recoverable_send_report_the_same_error_kinds() {
+        use axum::extract::ws::CloseFrame;
+
+        let make_cases = || {
+            [
+                (WsSendQueue::new(0, 1024), Message::text("backpressure")),
+                (WsSendQueue::new(1, 0), Message::text("too-large")),
+                (
+                    WsSendQueue::new(1, 1024),
+                    Message::Close(Some(CloseFrame {
+                        code: 1005,
+                        reason: "invalid".into(),
+                    })),
+                ),
+                (
+                    {
+                        let queue = WsSendQueue::new(1, 1024);
+                        queue.close();
+                        queue
+                    },
+                    Message::text("closed"),
+                ),
+            ]
+        };
+        for (queue, message) in make_cases() {
+            let expected = queue.try_send(message.clone()).unwrap_err();
+            assert_eq!(queue.try_send_recoverable(message).unwrap_err().kind(), expected);
+        }
     }
 
     #[test]

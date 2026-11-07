@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use super::internal::InboundMessage;
 use super::internal::InboundState;
 use super::ws_send_error::WsSendError;
+use super::ws_send_failure::WsSendFailure;
 use super::ws_send_queue::WsSendQueue;
 
 /// One upgraded connection with bounded outbound buffering and coordinated
@@ -151,6 +152,8 @@ impl WsSession {
     /// # Errors
     ///
     /// Returns [`WsSendError::Closed`] after shutdown,
+    /// [`WsSendError::InvalidCloseCode`] if a Close frame uses a code a server
+    /// cannot send,
     /// [`WsSendError::MessageTooLarge`] if the message exceeds the total byte
     /// budget, or if a Ping/Pong payload exceeds 125 bytes or a Close reason
     /// exceeds 123 UTF-8 bytes. These control-frame limits are measured in
@@ -168,10 +171,32 @@ impl WsSession {
     /// behind that Close may be discarded.
     #[inline]
     pub fn try_send(&self, message: Message) -> Result<(), WsSendError> {
+        self.try_send_recoverable(message).map_err(|failure| failure.kind())
+    }
+
+    /// Attempts to enqueue an outbound message while retaining it on rejection.
+    ///
+    /// The returned failure owns the original message. Successful admission
+    /// only means that the message entered the queue; session shutdown may
+    /// discard it before the writer sends it.
+    ///
+    /// # Parameters
+    ///
+    /// * `message` - Outbound message to enqueue.
+    /// # Returns
+    ///
+    /// `Ok(())` if accepted, or a [`WsSendFailure`] with the original message
+    /// if rejected.
+    /// # Errors
+    ///
+    /// Returns a failure with kind [`WsSendError::Closed`],
+    /// [`WsSendError::InvalidCloseCode`], [`WsSendError::MessageTooLarge`], or
+    /// [`WsSendError::Backpressure`].
+    pub fn try_send_recoverable(&self, message: Message) -> Result<(), WsSendFailure> {
         if self.shutdown.is_cancelled() {
-            return Err(WsSendError::Closed);
+            return Err(WsSendFailure::new(WsSendError::Closed, message));
         }
-        self.queue.try_send(message)
+        self.queue.try_send_recoverable(message)
     }
 
     /// Sends a close frame and discards queued messages.
@@ -329,6 +354,18 @@ mod tests {
         );
         active.shutdown.cancel();
         assert_eq!(active.try_send(Message::text("four")), Err(WsSendError::Closed));
+    }
+
+    #[tokio::test]
+    async fn test_recoverable_send_returns_original_message_after_session_shutdown() {
+        let active = session(tokio::spawn(pending::<()>()), tokio::spawn(pending::<()>()));
+        active.shutdown.cancel();
+        let failure = active
+            .try_send_recoverable(Message::text("session-closed-original"))
+            .unwrap_err();
+        assert_eq!(failure.kind(), WsSendError::Closed);
+        assert!(matches!(failure.message(), Message::Text(text) if text.as_str() == "session-closed-original"));
+        assert!(matches!(failure.into_message(), Message::Text(text) if text == "session-closed-original"));
     }
 
     #[tokio::test]

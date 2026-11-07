@@ -15,12 +15,14 @@
 mod internal;
 mod ws_policy_error;
 mod ws_send_error;
+mod ws_send_failure;
 mod ws_send_queue;
 mod ws_session;
 mod ws_upgrade_policy;
 
 pub use ws_policy_error::WsPolicyError;
 pub use ws_send_error::WsSendError;
+pub use ws_send_failure::WsSendFailure;
 pub use ws_send_queue::WsSendQueue;
 pub use ws_session::WsSession;
 pub use ws_upgrade_policy::WsUpgradePolicy;

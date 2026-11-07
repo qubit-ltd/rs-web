@@ -449,7 +449,23 @@ accept 遇到 socket I/O 错误时，`InvalidInput`、`PermissionDenied`、`Unsu
 
 `request_header_timeout` 默认 10 秒，用于限制 HTTP/1 请求头；零值或 Tokio 无法通过 `Instant::checked_add` 表示的期限（包括 `Duration::MAX`）会以 `WebServerError::InvalidConfig` 拒绝。SSE keep-alive interval 也必须是正数且可表示。未匹配请求的诊断日志只使用固定标记 `<unmatched>`，不会记录 URI、查询参数或秘密信息。HTTPS TLS 握手也沿用该期限。`transport_idle_timeout` 默认 30 秒，在 handler 和响应体都不活跃时回收空闲 HTTP/1/2 连接。活跃请求停滞不会由空闲期限中断；此类情况应使用路由限额或部署层策略处理。`HttpLimits::with_request_timeout` 与传输空闲期限不同：Controller `short` 路由默认使用该请求期限，原生 Axum 路由则只有显式安装 `RequestLimitLayer` 后才使用。
 
-WebSocket 的 `idle_timeout` 必须为正且能构造 Tokio deadline；不可表示时返回新增的 `WsPolicyError::IdleTimeoutTooLarge`。穷尽匹配 `WsPolicyError` 的调用方需增加该分支或使用兜底分支。`queue_limits` 配置出站队列；`inbound_queue_limits(messages, bytes)` 单独配置入站队列及每连接累计 payload 字节预算，默认是 64 条排队消息和 1 MiB。reader 等待通道空位时最多另持有一条消息，该 payload 也计入相同字节预算。通道满时最多等待至 `idle_timeout`，然后以关闭码 `1013`（原因 `inbound backpressure`）关闭；若剩余字节预算不足以容纳消息，则立即以 `1013` 关闭。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，每个活跃连接还最多有一条 1 MiB 协议重组消息。该估算不含分配开销和应用自有内存，也不限制 I/O 结束后仍被 handler 或 session 保留的内存。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应定期读取消息，再将较长处理交给应用任务。传输读取错误通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；显式 `close()` 会清除待交付错误，此后 `recv()` 返回 `None`。宿主停服可能直接取消 handler，不保证交付该错误。`WsSession::try_send` 成功只表示消息进入出站队列，不保证消息已通过网络送达。准入依次检查：队列关闭时返回 `Closed`，消息超过总字节预算或违反固定控制帧限制时返回 `MessageTooLarge`，条数或剩余字节容量不足时返回 `Backpressure`。Ping/Pong payload 超过 125 字节、Close reason 超过 123 个 UTF-8 字节都会返回 `MessageTooLarge`；长度按字节计算，增大队列预算不能放宽这些协议限制。应用可按策略对 `Backpressure` 退避。普通数据消息超限时可缩小、拆成应用层消息或拒绝；控制帧内容超限时应缩短 payload 或 reason，不要分片控制帧。同一消息的 `MessageTooLarge` 不会因重试恢复；`Closed` 后停止发送。新增枚举变体会影响穷尽匹配，且原先对单条超限消息断言 `Backpressure` 的测试需要迁移。对端或会话关闭时会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。通过 `try_send` 排队的 Close 会保留其关闭码和原因；writer 开始处理该帧时会关闭出站队列，后续发送返回 `Closed`，其后的排队消息可能丢弃，等待对端确认的时间受共享关闭 deadline 限制。writer 取出该 Close 前成功的 `try_send` 仍只表示入队。
+WebSocket 的 `idle_timeout` 必须为正且能构造 Tokio deadline；不可表示时返回新增的 `WsPolicyError::IdleTimeoutTooLarge`。穷尽匹配 `WsPolicyError` 的调用方需增加该分支或使用兜底分支。`queue_limits` 配置出站队列；`inbound_queue_limits(messages, bytes)` 单独配置入站队列及每连接累计 payload 字节预算，默认是 64 条排队消息和 1 MiB。reader 等待通道空位时最多另持有一条消息，该 payload 也计入相同字节预算。通道满时最多等待至 `idle_timeout`，然后以关闭码 `1013`（原因 `inbound backpressure`）关闭；若剩余字节预算不足以容纳消息，则立即以 `1013` 关闭。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，每个活跃连接还最多有一条 1 MiB 协议重组消息。该估算不含分配开销和应用自有内存，也不限制 I/O 结束后仍被 handler 或 session 保留的内存。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应定期读取消息，再将较长处理交给应用任务。传输读取错误通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；显式 `close()` 会清除待交付错误，此后 `recv()` 返回 `None`。宿主停服可能直接取消 handler，不保证交付该错误。`WsSession::try_send` 成功只表示消息进入出站队列，不保证网络已送达。准入错误按 `Closed`、`InvalidCloseCode`、`MessageTooLarge`、`Backpressure` 的顺序检查。`InvalidCloseCode` 表示服务端不能发送该 Close code（包括保留码和仅客户端可用的 1010），属于输入问题，修正后再发送；原消息不应按背压重试。`MessageTooLarge` 表示消息超过总字节预算或固定控制帧限制；`Backpressure` 表示当前条数或剩余字节容量不足。Ping/Pong payload 超过 125 字节、Close reason 超过 123 个 UTF-8 字节都会返回 `MessageTooLarge`；长度按字节计算，增大队列预算不能放宽这些协议限制。应用可按策略对 `Backpressure` 退避。普通数据消息超限时可缩小、拆成应用层消息或拒绝；控制帧内容超限时应缩短 payload 或 reason，不要分片控制帧。同一消息的 `MessageTooLarge` 不会因重试恢复；`Closed` 后停止发送。新增 `InvalidCloseCode` 会影响穷尽匹配 `WsSendError` 的代码：增加该分支并修正 Close code，不要重试原输入。旧 `try_send` 方法签名不变，但拒绝时仍会丢弃消息；若应用需要保留拒绝消息，可改用 `WsSession::try_send_recoverable` 或 `WsSendQueue::try_send_recoverable`。同一条 `MessageTooLarge` 消息无法靠重试恢复；原先将单条超限消息断言为 `Backpressure` 的测试也需更新。对端或会话关闭时会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。通过 `try_send` 排队的 Close 会保留其关闭码和原因；writer 开始处理该帧时会关闭出站队列，后续发送返回 `Closed`，其后的排队消息可能丢弃，等待对端确认的时间受共享关闭 deadline 限制。writer 取出该 Close 前成功的 `try_send` 仍只表示入队。
+
+如果队列拒绝消息后应用仍需拿回该消息，可使用 `try_send_recoverable`，再从 `WsSendFailure` 取出原消息。只对 `Backpressure` 考虑重试，并同时设置最大次数和截止时间；还要限制留待重试的消息条数或总字节数。遇到 `Closed` 就停止发送；遇到 `InvalidCloseCode` 则先改正 code。不要在队列满时忙轮询，也不要把拒绝消息无限堆在应用缓冲区。该 API 不会等待容量空出，也不提供容量通知；入队成功仍不等于网络送达。
+
+```rust
+use axum::extract::ws::Message;
+use qubit_web::ws::{WsSendError, WsSendQueue};
+
+let queue = WsSendQueue::new(0, 1024);
+let failure = queue.try_send_recoverable(Message::text("retryable"))
+    .expect_err("zero item capacity rejects admission");
+let (kind, message) = failure.into_parts();
+assert_eq!(kind, WsSendError::Backpressure);
+assert_eq!(message.into_text().unwrap(), "retryable");
+```
+
+这段代码只演示取回消息，不包含重试调度。有限重试次数、截止时间以及待重试消息预算都由应用决定。
 
 如果要在 WebSocket I/O 结束后停止可取消的业务操作，可等待 `WsSession::closed()`。它返回 owned future，因此不借用 session，可以和应用操作一起 select：
 

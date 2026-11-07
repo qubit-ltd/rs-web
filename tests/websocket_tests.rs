@@ -670,6 +670,63 @@ async fn test_outbound_control_frame_boundaries() {
     drop(serving);
 }
 
+#[tokio_test]
+async fn test_invalid_close_code_does_not_close_websocket_writer() {
+    async fn upgrade(
+        State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, move |session| async move {
+            assert_eq!(
+                session.try_send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1005,
+                    reason: "private-close-reason".into(),
+                }))),
+                Err(WsSendError::InvalidCloseCode)
+            );
+            session.try_send(Message::text("writer-remains-open")).unwrap();
+            session
+                .try_send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1000,
+                    reason: "legal-close".into(),
+                })))
+                .unwrap();
+            session.closed().await;
+        })
+    }
+
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let app = Router::new()
+        .route("/ws", get(upgrade))
+        .with_state((WsUpgradePolicy::new(), server.context()));
+    let serving = AbortOnDrop(spawn(
+        server
+            .serve(app, pending::<()>())
+            .with_subscriber(tracing::dispatcher::get_default(Clone::clone)),
+    ));
+
+    let (mut peer, status) = handshake_path(address, "/ws", None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    let (opcode, payload) = timeout(Duration::from_secs(1), read_server_frame(&mut peer))
+        .await
+        .expect("writer should send a text message after rejecting invalid Close");
+    assert_eq!(opcode, 1);
+    assert_eq!(payload, b"writer-remains-open");
+    let (opcode, payload) = timeout(Duration::from_secs(1), read_server_frame(&mut peer))
+        .await
+        .expect("writer should send the subsequent legal Close");
+    assert_eq!(opcode, 8);
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1000);
+    assert_eq!(&payload[2..], b"legal-close");
+    send_masked_close(&mut peer).await;
+    drop(peer);
+    drop(serving);
+}
+
 #[test]
 fn test_ws_errors_implement_standard_error() {
     fn invalid_policy() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -718,6 +775,10 @@ fn test_ws_errors_implement_standard_error() {
     assert_eq!(
         WsSendError::MessageTooLarge.to_string(),
         "WebSocket message exceeds the outbound limit"
+    );
+    assert_eq!(
+        WsSendError::InvalidCloseCode.to_string(),
+        "WebSocket close code is invalid for a server"
     );
     let too_large = oversized_message().unwrap_err();
     assert_eq!(too_large.to_string(), "WebSocket message exceeds the outbound limit");

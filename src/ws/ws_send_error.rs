@@ -8,6 +8,14 @@
 
 /// Error returned when an outbound message cannot be queued.
 ///
+/// Admission failures are checked in this order: [`Closed`](Self::Closed),
+/// [`InvalidCloseCode`](Self::InvalidCloseCode),
+/// [`MessageTooLarge`](Self::MessageTooLarge), then
+/// [`Backpressure`](Self::Backpressure). `InvalidCloseCode` is permanent for
+/// that Close frame; correct the code instead of retrying it. The older
+/// `try_send` APIs discard rejected messages. Use `try_send_recoverable` when
+/// the application needs to retain ownership of a rejected message.
+///
 /// A message accepted before shutdown may still be discarded if it remains
 /// pending when the session closes.
 ///
@@ -26,6 +34,9 @@
 /// assert!(error.downcast_ref::<WsSendError>().is_some());
 /// assert_eq!(error.to_string(), "WebSocket send queue capacity exceeded");
 /// ```
+///
+/// Adding variants can affect exhaustive matches. Handle
+/// [`InvalidCloseCode`](Self::InvalidCloseCode) by correcting the Close code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[must_use]
 pub enum WsSendError {
@@ -35,6 +46,8 @@ pub enum WsSendError {
     /// total outbound byte budget. Ping/Pong payloads are limited to 125 bytes;
     /// a Close reason is limited to 123 UTF-8 bytes.
     MessageTooLarge,
+    /// The Close frame uses a status code a server cannot send.
+    InvalidCloseCode,
     /// The send queue is closed or the session has started shutting down.
     Closed,
 }
@@ -48,6 +61,7 @@ impl std::fmt::Display for WsSendError {
         formatter.write_str(match self {
             Self::Backpressure => "WebSocket send queue capacity exceeded",
             Self::MessageTooLarge => "WebSocket message exceeds the outbound limit",
+            Self::InvalidCloseCode => "WebSocket close code is invalid for a server",
             Self::Closed => "WebSocket send queue is closed",
         })
     }
