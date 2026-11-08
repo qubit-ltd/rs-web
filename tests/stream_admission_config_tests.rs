@@ -2,6 +2,8 @@
 //    Copyright (c) 2025 - 2026 Haixing Hu.
 //
 //    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 #![cfg(feature = "config")]
 
@@ -9,9 +11,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::body::{Body, Bytes};
+use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{Request, StatusCode};
+use axum::http::Request;
+use axum::http::StatusCode;
 use axum::routing::post;
 use qubit_config::Config;
 use qubit_web::StreamAdmissionLayer;
@@ -23,7 +27,7 @@ const CAPACITY: &str = "stream_admission.max_concurrent_admissions";
 const TIMEOUT: &str = "stream_admission.admission_timeout_ms";
 
 #[test]
-fn defaults_do_not_require_an_address() {
+fn test_defaults_do_not_require_an_address() {
     let limits = stream_admission_limits_from_config(&Config::new()).unwrap();
     assert_eq!(limits.max_body_bytes(), 1024 * 1024);
     assert_eq!(limits.max_concurrent_admissions(), 256);
@@ -31,7 +35,7 @@ fn defaults_do_not_require_an_address() {
 }
 
 #[test]
-fn partial_and_full_values_override_defaults() {
+fn test_partial_and_full_values_override_defaults() {
     let mut config = Config::new();
     config.set(BODY, 3_u64).unwrap();
     let partial = stream_admission_limits_from_config(&config).unwrap();
@@ -55,7 +59,7 @@ fn assert_error(config: &Config, key: &str) -> String {
 }
 
 #[test]
-fn wrong_types_are_field_specific_and_do_not_leak_values() {
+fn test_wrong_types_are_field_specific_and_do_not_leak_values() {
     for (key, value) in [
         (BODY, "private-body-value"),
         (CAPACITY, "private-capacity-value"),
@@ -74,7 +78,7 @@ fn wrong_types_are_field_specific_and_do_not_leak_values() {
 }
 
 #[test]
-fn zero_and_capacity_overflow_are_rejected() {
+fn test_zero_and_capacity_overflow_are_rejected() {
     for (key, value) in [(BODY, 0), (CAPACITY, 0), (TIMEOUT, 0)] {
         let mut config = Config::new();
         config.set(key, value as u64).unwrap();
@@ -99,7 +103,7 @@ fn zero_and_capacity_overflow_are_rejected() {
 }
 
 #[test]
-fn earlier_setter_validation_error_precedes_later_type_error() {
+fn test_earlier_setter_validation_error_precedes_later_type_error() {
     let mut config = Config::new();
     config.set(BODY, 0_u64).unwrap();
     config.set(CAPACITY, "malformed-later-value").unwrap();
@@ -107,7 +111,7 @@ fn earlier_setter_validation_error_precedes_later_type_error() {
 }
 
 #[test]
-fn platform_conversion_and_timeout_boundaries_are_checked() {
+fn test_platform_conversion_and_timeout_boundaries_are_checked() {
     if usize::BITS < u64::BITS {
         let mut config = Config::new();
         config.set(BODY, u64::MAX).unwrap();
@@ -132,7 +136,7 @@ fn platform_conversion_and_timeout_boundaries_are_checked() {
 }
 
 #[tokio::test]
-async fn configured_body_budget_is_enforced_by_the_layer() {
+async fn test_configured_body_budget_is_enforced_by_the_layer() {
     async fn echo(body: Bytes) -> String {
         body.len().to_string()
     }
@@ -165,7 +169,7 @@ async fn held(State(gate): State<Gate>) -> &'static str {
 }
 
 #[tokio::test]
-async fn configured_capacity_rejects_and_cancellation_releases_its_permit() {
+async fn test_configured_capacity_rejects_and_cancellation_releases_its_permit() {
     let mut config = Config::new();
     config.set(CAPACITY, 1_u64).unwrap();
     let limits = stream_admission_limits_from_config(&config).unwrap();
@@ -202,7 +206,7 @@ async fn configured_capacity_rejects_and_cancellation_releases_its_permit() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn configured_timeout_expires_handler_and_recovers_capacity() {
+async fn test_configured_timeout_expires_handler_and_recovers_capacity() {
     let mut config = Config::new();
     config.set(CAPACITY, 1_u64).unwrap();
     config.set(TIMEOUT, 10_u64).unwrap();
