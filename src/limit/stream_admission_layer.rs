@@ -37,15 +37,17 @@ pub type StreamAdmissionMiddleware = fn(State<StreamAdmissionState>, Request<Bod
 /// Creates middleware that buffers request bodies before invoking a long-lived
 /// route handler. The deadline ends when response headers are produced; it
 /// does not cover streaming the response body or a WebSocket session.
-/// Request trailers are preserved only as delivered by the transport. With
-/// the currently locked HTTP/2 decoder, an over-limit trailer field can be
-/// omitted while request processing continues, so an HTTP 200 response does
-/// not prove that all sent trailers reached the handler. Applications that
-/// require trailer fields must validate their presence and values. Buffered
-/// data frames may be merged, and the configured body limit counts data bytes;
-/// it does not impose a separate trailers memory limit. See
-/// `doc/trailers-budget-investigation-20261108.md` and
-/// `tests/stream_admission_trailers_tests.rs` for the bounded observations.
+/// Request trailers are preserved only as delivered by the transport. The
+/// 2026-11-08 investigation under Hyper 1.12.0 / h2 0.4.20 observed that an
+/// over-limit HTTP/2 trailer field can be omitted while request processing
+/// continues, so an HTTP 200 response does not prove that all sent trailers
+/// reached the handler. Applications that require digest, signature, or other
+/// trailer fields must validate that each required field is present and valid.
+/// Buffered data frames may be merged, and the configured body limit counts
+/// data bytes; it does not impose a separate trailers memory limit. See the
+/// [trailer budget investigation](https://github.com/qubit-ltd/rs-web/blob/1cb7438ca5c9cfcbba0aa944b4ef5189416302b8/doc/trailers-budget-investigation-20261108.md)
+/// and [trailer behavior tests](https://github.com/qubit-ltd/rs-web/blob/1cb7438ca5c9cfcbba0aa944b4ef5189416302b8/tests/stream_admission_trailers_tests.rs)
+/// for the bounded observations.
 /// The deadline uses cooperative Tokio cancellation. Synchronous work that
 /// does not yield can delay timeout checks and cleanup, and may finish
 /// successfully after the deadline. Cancelling a wait does not stop an
