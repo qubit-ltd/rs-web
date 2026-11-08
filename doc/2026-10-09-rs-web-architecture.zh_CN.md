@@ -26,7 +26,7 @@ accept 遇到可重试的 socket I/O 错误时，最多连续重试 8 次，等�
 | `json` | 启用 `json` feature 时限制严格 JSON 输入/输出的字节数和结构规模。 |
 | `sse` | 接纳有容量上限的 server-sent event 流，并将其登记为受管会话。 |
 | `ws` | 启用 `ws` feature 时校验 WebSocket 策略与 Origin、预留容量并管理会话 I/O。 |
-| `config` | 启用 `config` feature 时，将显式配置解析为 listener 选项及独立的 HTTP 路由限制。 |
+| `config` | 启用 `config` feature 后，`ConfiguredWeb` 可将显式配置解析为 listener 选项和 HTTP 路由限额；另提供独立、可选的流接纳限额解析入口。 |
 | `tls` | 启用 `tls` 时，为 HTTPS 加载或封装 rustls 配置。 |
 | `diagnostic`、`error`、`route_kind` | 提供请求诊断、稳定的公开错误和共享的路由分类。 |
 

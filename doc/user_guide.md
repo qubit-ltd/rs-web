@@ -79,6 +79,35 @@ let server = WebServer::bind_http(server_options).await?;
 
 `address` is required; `shutdown_timeout_ms` defaults to 30000, `transport.max_connections` to 1024, `transport.idle_timeout_ms` to 30000, `transport.request_header_timeout_ms` to 10000, and `transport.http2_max_concurrent_streams` to 200. The request-header timeout must be positive and construct a Tokio deadline; it applies to HTTP/1 request headers and TLS handshakes, not HTTP/2 header blocks. The HTTP/2 stream value must fit in a positive `u32`. The optional `transport.http1_max_buffer_bytes` and `transport.http2_max_header_list_bytes` have no explicit default and preserve Hyper's defaults when omitted. The `http.*` fields create `HttpLimits` but do not install them: Controller short routes already use `HttpLimits::default()`, and passing the configured value to `with_http_limits` replaces that policy. Install `RequestLimitLayer` on selected native Axum short routes. `WebServer` does not modify the Router. Errors identify the invalid field through `ConfigOptionsError::field()` without echoing its value; invalid values report the corresponding configuration key.
 
+Stream admission has a separate optional parser. `stream_admission_limits_from_config` does not require `address`, does not change `ConfiguredWeb::from_config`, and returns limits without creating state or installing a layer. Omitted keys retain `StreamAdmissionLimits::default()` values:
+
+| Key | Type | Default |
+| --- | --- | --- |
+| `stream_admission.max_body_bytes` | `u64` | 1 MiB |
+| `stream_admission.max_concurrent_admissions` | `u64` | 256 |
+| `stream_admission.admission_timeout_ms` | `u64` | 10000 ms |
+
+Parse the policy independently, then explicitly install one state in each consumer. Cloning the state shares its capacity domain between Controller long-lived routes and native Axum branches:
+
+```rust,ignore
+use axum::{Router, routing::get};
+use qubit_config::Config;
+use qubit_web::config::stream_admission_limits_from_config;
+use qubit_web::{ControllerRoutes, StreamAdmissionLayer, StreamAdmissionState};
+
+let config = Config::new();
+let limits = stream_admission_limits_from_config(&config)?;
+let state = StreamAdmissionState::new(limits);
+let controller_routes = ControllerRoutes::new()
+    .with_stream_admission_state(state.clone()); // set before add
+let native_routes = Router::new().route(
+    "/events",
+    get(|| async { "ok" }).layer(StreamAdmissionLayer::from_state(state)),
+);
+```
+
+Invalid types, integer conversions, zero or out-of-range values, and unrepresentable deadlines return `ConfigOptionsError` with the corresponding full key in `field()`; rejected values are not included in the error text. The parser does not load files or global settings and does not reject unrelated keys.
+
 ## Assemble short routes and long-lived routes
 
 Controller short routes have a default budget of 1 MiB per request body, 256 concurrent requests shared by the builder, and 30 seconds for handler work plus response-body streaming. Call `with_http_limits` before adding Controllers to replace that policy. Native Axum routes do not inherit Controller limits; install `RequestLimitLayer` on each selected ordinary short route. `WebServer` serves the supplied Router without adding route layers. These limits protect consumed request-body data, concurrent handler work, and the selected branch's deadline. If the handler misses the deadline, the layer returns `504 Gateway Timeout`. Unrepresentable absolute request deadlines are rejected as `WebServerError::InvalidConfig`; if the deadline becomes unrepresentable at runtime, the layer returns HTTP 500 with code `invalid_configuration`. Deadline enforcement depends on Tokio scheduling: non-yielding synchronous work can delay this check and cleanup, and may finish successfully after the deadline. Once the timeout is observed after response headers have been sent, the layer drops the application response body and releases the short-request permit; the status cannot be changed. With `DiagnosticLayer::with_body_diagnostics()` installed outside `RequestLimitLayer`, the timeout event is logged when the deadline fires even if the transport never polls the body again; the body reports its timeout error only on a later poll. Without that opt-in diagnostic layer, existing logging remains unchanged. A slow client or transport backpressure may delay when the body error is observed. This deadline does not close the TCP or HTTP/2 connection, which remains governed by the independent transport policy. For streamed short-route bodies without an oversized declared `Content-Length`, the layer converts an over-limit signal to 413 only if it observes the signal before the handler returns. If the handler returns an unread request body for later consumption, its response status is not changed afterward; the response body reports a read error at the over-limit frame. To guarantee a rejection status, applications must first read and validate the complete body. The handler may still perform side effects before observing an over-limit frame, and a resulting 413 does not roll them back. If validation must precede a side effect, consume and validate the complete body first.
@@ -314,7 +343,7 @@ Each `StreamAdmissionLayer::new(limits)` creates a separate capacity domain. The
 
 Defaults per stream-admission state are 1 MiB per buffered body, 256 concurrent admissions, and 10 seconds from entering admission through handler response headers. The 256 MiB product estimates concurrent payload bytes; it is not a bound on buffer allocation or process peak memory. Incremental buffering releases each prior input data-frame owner after copying it, while vector spare capacity, temporary coexistence during growth, the current frame, trailers, allocator behavior, and transport buffers remain additional costs. Lower the body or concurrency limit to fit your memory budget. The layer reads the complete body before invoking the handler, so an oversized or unreadable body cannot reach handler code. An active SSE response body or WebSocket session is outside this deadline.
 
-The layer preserves request trailers only as delivered by the transport. With the currently locked HTTP/2 decoder, an over-limit trailer field can be omitted while request processing continues; an HTTP 200 response therefore does not prove that every sent trailer reached the handler. Applications that require a trailer field, such as a digest or signature, must check that it is present and valid before treating the request as successful. The configured body budget counts DATA bytes; trailers do not count toward that byte limit, and the layer does not set a separate trailers memory limit. This is a transport behavior, not an HTTP status guarantee; see the bounded [trailers budget investigation](trailers-budget-investigation-20261108.md) and [network regression tests](../tests/stream_admission_trailers_tests.rs).
+The layer preserves request trailers only as delivered by the transport. The 2026-11-08 investigation observed that, with Hyper 1.12.0 and h2 0.4.20, an over-limit HTTP/2 trailer field can be omitted while request processing continues; an HTTP 200 response therefore does not prove that every sent trailer reached the handler. Applications that require a trailer field, such as a digest or signature, must check that it is present and valid before treating the request as successful. The configured body budget counts DATA bytes; trailers do not count toward that byte limit, and the layer does not set a separate trailers memory limit. This is a transport behavior, not an HTTP status guarantee; see the bounded [trailers budget investigation](trailers-budget-investigation-20261108.md) and [network regression tests](../tests/stream_admission_trailers_tests.rs).
 
 | Result | Meaning and next step |
 | --- | --- |

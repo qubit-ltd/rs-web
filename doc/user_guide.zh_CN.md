@@ -93,6 +93,35 @@ let server = WebServer::bind_http(server_options).await?;
 
 配置必须包含 `address`；`shutdown_timeout_ms` 缺省为 30000，`transport.max_connections`、`transport.idle_timeout_ms`、`transport.request_header_timeout_ms` 和 `transport.http2_max_concurrent_streams` 分别缺省为 1024、30000、10000 和 200。请求头期限必须大于零且能构造 Tokio 截止时间，同时控制 HTTP/1 请求头和 TLS 握手；它不限制 HTTP/2 请求头块。HTTP/2 流数必须是正的 u32。可选键 `transport.http1_max_buffer_bytes` 和 `transport.http2_max_header_list_bytes` 缺省时沿用 Hyper 默认值。`http.*` 配置只生成 `HttpLimits`，不会自动装到 Router：Controller 短路由已有 `HttpLimits::default()`，将配置值传给 `with_http_limits` 可替换该策略。原生 Axum 短路由需在选定分支安装 `RequestLimitLayer`；`WebServer` 不会修改 Router。解析错误可通过 `ConfigOptionsError::field()` 定位字段；无效值会指出对应原键，错误不会回显输入值。
 
+流接纳策略有独立的可选解析入口。`stream_admission_limits_from_config` 不要求 `address`，不改变 `ConfiguredWeb::from_config`，返回限额时也不会创建 state 或安装 layer。省略键时使用 `StreamAdmissionLimits::default()`：
+
+| 配置键 | 类型 | 缺省值 |
+| --- | --- | --- |
+| `stream_admission.max_body_bytes` | `u64` | 1 MiB |
+| `stream_admission.max_concurrent_admissions` | `u64` | 256 |
+| `stream_admission.admission_timeout_ms` | `u64` | 10000 ms |
+
+先独立解析策略，再显式将一个 state 安装到各个消费者。克隆 state 可让 Controller 长连接路由和原生 Axum 分支共享同一容量域：
+
+```rust,ignore
+use axum::{Router, routing::get};
+use qubit_config::Config;
+use qubit_web::config::stream_admission_limits_from_config;
+use qubit_web::{ControllerRoutes, StreamAdmissionLayer, StreamAdmissionState};
+
+let config = Config::new();
+let limits = stream_admission_limits_from_config(&config)?;
+let state = StreamAdmissionState::new(limits);
+let controller_routes = ControllerRoutes::new()
+    .with_stream_admission_state(state.clone()); // add 前设置
+let native_routes = Router::new().route(
+    "/events",
+    get(|| async { "ok" }).layer(StreamAdmissionLayer::from_state(state)),
+);
+```
+
+类型错误、整数转换错误、零值、越界值或无法表示的期限会返回 `ConfigOptionsError`；`field()` 指向对应的完整键名，错误文本不包含拒绝的配置值。解析器不加载文件或全局设置，也不会拒绝无关键。
+
 ## 装配普通接口与长连接
 
 Controller 短路由默认使用每个请求体 1 MiB、每个 builder 共享 256 个并发请求、handler 工作及响应体传输 30 秒的预算。添加 Controller 前调用 `with_http_limits` 可替换该策略。原生 Axum 路由不会继承 Controller 限额，需在选定的普通短路由分支显式安装 `RequestLimitLayer`。`WebServer` 按原样服务调用方提供的 Router，不会添加路由 layer。限额约束被读取的请求体数据、处理中的 handler 并发数和所选分支的请求期限。handler 超过期限时 layer 返回 `504 Gateway Timeout`。无法表示的绝对请求期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，layer 返回 HTTP 500 和代码 `invalid_configuration`。期限执行依赖 Tokio 调度：不让出执行权的同步工作会延迟检查和清理，也可能在期限后成功完成。响应头已经发出时，只有超时被观察到后 layer 才会丢弃应用响应体并归还短请求许可，且无法更改状态码。启用响应体诊断时，即使传输不再轮询响应体，期限触发时也会发出超时事件；body error 本身仍要等之后再次轮询才会观察到。慢客户端或传输背压可能推迟客户端观察到该错误的时间。此期限不会关闭 TCP 或 HTTP/2 连接，连接仍由独立的传输策略管理。对于没有超限 `Content-Length` 的流式短请求，layer 只会在 handler 返回前观察到超限信号时将状态转换为 413。如果 handler 先返回尚未读取完的请求体供后续消费，响应状态不会再被追溯更改；响应体到达超限帧时会报告读取错误。需要稳定拒绝状态时，应用应先完整读取并验证请求体。handler 仍可能在观察到超限帧前产生副作用，后续 413 不会回滚这些副作用。若业务要求先验证完整请求体再产生副作用，应先完整读取并验证 body。
@@ -328,7 +357,7 @@ StreamAdmissionLayer::from_state(shared.clone());
 
 每个流式接纳状态域默认允许单个请求体缓冲 1 MiB、同时接纳 256 个请求，并在 handler 生成响应头前限时 10 秒。256 MiB 是并发请求体载荷的估算，不是缓冲分配或进程峰值上限。增量缓冲在复制后释放已处理的数据帧，但 Vec 增长余量、扩容期间的临时共存、当前帧、trailers、分配器行为和传输缓冲仍会占用额外资源；请按内存预算调低请求体或并发上限。layer 会在 handler 运行前收齐请求体，因此超限或读取失败的 body 不会进入 handler。SSE 响应体和 WebSocket 会话不受该接纳期限限制。
 
-该 layer 只会保留传输层实际交付的请求 trailers。当前锁定的 HTTP/2 解码器可能省略超限 trailer 字段，同时继续处理请求；因此 HTTP 200 不能证明客户端发送的 trailers 都已到达 handler。业务依赖摘要或签名等 trailer 字段时，应在判定请求成功前检查字段是否存在且有效。配置的请求体预算只计算 DATA 字节，trailers 不计入此字节限额，layer 也没有单独设置 trailers 内存上限。这是传输层行为，不是 HTTP 状态码保证；详见有界的 [trailers 预算调查](trailers-budget-investigation-20261108.md)和[网络回归测试](../tests/stream_admission_trailers_tests.rs)。
+该 layer 只会保留传输层实际交付的请求 trailers。2026-11-08 调查在 Hyper 1.12.0 和 h2 0.4.20 下观察到，超限的 HTTP/2 trailer 字段可能被省略，同时请求继续处理；因此 HTTP 200 不能证明客户端发送的 trailers 都已到达 handler。业务依赖摘要或签名等 trailer 字段时，应在判定请求成功前检查字段是否存在且有效。配置的请求体预算只计算 DATA 字节，trailers 不计入此字节限额，layer 也没有单独设置 trailers 内存上限。这是传输层行为，不是 HTTP 状态码保证；详见有界的 [trailers 预算调查](trailers-budget-investigation-20261108.md)和[网络回归测试](../tests/stream_admission_trailers_tests.rs)。
 
 | 结果 | 含义与处理建议 |
 | --- | --- |

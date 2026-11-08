@@ -26,7 +26,7 @@ The main module responsibilities are:
 | `json` | Enforce strict JSON input/output byte and structural limits when the `json` feature is enabled. |
 | `sse` | Admit bounded server-sent event streams and track them as managed sessions. |
 | `ws` | Validate WebSocket policy and Origin, reserve capacity, and manage inbound/outbound session I/O when the `ws` feature is enabled. |
-| `config` | Parse explicit configuration values into listener options and separate HTTP route limits when the `config` feature is enabled. |
+| `config` | With the `config` feature, parse listener options and HTTP route limits through `ConfiguredWeb`, and expose an independent optional parser for stream-admission limits. |
 | `tls` | Load or wrap rustls configuration for HTTPS when `tls` is enabled. |
 | `diagnostic`, `error`, `route_kind` | Supply request diagnostics, stable public errors, and shared route classification. |
 
