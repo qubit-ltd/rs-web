@@ -774,6 +774,10 @@ fn test_ws_errors_implement_standard_error() {
         WsPolicyError::InboundQueueLimitTooLarge.to_string(),
         "WebSocket inbound queue limit exceeds the supported maximum"
     );
+    assert_eq!(
+        WsPolicyError::WriteTimeoutTooLarge.to_string(),
+        "WebSocket write timeout exceeds the supported maximum"
+    );
     assert_eq!(WsSendError::Closed.to_string(), "WebSocket send queue is closed");
     assert_eq!(
         WsSendError::MessageTooLarge.to_string(),
@@ -826,6 +830,10 @@ fn test_zero_policy_limits_are_invalid() {
     assert!(WsUpgradePolicy::new().inbound_queue_limits(0, 1).validate().is_err());
     assert!(WsUpgradePolicy::new().inbound_queue_limits(1, 0).validate().is_err());
     assert!(WsUpgradePolicy::new().idle_timeout(Duration::ZERO).validate().is_err());
+    assert_eq!(
+        WsUpgradePolicy::new().write_timeout(Duration::ZERO).validate(),
+        Err(WsPolicyError::ZeroLimit)
+    );
 }
 
 #[test]
@@ -870,6 +878,10 @@ fn test_corrected_policy_limits_are_valid() {
     assert_eq!(
         WsUpgradePolicy::new().idle_timeout(Duration::MAX).validate(),
         Err(WsPolicyError::IdleTimeoutTooLarge)
+    );
+    assert_eq!(
+        WsUpgradePolicy::new().write_timeout(Duration::MAX).validate(),
+        Err(WsPolicyError::WriteTimeoutTooLarge)
     );
     assert_eq!(
         WsUpgradePolicy::new()

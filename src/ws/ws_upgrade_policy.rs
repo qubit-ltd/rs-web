@@ -86,7 +86,7 @@ impl Default for WsUpgradePolicy {
 impl WsUpgradePolicy {
     /// Creates a policy with finite defaults: 128 sessions, 64 KiB frames,
     /// 1 MiB messages, 64-message/1 MiB inbound and outbound queues, and a
-    /// 60-second idle timeout.
+    /// independent 60-second idle and write timeouts.
     ///
     /// The returned policy starts an independent connection-capacity domain.
     /// Cloning it shares that domain. Create it once at application startup and
@@ -110,6 +110,7 @@ impl WsUpgradePolicy {
                 inbound_queue_messages: DEFAULT_INBOUND_QUEUE_MESSAGES,
                 inbound_queue_bytes: DEFAULT_INBOUND_QUEUE_BYTES,
                 idle_timeout: DEFAULT_IDLE_TIMEOUT,
+                write_timeout: DEFAULT_IDLE_TIMEOUT,
                 allowed_origins: None,
             }),
         }
@@ -272,25 +273,24 @@ impl WsUpgradePolicy {
         })
     }
 
-    /// Sets the inbound idle interval and per-operation outbound write limit.
+    /// Sets the inbound idle interval and, for compatibility, the outbound write limit.
     ///
-    /// Configuration updates use copy-on-write, so existing policy clones
-    /// retain their previous timeout. The supplied value is stored as-is and
-    /// the default policy value is 60 seconds.
-    /// checked by [`validate`](Self::validate).
+    /// This combined setting preserves the previous behavior. To configure
+    /// these limits independently, call this method first and then
+    /// [`write_timeout`](Self::write_timeout). Configuration updates use
+    /// copy-on-write, so existing policy clones retain their previous values.
     ///
     /// # Parameters
     ///
     /// * `timeout` - Positive maximum interval for the reader to await a frame,
     ///   to deliver a frame while the application channel is full, and for
     ///   [`WsSession::recv`](super::WsSession::recv) to await an application
-    ///   message. Each ordinary outbound send and notification flush also has
-    ///   this independent completion deadline. Inbound messages and unrelated
-    ///   queue notifications do not reset a write deadline; it bounds an
-    ///   operation's wait, not byte-level progress. A timed-out writer closes
-    ///   the session and drops its sink, so a Close frame is not guaranteed to
-    ///   reach a backpressured peer. Raising this value to support slow readers
-    ///   also lengthens inbound waits.
+    ///   message. It also sets the maximum duration for each ordinary outbound
+    ///   send and notification flush. Inbound messages and unrelated queue
+    ///   notifications do not reset a write deadline; it bounds an operation's
+    ///   wait, not byte-level progress. A timed-out writer closes the session
+    ///   and drops its sink, so a Close frame is not guaranteed to reach a
+    ///   backpressured peer.
     /// # Returns
     ///
     /// The updated policy; zero and unrepresentable deadlines are reported by
@@ -298,7 +298,29 @@ impl WsUpgradePolicy {
     pub fn idle_timeout(self, timeout: Duration) -> Self {
         self.map_inner(|inner| {
             inner.idle_timeout = timeout;
+            inner.write_timeout = timeout;
         })
+    }
+
+    /// Sets the maximum duration for one ordinary outbound write operation.
+    ///
+    /// This changes only the writer deadline. Reader frame waits, inbound
+    /// delivery, and [`WsSession::recv`](super::WsSession::recv) continue to
+    /// use [`idle_timeout`](Self::idle_timeout). Inbound activity and unrelated
+    /// notifications do not reset an active write deadline. Close handshakes
+    /// continue to use the session's shared close deadline.
+    ///
+    /// # Parameters
+    ///
+    /// * `timeout` - Positive maximum interval for one send or notification
+    ///   flush operation.
+    /// # Returns
+    ///
+    /// The updated policy; zero and unrepresentable deadlines are reported by
+    /// [`validate`](Self::validate). A later call replaces this value,
+    /// including an invalid one.
+    pub fn write_timeout(self, timeout: Duration) -> Self {
+        self.map_inner(|inner| inner.write_timeout = timeout)
     }
 
     /// Checks the final configured bounds.
@@ -311,7 +333,8 @@ impl WsUpgradePolicy {
     ///
     /// `Ok(())` for a valid policy, or the first configuration error in this
     /// order: zero connection limit, oversized connection limit, any other
-    /// zero limit, then an oversized inbound message count.
+    /// zero limit, then an oversized inbound message count, then idle and
+    /// write deadlines that cannot be represented.
     ///
     /// # Errors
     ///
@@ -320,8 +343,8 @@ impl WsUpgradePolicy {
     /// exceeds Semaphore's maximum, or
     /// [`WsPolicyError::InboundQueueLimitTooLarge`] when the inbound queue
     /// message capacity exceeds `Semaphore::MAX_PERMITS`, or
-    /// [`WsPolicyError::IdleTimeoutTooLarge`] when the idle timeout cannot form
-    /// a Tokio deadline.
+    /// [`WsPolicyError::IdleTimeoutTooLarge`] / [`WsPolicyError::WriteTimeoutTooLarge`]
+    /// when the corresponding timeout cannot form a Tokio deadline.
     pub fn validate(&self) -> Result<(), WsPolicyError> {
         if self.inner.max_connections == 0 {
             return Err(WsPolicyError::ZeroLimit);
@@ -336,6 +359,7 @@ impl WsUpgradePolicy {
             || self.inner.inbound_queue_messages == 0
             || self.inner.inbound_queue_bytes == 0
             || self.inner.idle_timeout.is_zero()
+            || self.inner.write_timeout.is_zero()
         {
             return Err(WsPolicyError::ZeroLimit);
         }
@@ -347,6 +371,12 @@ impl WsUpgradePolicy {
             .is_none()
         {
             return Err(WsPolicyError::IdleTimeoutTooLarge);
+        }
+        if tokio::time::Instant::now()
+            .checked_add(self.inner.write_timeout)
+            .is_none()
+        {
+            return Err(WsPolicyError::WriteTimeoutTooLarge);
         }
         Ok(())
     }
@@ -507,7 +537,7 @@ impl WsUpgradePolicy {
                 let writer_notify = queue.notify.clone();
                 let (close_ack_sender, close_ack_receiver) = oneshot::channel();
                 let (sink, stream) = socket.split();
-                let idle_timeout = policy.inner.idle_timeout;
+                let write_timeout = policy.inner.write_timeout;
                 let writer_resources = resources.clone();
                 let writer = spawn(async move {
                     observe_io_task(
@@ -516,7 +546,7 @@ impl WsUpgradePolicy {
                             sink,
                             writer_queue,
                             writer_notify,
-                            idle_timeout,
+                            write_timeout,
                             writer_lifecycle,
                             close_ack_receiver,
                             writer_resources,
@@ -538,6 +568,7 @@ impl WsUpgradePolicy {
                 let reader_queue = queue.clone();
                 let reader_inbound_state = inbound_state.clone();
                 let reader_resources = resources.clone();
+                let idle_timeout = policy.inner.idle_timeout;
                 let reader = spawn(async move {
                     observe_io_task(
                         "reader",
@@ -580,9 +611,69 @@ impl WsUpgradePolicy {
 #[cfg(test)]
 mod tests {
     use super::WsUpgradePolicy;
+    use std::time::Duration;
 
     #[test]
     fn test_default_policy_has_valid_finite_limits() {
         assert!(WsUpgradePolicy::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_timeout_setters_preserve_compatibility_order_and_clone_isolation() {
+        let default = WsUpgradePolicy::new();
+        assert_eq!(default.inner.idle_timeout, Duration::from_secs(60));
+        assert_eq!(default.inner.write_timeout, Duration::from_secs(60));
+
+        let idle_then_write = default
+            .clone()
+            .idle_timeout(Duration::from_secs(600))
+            .write_timeout(Duration::from_secs(10));
+        assert_eq!(idle_then_write.inner.idle_timeout, Duration::from_secs(600));
+        assert_eq!(idle_then_write.inner.write_timeout, Duration::from_secs(10));
+
+        let write_then_idle = default
+            .clone()
+            .write_timeout(Duration::from_secs(10))
+            .idle_timeout(Duration::from_secs(600));
+        assert_eq!(write_then_idle.inner.idle_timeout, Duration::from_secs(600));
+        assert_eq!(write_then_idle.inner.write_timeout, Duration::from_secs(600));
+
+        assert_eq!(default.inner.idle_timeout, Duration::from_secs(60));
+        assert_eq!(default.inner.write_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_write_timeout_validation_uses_its_own_error_and_can_be_corrected() {
+        use super::super::ws_policy_error::WsPolicyError;
+
+        assert_eq!(
+            WsUpgradePolicy::new().write_timeout(Duration::ZERO).validate(),
+            Err(WsPolicyError::ZeroLimit),
+        );
+        assert_eq!(
+            WsUpgradePolicy::new().write_timeout(Duration::MAX).validate(),
+            Err(WsPolicyError::WriteTimeoutTooLarge),
+        );
+        assert_eq!(
+            WsUpgradePolicy::new()
+                .write_timeout(Duration::MAX)
+                .write_timeout(Duration::from_secs(10))
+                .validate(),
+            Ok(()),
+        );
+        assert_eq!(
+            WsUpgradePolicy::new()
+                .idle_timeout(Duration::MAX)
+                .write_timeout(Duration::from_secs(10))
+                .validate(),
+            Err(WsPolicyError::IdleTimeoutTooLarge),
+        );
+        assert_eq!(
+            WsUpgradePolicy::new()
+                .idle_timeout(Duration::ZERO)
+                .write_timeout(Duration::ZERO)
+                .validate(),
+            Err(WsPolicyError::ZeroLimit),
+        );
     }
 }

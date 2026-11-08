@@ -144,7 +144,7 @@ where
 /// * `sink` - WebSocket sink that receives or flushes frames.
 /// * `queue` - Queue whose messages or state are being processed.
 /// * `notify` - Notification used to wake the waiting task.
-/// * `idle_timeout` - Maximum duration for one ordinary send or flush attempt.
+/// * `write_timeout` - Maximum duration for one ordinary send or flush attempt.
 /// * `lifecycle` - Shared cancellation, close-code, and deadline state.
 /// * `close_ack` - Signal indicating that the peer acknowledged the close
 /// * `_resources` - Connection permit and session guard retained for this task.
@@ -152,7 +152,7 @@ pub(in crate::ws) async fn writer_loop<S>(
     #[allow(unused_mut)] mut sink: S,
     queue: WsSendQueue,
     notify: Arc<Notify>,
-    idle_timeout: Duration,
+    write_timeout: Duration,
     lifecycle: SessionLifecycle,
     mut close_ack: oneshot::Receiver<()>,
     _resources: Arc<SessionResources>,
@@ -207,7 +207,7 @@ pub(in crate::ws) async fn writer_loop<S>(
                     return;
                 }
                 _ = notify.notified() => {
-                    let flush_deadline = operation_deadline(idle_timeout);
+                    let flush_deadline = operation_deadline(write_timeout);
                     let outcome = select! {
                         biased;
                         _ = &mut close_ack => ControlFlushOutcome::PeerCloseAcknowledged,
@@ -274,7 +274,7 @@ pub(in crate::ws) async fn writer_loop<S>(
             }
             return;
         }
-        let send_deadline = operation_deadline(idle_timeout);
+        let send_deadline = operation_deadline(write_timeout);
         let sent = select! {
             biased;
             _ = shutdown.cancelled() => SendOutcome::Shutdown,
@@ -351,13 +351,13 @@ fn record_local_close(server_shutdown: &CancellationToken, termination: &super::
 /// deadline if the configured duration cannot be represented from now.
 /// # Parameters
 ///
-/// * `idle_timeout` - Maximum duration allowed for the ordinary write
+/// * `write_timeout` - Maximum duration allowed for the ordinary write
 ///   operation.
 /// # Returns
 ///
 /// The absolute deadline, or the current instant if checked addition overflows.
-fn operation_deadline(idle_timeout: Duration) -> Instant {
-    Instant::now().checked_add(idle_timeout).unwrap_or_else(Instant::now)
+fn operation_deadline(write_timeout: Duration) -> Instant {
+    Instant::now().checked_add(write_timeout).unwrap_or_else(Instant::now)
 }
 /// Flushes the sink until completion, cancellation, or the optional deadline.
 /// # Parameters
@@ -1641,10 +1641,11 @@ mod tests {
             Arc<Notify>,
             Arc<std::sync::atomic::AtomicUsize>,
             Arc<std::sync::atomic::AtomicUsize>,
+            Arc<Mutex<Option<oneshot::Sender<Option<WsTermination>>>>>,
         );
 
         async fn upgrade(
-            State((policy, context, admitted, inbound, connection_count)): State<HandlerState>,
+            State((policy, context, admitted, inbound, connection_count, termination_tx)): State<HandlerState>,
             headers: HeaderMap,
             ws: WebSocketUpgrade,
         ) -> Response {
@@ -1666,6 +1667,12 @@ mod tests {
                         inbound.fetch_add(1, Ordering::SeqCst);
                     }
                 }
+                let _ = termination_tx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .unwrap()
+                    .send(session.termination());
             })
         }
 
@@ -1683,7 +1690,8 @@ mod tests {
             .max_frame_bytes(MESSAGE_BYTES)
             .max_message_bytes(MESSAGE_BYTES)
             .queue_limits(1, MESSAGE_BYTES)
-            .idle_timeout(IDLE_TIMEOUT);
+            .idle_timeout(Duration::from_secs(60))
+            .write_timeout(IDLE_TIMEOUT);
         let server = WebServer::bind_http(
             ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(200)),
         )
@@ -1695,6 +1703,7 @@ mod tests {
         let admitted = Arc::new(Notify::new());
         let inbound = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let connection_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (termination_tx, termination_rx) = oneshot::channel();
         let app = Router::new().route(
             "/ws",
             get(upgrade).with_state((
@@ -1703,6 +1712,7 @@ mod tests {
                 admitted.clone(),
                 inbound.clone(),
                 connection_count,
+                Arc::new(Mutex::new(Some(termination_tx))),
             )),
         );
         let serve_shutdown = shutdown.clone();
@@ -1793,6 +1803,11 @@ mod tests {
         })
         .await
         .expect("write timeout should release both I/O tasks and session capacity");
+        assert_eq!(
+            termination_rx.await.expect("handler should observe completion"),
+            Some(WsTermination::WriteTimeout),
+            "the independent write deadline should publish the write timeout cause",
+        );
 
         let (second_client, second_status) = test_handshake(address).await;
         assert_eq!(second_status, StatusCode::SWITCHING_PROTOCOLS);

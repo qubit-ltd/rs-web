@@ -36,6 +36,8 @@ pub enum WsPolicyError {
     InboundQueueLimitTooLarge,
     /// The configured idle timeout cannot form a representable Tokio deadline.
     IdleTimeoutTooLarge,
+    /// The configured write timeout cannot form a representable Tokio deadline.
+    WriteTimeoutTooLarge,
 }
 
 impl std::fmt::Display for WsPolicyError {
@@ -49,6 +51,7 @@ impl std::fmt::Display for WsPolicyError {
             Self::ConnectionLimitTooLarge => "WebSocket connection limit exceeds the supported maximum",
             Self::InboundQueueLimitTooLarge => "WebSocket inbound queue limit exceeds the supported maximum",
             Self::IdleTimeoutTooLarge => "WebSocket idle timeout exceeds the supported maximum",
+            Self::WriteTimeoutTooLarge => "WebSocket write timeout exceeds the supported maximum",
         };
         formatter.write_str(message)
     }

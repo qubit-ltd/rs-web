@@ -32,6 +32,8 @@ pub(in crate::ws) struct PolicyInner {
     pub(in crate::ws) inbound_queue_bytes: usize,
     /// Maximum idle interval before a session is closed.
     pub(in crate::ws) idle_timeout: Duration,
+    /// Maximum duration for one ordinary outbound write operation.
+    pub(in crate::ws) write_timeout: Duration,
     /// Exact allowed Origin values; `None` rejects requests that provide
     /// Origin.
     pub(in crate::ws) allowed_origins: Option<Vec<String>>,
