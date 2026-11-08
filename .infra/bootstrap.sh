@@ -116,13 +116,22 @@ case "$entrypoint" in
         "$python_cmd" "$shared_root/assets/project-bootstrap/sync.py" \
             --project-root "$project_root" \
             --package-root "$shared_root/assets/project-bootstrap" \
+            --defer-style-analyzer-install \
             "$@"
         update_tools=true
+        install_analyzer=true
         for arg in "$@"; do
-            case "$arg" in --dry-run|--status) update_tools=false ;; esac
+            case "$arg" in
+                --dry-run|--status) update_tools=false ;;
+                --configs-only) install_analyzer=false ;;
+            esac
         done
         if [[ "$update_tools" == true ]]; then
-            "$manager_bin" prewarm --project "$project_root"
+            if [[ "$install_analyzer" == true ]]; then
+                "$manager_bin" prewarm --project "$project_root" --install-style-analyzer
+            else
+                "$manager_bin" prewarm --project "$project_root"
+            fi
         fi
         ;;
     .infra/bin/align-ci.sh)

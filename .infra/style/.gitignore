@@ -1,0 +1,5 @@
+# Host-local Analyzer installation; update-infra.sh manages these artifacts.
+/bin/
+/tool.revision.json
+/tool.revision.lock
+/.style-analyzer-*.tmp

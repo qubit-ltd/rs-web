@@ -106,5 +106,5 @@ if [[ "$mode" != dry-run && "$mode" != status ]]; then
     CARGO_TARGET_DIR="$work/build/manager" cargo run --locked \
         --manifest-path "$work/source/Cargo.toml" \
         --package qubit-infra-tools --bin rs-infra-tools -- \
-        prewarm --project "$project_root"
+        prewarm --project "$project_root" --install-style-analyzer
 fi
