@@ -49,25 +49,21 @@ use crate::StreamAdmissionLimits;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn stream_admission_limits_from_config(config: &Config) -> Result<StreamAdmissionLimits, ConfigOptionsError> {
-    let body_bytes = config
-        .get_optional::<u64>("stream_admission.max_body_bytes")
-        .map_err(|_| ConfigOptionsError::new("stream_admission.max_body_bytes"))?;
-    let concurrency = config
-        .get_optional::<u64>("stream_admission.max_concurrent_admissions")
-        .map_err(|_| ConfigOptionsError::new("stream_admission.max_concurrent_admissions"))?;
-    let timeout_ms = config
-        .get_optional::<u64>("stream_admission.admission_timeout_ms")
-        .map_err(|_| ConfigOptionsError::new("stream_admission.admission_timeout_ms"))?;
-
     let mut limits = StreamAdmissionLimits::default();
-    if let Some(bytes) = body_bytes {
+    if let Some(bytes) = config
+        .get_optional::<u64>("stream_admission.max_body_bytes")
+        .map_err(|_| ConfigOptionsError::new("stream_admission.max_body_bytes"))?
+    {
         limits = limits
             .with_max_body_bytes(
                 usize::try_from(bytes).map_err(|_| ConfigOptionsError::new("stream_admission.max_body_bytes"))?,
             )
             .map_err(|_| ConfigOptionsError::new("stream_admission.max_body_bytes"))?;
     }
-    if let Some(admissions) = concurrency {
+    if let Some(admissions) = config
+        .get_optional::<u64>("stream_admission.max_concurrent_admissions")
+        .map_err(|_| ConfigOptionsError::new("stream_admission.max_concurrent_admissions"))?
+    {
         limits = limits
             .with_max_concurrent_admissions(
                 usize::try_from(admissions)
@@ -75,7 +71,10 @@ pub fn stream_admission_limits_from_config(config: &Config) -> Result<StreamAdmi
             )
             .map_err(|_| ConfigOptionsError::new("stream_admission.max_concurrent_admissions"))?;
     }
-    if let Some(timeout_ms) = timeout_ms {
+    if let Some(timeout_ms) = config
+        .get_optional::<u64>("stream_admission.admission_timeout_ms")
+        .map_err(|_| ConfigOptionsError::new("stream_admission.admission_timeout_ms"))?
+    {
         limits = limits
             .with_admission_timeout(Duration::from_millis(timeout_ms))
             .map_err(|_| ConfigOptionsError::new("stream_admission.admission_timeout_ms"))?;

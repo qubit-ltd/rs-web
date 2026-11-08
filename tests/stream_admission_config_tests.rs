@@ -99,6 +99,14 @@ fn zero_and_capacity_overflow_are_rejected() {
 }
 
 #[test]
+fn earlier_setter_validation_error_precedes_later_type_error() {
+    let mut config = Config::new();
+    config.set(BODY, 0_u64).unwrap();
+    config.set(CAPACITY, "malformed-later-value").unwrap();
+    assert_error(&config, BODY);
+}
+
+#[test]
 fn platform_conversion_and_timeout_boundaries_are_checked() {
     if usize::BITS < u64::BITS {
         let mut config = Config::new();
