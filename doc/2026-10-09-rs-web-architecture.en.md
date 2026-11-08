@@ -81,6 +81,8 @@ For online TLS rotation, the host retains a clone of `axum_server::tls_rustls::R
 
 The [lifecycle summary](2026-10-09-rs-web-lifecycle-design.en.md) is the concise reference for current session and shutdown guarantees; the [user guide](user_guide.md) covers concrete integration.
 
+WebSocket policy separates inbound waits from ordinary writes. `idle_timeout` remains the compatibility setter for both; call it before `write_timeout` to split the values. Both default to 60 seconds, and Close handshake waits retain the shared shutdown deadline. `WsSession::closed()` resolves after permit and managed-session release; `termination()` then exposes the immutable first-recorded local cause. Code 1001 uses `idle timeout`, `server shutdown`, or `session closed` according to the cause. `PeerClose` is frame observation rather than handshake confirmation, and `IoEnded` is not success. These limits are cooperative operation-wait bounds, not byte-progress guarantees; byte and memory budgets do not bound CPU time or application-retained memory.
+
 ## Cooperative deadlines and transport peer
 
 Request, stream-admission, and shutdown deadlines rely on Tokio scheduling and cooperative cancellation. Synchronous work that does not yield can delay timeout checks and cleanup, and may complete successfully after its deadline. Cancelling a wait does not stop an already running `spawn_blocking` task or application-spawned work. JSON byte and structure budgets do not bound CPU time in user serialization or deserialization implementations. Applications should budget CPU-heavy or blocking work separately; use process isolation when forced termination is required. Applications own cancellation cooperation and business side effects.

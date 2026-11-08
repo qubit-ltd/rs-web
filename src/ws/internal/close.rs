@@ -12,8 +12,6 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::time::Duration;
 
-use super::TerminationState;
-use crate::ws::WsTermination;
 use axum::extract::ws::CloseFrame;
 use axum::extract::ws::Message;
 use axum::http::StatusCode;
@@ -24,6 +22,9 @@ use futures_util::SinkExt;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio::time::timeout_at;
+
+use super::TerminationState;
+use crate::ws::WsTermination;
 
 /// Stores and returns the earliest applicable close deadline.
 ///

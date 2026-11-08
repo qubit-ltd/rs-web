@@ -81,6 +81,8 @@ SSE 和 WebSocket 都是长连接路由，不应套用短请求并发/期限中�
 
 [生命周期摘要](2026-10-09-rs-web-lifecycle-design.zh_CN.md)是现行会话和停服保证的简明参考；[用户指南](user_guide.zh_CN.md)介绍具体接入方式。
 
+WebSocket 策略将入站等待与普通写操作期限分开。`idle_timeout` 为兼容旧调用仍同时设置两者；需要拆分时先设 `idle_timeout`，再设 `write_timeout`。默认均为 60 秒，Close 握手仍使用共享停服期限。`WsSession::closed()` 在连接许可和受管会话登记释放后就绪；此后 `termination()` 提供不可变的首因快照。关闭码 1001 根据原因使用 `idle timeout`、`server shutdown` 或 `session closed`。`PeerClose` 仅代表观察到对端帧，不确认握手完成；`IoEnded` 也不代表成功。这些期限是协作式操作等待上限，不保证字节级进度；字节和内存预算不限制 CPU 时间或应用保留的内存。
+
 ## 协作式期限与传输对端
 
 请求、流式接纳和停服期限依赖 Tokio 调度与协作式取消。不让出执行权的同步工作会延迟超时检查和清理，也可能在期限之后成功完成。取消等待不会停止已经运行的 `spawn_blocking` 任务或应用自行启动的工作。JSON 字节和结构限额不限制用户序列化或反序列化实现的 CPU 时间。应用应为 CPU 密集或阻塞工作单独设置预算；需要强制终止时使用进程隔离。取消配合和业务副作用由应用负责。

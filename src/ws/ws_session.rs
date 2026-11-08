@@ -42,6 +42,14 @@ use super::ws_send_queue::WsSendQueue;
 ///     }
 /// }
 ///
+/// async fn inspect_termination(session: WsSession) {
+///     session.closed().await;
+///     let cause = session.termination();
+///     // A peer Close is an observed frame, not handshake confirmation;
+///     // IoEnded is a fallback, not a success result.
+///     let _ = cause;
+/// }
+///
 /// async fn stop_cancellable_work(mut session: WsSession) {
 ///     let ended = session.closed();
 ///     tokio::select! {
@@ -52,6 +60,7 @@ use super::ws_send_queue::WsSendQueue;
 ///
 /// let _handler = consume_messages;
 /// let _stop_work = stop_cancellable_work;
+/// let _inspect = inspect_termination;
 /// ```
 pub struct WsSession {
     /// Channel carrying inbound frames from the reader task.
@@ -258,6 +267,11 @@ impl WsSession {
 }
 
 impl WsSession {
+    /// Records a local cause unless the parent server is shutting down.
+    ///
+    /// # Parameters
+    ///
+    /// * `cause` - Candidate local termination cause.
     fn record_local_termination(&self, cause: WsTermination) {
         if self.server_shutdown.is_cancelled() {
             self.termination.record(WsTermination::ServerShutdown);

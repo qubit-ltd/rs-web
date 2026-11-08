@@ -2,16 +2,17 @@
 //    Copyright (c) 2025 - 2026 Haixing Hu.
 //
 //    SPDX-License-Identifier: Apache-2.0
+//
+//    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use std::sync::Mutex;
 use std::sync::PoisonError;
-
-use crate::ws::WsTermination;
 
 use super::termination_data::TerminationData;
 use super::termination_data::finalize_data;
 use super::termination_data::record_data;
 use super::termination_data::snapshot_data;
+use crate::ws::WsTermination;
 
 /// Thread-safe candidate and finalized termination snapshot for one session.
 #[derive(Default)]
@@ -22,6 +23,10 @@ pub(in crate::ws) struct TerminationState {
 
 impl TerminationState {
     /// Records a candidate if no earlier candidate or finalized result exists.
+    ///
+    /// # Parameters
+    ///
+    /// * `cause` - Candidate cause to record.
     pub(in crate::ws) fn record(&self, cause: WsTermination) {
         let mut data = self.data.lock().unwrap_or_else(PoisonError::into_inner);
         record_data(&mut data, cause);

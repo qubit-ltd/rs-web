@@ -10,15 +10,17 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicU16;
 use std::time::Duration;
 
-use super::TerminationState;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+
+use super::TerminationState;
 /// Shared close, cancellation, and deadline state for one session.
 #[derive(Clone)]
 pub(in crate::ws) struct SessionLifecycle {
     /// Child cancellation token shared by the session handler and I/O drivers.
     pub(in crate::ws) shutdown: CancellationToken,
-    /// Parent server token, used to distinguish server shutdown from local cleanup.
+    /// Parent server token, used to distinguish server shutdown from local
+    /// cleanup.
     pub(in crate::ws) server_shutdown: CancellationToken,
     /// Shared session termination candidate state.
     pub(in crate::ws) termination: Arc<TerminationState>,

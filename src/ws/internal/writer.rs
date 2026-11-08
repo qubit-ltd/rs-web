@@ -333,12 +333,24 @@ pub(in crate::ws) async fn writer_loop<S>(
     }
 }
 
+/// Records server shutdown when the parent token has been cancelled.
+///
+/// # Parameters
+///
+/// * `server_shutdown` - Parent server cancellation token.
+/// * `termination` - Shared first-cause state for the session.
 fn record_server_shutdown(server_shutdown: &CancellationToken, termination: &super::TerminationState) {
     if server_shutdown.is_cancelled() {
         termination.record(WsTermination::ServerShutdown);
     }
 }
 
+/// Records a local close unless server shutdown has already begun.
+///
+/// # Parameters
+///
+/// * `server_shutdown` - Parent server cancellation token.
+/// * `termination` - Shared first-cause state for the session.
 fn record_local_close(server_shutdown: &CancellationToken, termination: &super::TerminationState) {
     if server_shutdown.is_cancelled() {
         termination.record(WsTermination::ServerShutdown);

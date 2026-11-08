@@ -273,7 +273,8 @@ impl WsUpgradePolicy {
         })
     }
 
-    /// Sets the inbound idle interval and, for compatibility, the outbound write limit.
+    /// Sets the inbound idle interval and, for compatibility, the outbound
+    /// write limit.
     ///
     /// This combined setting preserves the previous behavior. To configure
     /// these limits independently, call this method first and then
@@ -291,6 +292,20 @@ impl WsUpgradePolicy {
     ///   wait, not byte-level progress. A timed-out writer closes the session
     ///   and drops its sink, so a Close frame is not guaranteed to reach a
     ///   backpressured peer.
+    /// # Examples
+    ///
+    /// Set the inbound wait first, then override only the write deadline:
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use qubit_web::WsUpgradePolicy;
+    ///
+    /// let policy = WsUpgradePolicy::new()
+    ///     .idle_timeout(Duration::from_secs(600))
+    ///     .write_timeout(Duration::from_secs(10));
+    /// assert!(policy.validate().is_ok());
+    /// ```
+    ///
     /// # Returns
     ///
     /// The updated policy; zero and unrepresentable deadlines are reported by
@@ -343,8 +358,9 @@ impl WsUpgradePolicy {
     /// exceeds Semaphore's maximum, or
     /// [`WsPolicyError::InboundQueueLimitTooLarge`] when the inbound queue
     /// message capacity exceeds `Semaphore::MAX_PERMITS`, or
-    /// [`WsPolicyError::IdleTimeoutTooLarge`] / [`WsPolicyError::WriteTimeoutTooLarge`]
-    /// when the corresponding timeout cannot form a Tokio deadline.
+    /// [`WsPolicyError::IdleTimeoutTooLarge`] /
+    /// [`WsPolicyError::WriteTimeoutTooLarge`] when the corresponding
+    /// timeout cannot form a Tokio deadline.
     pub fn validate(&self) -> Result<(), WsPolicyError> {
         if self.inner.max_connections == 0 {
             return Err(WsPolicyError::ZeroLimit);
@@ -610,8 +626,9 @@ impl WsUpgradePolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::WsUpgradePolicy;
     use std::time::Duration;
+
+    use super::WsUpgradePolicy;
 
     #[test]
     fn test_default_policy_has_valid_finite_limits() {
