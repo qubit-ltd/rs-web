@@ -2264,6 +2264,126 @@ async fn test_recv_after_explicit_close_returns_none() {
 }
 
 #[tokio_test]
+async fn test_explicit_close_sends_session_closed_and_publishes_local_termination() {
+    type ResultSender = Arc<Mutex<Option<oneshot::Sender<(Option<WsTermination>, Option<WsTermination>)>>>>;
+    type ExplicitCloseState = (WsUpgradePolicy, ServerContext, ResultSender);
+
+    async fn upgrade(
+        State((policy, context, result_tx)): State<ExplicitCloseState>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, move |mut session| async move {
+            session.close().await;
+            session.closed().await;
+            if let Some(tx) = result_tx.lock().unwrap().take() {
+                let _ = tx.send((session.termination(), session.termination()));
+            }
+        })
+    }
+
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(250)),
+    )
+    .await
+    .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new().max_connections(1);
+    let (result_tx, result_rx) = oneshot::channel();
+    let app = Router::new().route("/ws", get(upgrade)).with_state((
+        policy.clone(),
+        context.clone(),
+        Arc::new(Mutex::new(Some(result_tx))),
+    ));
+    let shutdown = CancellationToken::new();
+    let serving = spawn(server.serve(app, shutdown.clone().cancelled_owned()));
+
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    let (opcode, payload) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
+        .await
+        .expect("explicit close should send a Close frame");
+    assert_eq!(opcode, 8);
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1001);
+    assert_eq!(&payload[2..], b"session closed");
+    assert_eq!(policy.active_connections(), 1, "resources remain held until peer ack");
+    send_masked_close(&mut client).await;
+    assert_eq!(
+        timeout(Duration::from_secs(1), result_rx)
+            .await
+            .expect("handler should observe termination after closed")
+            .unwrap(),
+        (Some(WsTermination::LocalClose), Some(WsTermination::LocalClose))
+    );
+    assert_eq!(policy.active_connections(), 0);
+    assert_eq!(context.active_sessions(), 0);
+    shutdown.cancel();
+    assert!(
+        timeout(Duration::from_secs(1), serving)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .graceful
+    );
+}
+
+#[tokio_test]
+async fn test_handler_drop_sends_session_closed_and_releases_after_peer_ack() {
+    async fn upgrade(
+        State((policy, context)): State<(WsUpgradePolicy, ServerContext)>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        policy.on_upgrade(ws, &headers, context, |session| async move { drop(session) })
+    }
+
+    let server = WebServer::bind_http(
+        ServerOptions::new("127.0.0.1:0".parse().unwrap()).with_shutdown_timeout(Duration::from_millis(250)),
+    )
+    .await
+    .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let policy = WsUpgradePolicy::new().max_connections(1);
+    let app = Router::new()
+        .route("/ws", get(upgrade))
+        .with_state((policy.clone(), context.clone()));
+    let shutdown = CancellationToken::new();
+    let serving = spawn(server.serve(app, shutdown.clone().cancelled_owned()));
+
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    let (opcode, payload) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
+        .await
+        .expect("handler drop should send a Close frame");
+    assert_eq!(opcode, 8);
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1001);
+    assert_eq!(&payload[2..], b"session closed");
+    assert_eq!(policy.active_connections(), 1, "resources remain held until peer ack");
+    send_masked_close(&mut client).await;
+    timeout(Duration::from_secs(1), async {
+        while policy.active_connections() != 0 || context.active_sessions() != 0 {
+            yield_now().await;
+        }
+    })
+    .await
+    .expect("peer ack should release the connection and session resources");
+    assert_eq!(policy.active_connections(), 0);
+    assert_eq!(context.active_sessions(), 0);
+    shutdown.cancel();
+    assert!(
+        timeout(Duration::from_secs(1), serving)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .graceful
+    );
+}
+
+#[tokio_test]
 async fn test_shutdown_close_deadline_releases_connection_without_peer_ack() {
     let policy = WsUpgradePolicy::new().max_connections(1);
     let shutdown = CancellationToken::new();
