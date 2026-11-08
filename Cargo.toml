@@ -81,7 +81,7 @@ futures-util = { version = "^0.3", features = ["sink"], optional = true }
 hyper = { version = "^1.12", features = ["http1", "http2", "server"] }
 hyper-util = { version = "^0.1", features = ["server-auto", "server-graceful", "tokio"] }
 qubit-web-macros = { version = "0.3.0", path = "qubit-web-macros" }
-qubit-redact = { version = "0.10", default-features = false, features = ["http"] }
+qubit-redact = { version = "^0.10", default-features = false, features = ["http"] }
 tokio = { version = "^1.54", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "^0.7", features = ["rt"] }
 tower = { version = "^0.5", features = ["util"] }
