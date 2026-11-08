@@ -767,6 +767,60 @@ async fn test_investigates_incomplete_h2_headers_with_active_sse() {
 }
 
 #[tokio::test]
+async fn test_final_frame_response_allows_transport_idle_timeout() {
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_transport_idle_timeout(Duration::from_millis(75))
+        .with_max_transport_connections(1)
+        .unwrap();
+    let server = WebServer::bind_http(options).await.unwrap();
+    let address = server.local_addr();
+    let (shutdown, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(
+        server.serve(Router::new().route("/health", get(|| async { "ok" })), async move {
+            let _ = shutdown_rx.await;
+        }),
+    );
+
+    let (mut reader, mut writer) = begin_h2(address).await;
+    send_headers(&mut writer, 1, true, HEALTH_HEADERS).await;
+    let mut completed = false;
+    while !completed {
+        let (kind, flags, stream_id, _) = time::timeout(Duration::from_secs(3), read_frame(&mut reader))
+            .await
+            .unwrap()
+            .expect("read HTTP/2 response frame");
+        completed = stream_id == 1 && matches!(kind, 0x01 | 0x00) && flags & 0x01 != 0;
+    }
+
+    let mut byte = [0; 1];
+    assert_eq!(
+        time::timeout(Duration::from_secs(2), reader.read(&mut byte))
+            .await
+            .expect("idle HTTP/2 transport should close")
+            .unwrap(),
+        0
+    );
+    drop(writer);
+    drop(reader);
+
+    let mut followup = time::timeout(Duration::from_secs(3), TcpStream::connect(address))
+        .await
+        .unwrap()
+        .unwrap();
+    followup
+        .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    time::timeout(Duration::from_secs(3), followup.read_to_end(&mut response))
+        .await
+        .expect("idle close should restore transport capacity")
+        .unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    finish_server(shutdown, serving).await;
+}
+
+#[tokio::test]
 async fn test_incomplete_h2_header_block_on_idle_connection_waits_for_continuation() {
     let (address, shutdown, serving) = start_server().await;
     let (mut reader, mut writer) = begin_h2(address).await;

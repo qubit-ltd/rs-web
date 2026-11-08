@@ -95,6 +95,13 @@ impl RequestLimitLayer {
     /// them and stops polling the body after the first over-limit frame. An
     /// extractor error caused by that frame becomes a stable 413 rejection.
     /// Unconsumed request bodies are not read solely to enforce the limit.
+    /// The layer converts a streamed over-limit signal to 413 only when it is
+    /// observed before the handler returns. If a handler returns an unread body
+    /// for later consumption, the initial response status cannot be changed;
+    /// that response body instead reports a read error when it reaches the
+    /// over-limit frame. Applications that require a stable rejection status
+    /// must read and validate the complete request body before returning the
+    /// response.
     /// For a streamed body without an oversized declared `Content-Length`, a
     /// handler may perform side effects before consuming the frame that makes
     /// the body exceed its budget. A later 413 does not roll those effects

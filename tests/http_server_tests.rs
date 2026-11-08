@@ -788,6 +788,72 @@ async fn test_idle_http1_keep_alive_releases_transport_capacity() {
 }
 
 #[tokio_test]
+async fn test_final_frame_response_allows_transport_idle_timeout() {
+    let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
+        .with_transport_idle_timeout(Duration::from_millis(50))
+        .with_max_transport_connections(1)
+        .unwrap();
+    let server = WebServer::bind_http(options).await.unwrap();
+    let addr = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let task = spawn(
+        server.serve(Router::new().route("/", get(|| async { "ok" })), async move {
+            let _ = shutdown_rx.await;
+        }),
+    );
+
+    let mut first = time::timeout(Duration::from_secs(2), TcpStream::connect(addr))
+        .await
+        .unwrap()
+        .unwrap();
+    time::timeout(
+        Duration::from_secs(2),
+        first.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut response = Vec::new();
+    time::timeout(Duration::from_secs(2), async {
+        while !response.ends_with(b"ok") {
+            let mut byte = [0; 1];
+            first.read_exact(&mut byte).await?;
+            response.push(byte[0]);
+        }
+        Ok::<_, std::io::Error>(())
+    })
+    .await
+    .expect("complete response must arrive")
+    .unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    let mut eof = [0; 1];
+    assert_eq!(
+        time::timeout(Duration::from_secs(2), first.read(&mut eof))
+            .await
+            .expect("idle transport should close")
+            .unwrap(),
+        0
+    );
+
+    let mut second = time::timeout(Duration::from_secs(2), TcpStream::connect(addr))
+        .await
+        .unwrap()
+        .unwrap();
+    second
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut recovered = Vec::new();
+    time::timeout(Duration::from_secs(2), second.read_to_end(&mut recovered))
+        .await
+        .expect("idle close should restore capacity")
+        .unwrap();
+    assert!(recovered.starts_with(b"HTTP/1.1 200"));
+    shutdown_tx.send(()).unwrap();
+    assert!(task.await.unwrap().unwrap().graceful);
+}
+
+#[tokio_test]
 async fn test_transport_limit_releases_after_an_incomplete_header_times_out() {
     let options = ServerOptions::new("127.0.0.1:0".parse().unwrap())
         .with_request_header_timeout(Duration::from_millis(100))

@@ -26,6 +26,7 @@ use axum::http::StatusCode;
 use axum::http::header::CONTENT_LENGTH;
 use axum::response::Response;
 use axum::routing::post;
+use http_body_util::BodyExt;
 use hyper::body::Body as HttpBody;
 use qubit_web::diagnostic::DiagnosticLayer;
 use qubit_web::limit::HttpLimits;
@@ -154,6 +155,105 @@ async fn test_handler_starts_before_the_request_body_reaches_eof() {
 
 async fn echo(_: Bytes) -> &'static str {
     "ok"
+}
+
+async fn return_request_body(request: axum::extract::Request) -> Response {
+    Response::new(request.into_body())
+}
+
+async fn test_capacity_probe() -> &'static str {
+    "available"
+}
+
+fn request_body_echo_app(state: LimitState) -> Router {
+    Router::new()
+        .route(
+            "/echo",
+            post(return_request_body).layer(RequestLimitLayer::from_state(state.clone())),
+        )
+        .route(
+            "/probe",
+            post(test_capacity_probe).layer(RequestLimitLayer::from_state(state)),
+        )
+}
+
+#[tokio::test]
+async fn test_delayed_request_body_over_limit_keeps_status_and_stops_polling() {
+    let poll_count = Arc::new(AtomicUsize::new(0));
+    let state = LimitState::new(
+        HttpLimits::default()
+            .with_max_body_bytes(4)
+            .unwrap()
+            .with_max_concurrent_requests(1)
+            .unwrap(),
+    );
+    let app = request_body_echo_app(state);
+    let request_body = Body::new(ObservedChunks {
+        chunks: VecDeque::from([
+            Bytes::from_static(b"12"),
+            Bytes::from_static(b"345"),
+            Bytes::from_static(b"must-not-be-read"),
+        ]),
+        poll_count: poll_count.clone(),
+    });
+
+    let response = app
+        .clone()
+        .oneshot(Request::post("/echo").body(request_body).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let occupied = app
+        .clone()
+        .oneshot(Request::post("/probe").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(occupied.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let mut body = response.into_body();
+    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert_eq!(first, "12");
+    let oversized = body.frame().await.unwrap();
+    assert!(oversized.is_err());
+    assert!(body.frame().await.is_none());
+    assert_eq!(poll_count.load(Ordering::SeqCst), 2);
+
+    let recovered = app
+        .oneshot(Request::post("/probe").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(recovered.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_delayed_request_body_at_limit_is_forwarded_and_releases_capacity() {
+    let state = LimitState::new(
+        HttpLimits::default()
+            .with_max_body_bytes(4)
+            .unwrap()
+            .with_max_concurrent_requests(1)
+            .unwrap(),
+    );
+    let app = request_body_echo_app(state);
+    let request_body = Body::new(ObservedChunks {
+        chunks: VecDeque::from([Bytes::from_static(b"12"), Bytes::from_static(b"34")]),
+        poll_count: Arc::new(AtomicUsize::new(0)),
+    });
+
+    let response = app
+        .clone()
+        .oneshot(Request::post("/echo").body(request_body).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4).await.unwrap();
+    assert_eq!(&body[..], b"1234");
+    let recovered = app
+        .oneshot(Request::post("/probe").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(recovered.status(), StatusCode::OK);
 }
 
 #[derive(Clone)]
