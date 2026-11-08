@@ -8,6 +8,7 @@
 - [rs-web 生命周期与资源边界设计摘要（简体中文，2026-10-09）](2026-10-09-rs-web-lifecycle-design.zh_CN.md)：现行生命周期边界与 API 合同。
 - [User guide (English)](user_guide.md): end-to-end setup, routing, operation, acceptance, and troubleshooting.
 - [用户指南（简体中文）](user_guide.zh_CN.md)：按接入场景独立编写的完整指南。
+- [Trailers budget investigation (2026-11-08)](trailers-budget-investigation-20261108.md): bounded HTTP/1 and HTTP/2 evidence for network trailers and the locked dependency behavior.
 
 ## Historical decisions
 
