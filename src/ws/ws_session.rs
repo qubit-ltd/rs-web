@@ -20,8 +20,10 @@ use tokio::time::timeout;
 use tokio::time::timeout_at;
 use tokio_util::sync::CancellationToken;
 
+use super::WsTermination;
 use super::internal::InboundMessage;
 use super::internal::InboundState;
+use super::internal::TerminationState;
 use super::ws_send_error::WsSendError;
 use super::ws_send_failure::WsSendFailure;
 use super::ws_send_queue::WsSendQueue;
@@ -64,6 +66,8 @@ pub struct WsSession {
     pub(super) shutdown: CancellationToken,
     /// Completes after both I/O tasks release their managed resources.
     pub(super) closed: CancellationToken,
+    /// Final termination snapshot shared with the I/O resource owner.
+    pub(super) termination: Arc<TerminationState>,
     /// Maximum interval without an inbound application message.
     pub(super) idle_timeout: Duration,
     /// Maximum time allowed for close acknowledgement during shutdown.
@@ -75,6 +79,12 @@ pub struct WsSession {
 }
 
 impl WsSession {
+    /// Returns the stable termination classification after [`Self::closed`]
+    /// completes. Before the I/O resources are released, this returns `None`.
+    pub fn termination(&self) -> Option<WsTermination> {
+        self.termination.snapshot()
+    }
+
     /// Returns an owned future that completes after the reader and writer have
     /// both released this session's managed resources.
     ///
@@ -333,6 +343,7 @@ mod tests {
             queue: WsSendQueue::new(1, 1024),
             shutdown: CancellationToken::new(),
             closed: CancellationToken::new(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             idle_timeout: Duration::from_secs(1),
             shutdown_timeout: Duration::from_millis(20),
             writer: Some(writer),
@@ -476,6 +487,7 @@ mod tests {
             queue: WsSendQueue::new(1, 1024),
             shutdown: CancellationToken::new(),
             closed: CancellationToken::new(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             idle_timeout: Duration::MAX,
             shutdown_timeout: Duration::from_millis(20),
             writer: Some(tokio::spawn(async {})),

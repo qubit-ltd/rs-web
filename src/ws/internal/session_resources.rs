@@ -5,9 +5,12 @@
 //
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
+use std::sync::Arc;
+
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
+use super::TerminationState;
 use crate::server::SessionGuard;
 
 /// Connection capacity and server session registration shared by both I/O
@@ -23,6 +26,8 @@ pub(in crate::ws) struct SessionResources {
     /// Notifies waiters after the capacity permit and session registration are
     /// released.
     closed: CancellationToken,
+    /// Shared cause state finalized before `closed` is signalled.
+    termination: Arc<TerminationState>,
 }
 
 impl SessionResources {
@@ -36,6 +41,7 @@ impl SessionResources {
         Self {
             resources: Some((permit, session)),
             closed: CancellationToken::new(),
+            termination: Arc::new(TerminationState::default()),
         }
     }
     /// Returns a token cancelled after the final shared resource reference is
@@ -43,12 +49,17 @@ impl SessionResources {
     pub(in crate::ws) fn closed_token(&self) -> CancellationToken {
         self.closed.clone()
     }
+    /// Shares the termination state with the session and its I/O lifecycle.
+    pub(in crate::ws) fn termination_state(&self) -> Arc<TerminationState> {
+        self.termination.clone()
+    }
 }
 
 impl Drop for SessionResources {
     /// Releases the permit and session before notifying cancellation waiters.
     fn drop(&mut self) {
         drop(self.resources.take());
+        self.termination.finalize();
         self.closed.cancel();
     }
 }
@@ -82,6 +93,7 @@ mod tests {
             .expect("permit should be available");
         let resources = Arc::new(SessionResources::new(permit, session));
         let closed = resources.closed_token();
+        let termination = resources.termination_state();
         let io_reference = resources.clone();
         drop(resources);
 
@@ -95,6 +107,7 @@ mod tests {
             .expect("last I/O reference should publish completion");
         assert_eq!(semaphore.available_permits(), 1);
         assert_eq!(context.active_sessions(), 0);
+        assert_eq!(termination.snapshot(), Some(crate::ws::WsTermination::IoEnded));
     }
 
     #[tokio::test]
@@ -110,6 +123,7 @@ mod tests {
             Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
             session,
         ));
+        let termination = resources.termination_state();
         let token = resources.closed_token();
         let cancelled_waiter = token.clone();
         let surviving_waiter = token.clone();
@@ -142,5 +156,6 @@ mod tests {
         timeout(Duration::from_secs(1), token.cancelled())
             .await
             .expect("late waiter should complete immediately");
+        assert_eq!(termination.snapshot(), Some(crate::ws::WsTermination::IoEnded));
     }
 }

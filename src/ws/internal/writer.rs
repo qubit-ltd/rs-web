@@ -166,7 +166,11 @@ pub(in crate::ws) async fn writer_loop<S>(
         close_deadline,
         server_deadline,
         shutdown_timeout,
+        server_shutdown,
+        termination,
+        ..
     } = lifecycle;
+    let _ = (server_shutdown, termination);
     let _close_queue_on_drop = CloseQueueOnDrop::new(queue.clone());
     loop {
         if shutdown.is_cancelled() {
@@ -497,6 +501,8 @@ mod tests {
         let shutdown = CancellationToken::new();
         let lifecycle = SessionLifecycle {
             shutdown: shutdown.clone(),
+            server_shutdown: shutdown.clone(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
             server_deadline: None,
@@ -605,6 +611,8 @@ mod tests {
         let shutdown = CancellationToken::new();
         let lifecycle = SessionLifecycle {
             shutdown: shutdown.clone(),
+            server_shutdown: shutdown.clone(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1011)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
             server_deadline: None,
@@ -708,6 +716,8 @@ mod tests {
         let writer_notify = notify.clone();
         let lifecycle = SessionLifecycle {
             shutdown: CancellationToken::new(),
+            server_shutdown: CancellationToken::new(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1000)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
             server_deadline: None,
@@ -827,6 +837,8 @@ mod tests {
         let shutdown = CancellationToken::new();
         let lifecycle = SessionLifecycle {
             shutdown: shutdown.clone(),
+            server_shutdown: shutdown.clone(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1000)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
             server_deadline: None,
@@ -970,6 +982,8 @@ mod tests {
         let shutdown = CancellationToken::new();
         shutdown.cancel();
         let lifecycle = SessionLifecycle {
+            server_shutdown: shutdown.clone(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             shutdown,
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
@@ -1065,6 +1079,8 @@ mod tests {
         let shutdown = CancellationToken::new();
         shutdown.cancel();
         let lifecycle = SessionLifecycle {
+            server_shutdown: shutdown.clone(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             shutdown,
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
@@ -1156,6 +1172,8 @@ mod tests {
         let shutdown = CancellationToken::new();
         shutdown.cancel();
         let lifecycle = SessionLifecycle {
+            server_shutdown: shutdown.clone(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             shutdown,
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
@@ -1343,6 +1361,8 @@ mod tests {
         let shutdown = CancellationToken::new();
         let lifecycle = SessionLifecycle {
             shutdown: shutdown.clone(),
+            server_shutdown: shutdown.clone(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
             server_deadline: None,
@@ -1477,6 +1497,8 @@ mod tests {
         let shutdown = CancellationToken::new();
         let lifecycle = SessionLifecycle {
             shutdown: shutdown.clone(),
+            server_shutdown: shutdown.clone(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
             server_deadline: None,
@@ -1806,6 +1828,8 @@ mod tests {
         let flush_polls = Arc::new(AtomicUsize::new(0));
         let lifecycle = SessionLifecycle {
             shutdown: CancellationToken::new(),
+            server_shutdown: CancellationToken::new(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
             server_deadline: None,
@@ -1931,6 +1955,8 @@ mod tests {
         let resources = Arc::new(SessionResources::new(permit, session));
         let lifecycle = SessionLifecycle {
             shutdown: shutdown.clone(),
+            server_shutdown: shutdown.clone(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
             close_deadline,
             server_deadline: None,
@@ -1996,6 +2022,8 @@ mod tests {
         let resources = Arc::new(SessionResources::new(permit, session));
         let lifecycle = SessionLifecycle {
             shutdown: shutdown.clone(),
+            server_shutdown: shutdown.clone(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1000)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
             server_deadline: None,
@@ -2084,6 +2112,8 @@ mod tests {
         let shutdown = CancellationToken::new();
         let lifecycle = SessionLifecycle {
             shutdown: shutdown.clone(),
+            server_shutdown: shutdown.clone(),
+            termination: Arc::new(crate::ws::internal::TerminationState::default()),
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1000)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
             server_deadline: server_deadline.map(|deadline| Arc::new(std::sync::Mutex::new(Some(deadline)))),

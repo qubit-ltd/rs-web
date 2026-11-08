@@ -489,10 +489,15 @@ impl WsUpgradePolicy {
             .on_upgrade(move |socket| async move {
                 let queue = policy.send_queue();
                 let session_shutdown = shutdown.child_token();
+                let resources = Arc::new(super::internal::SessionResources::new(permit, session_guard));
+                let closed = resources.closed_token();
+                let termination = resources.termination_state();
                 let close_code = Arc::new(AtomicU16::new(1001));
                 let close_deadline = Arc::new(Mutex::new(None));
                 let writer_lifecycle = SessionLifecycle {
                     shutdown: session_shutdown.clone(),
+                    server_shutdown: shutdown.clone(),
+                    termination: termination.clone(),
                     close_code: close_code.clone(),
                     close_deadline: close_deadline.clone(),
                     server_deadline: server_deadline.clone(),
@@ -503,8 +508,6 @@ impl WsUpgradePolicy {
                 let (close_ack_sender, close_ack_receiver) = oneshot::channel();
                 let (sink, stream) = socket.split();
                 let idle_timeout = policy.inner.idle_timeout;
-                let resources = Arc::new(super::internal::SessionResources::new(permit, session_guard));
-                let closed = resources.closed_token();
                 let writer_resources = resources.clone();
                 let writer = spawn(async move {
                     observe_io_task(
@@ -525,6 +528,8 @@ impl WsUpgradePolicy {
                 let (incoming_tx, incoming_rx) = mpsc::channel(policy.inner.inbound_queue_messages);
                 let reader_lifecycle = SessionLifecycle {
                     shutdown: session_shutdown.clone(),
+                    server_shutdown: shutdown.clone(),
+                    termination: termination.clone(),
                     close_code: close_code.clone(),
                     close_deadline: close_deadline.clone(),
                     server_deadline: server_deadline.clone(),
@@ -556,6 +561,7 @@ impl WsUpgradePolicy {
                     queue,
                     shutdown: session_shutdown,
                     closed,
+                    termination,
                     idle_timeout: policy.inner.idle_timeout,
                     shutdown_timeout,
                     writer: Some(writer),

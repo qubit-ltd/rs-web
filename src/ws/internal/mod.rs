@@ -18,6 +18,8 @@ mod policy_inner;
 mod queue_state;
 mod send_outcome;
 mod session_resources;
+mod termination_data;
+mod termination_state;
 mod upgrade_lifecycle;
 
 pub(in crate::ws) use close_queue_on_drop::CloseQueueOnDrop;
@@ -28,6 +30,7 @@ pub(in crate::ws) use observe_io_task::observe_io_task;
 pub(in crate::ws) use policy_inner::PolicyInner;
 pub(in crate::ws) use queue_state::QueueState;
 pub(in crate::ws) use session_resources::SessionResources;
+pub(in crate::ws) use termination_state::TerminationState;
 pub(in crate::ws) use upgrade_lifecycle::UpgradeLifecycle;
 
 mod close;

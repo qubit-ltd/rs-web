@@ -172,6 +172,9 @@ pub use ws::WsSendQueue;
 /// Managed WebSocket session; requires the `ws` feature.
 #[cfg(feature = "ws")]
 pub use ws::WsSession;
+/// Safe local WebSocket termination classification; requires the `ws` feature.
+#[cfg(feature = "ws")]
+pub use ws::WsTermination;
 /// WebSocket upgrade and resource policy; requires the `ws` feature.
 #[cfg(feature = "ws")]
 pub use ws::WsUpgradePolicy;
