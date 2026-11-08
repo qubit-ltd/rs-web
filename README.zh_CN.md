@@ -103,30 +103,15 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 
 示例 bearer token `demo-only` 只用于演示 handler 检查，不构成认证。WebSocket 客户端可连接 `ws://127.0.0.1:3001/prompt/demo-1/ws`，发送 `Authorization: Bearer demo-only`；若发送 Origin，则须使用允许的 `http://localhost:3000`。这些端点只演示传输，不会运行 Agent、保存 Prompt 或持久化任务。policy 的共享方式、容量规划和关闭流程见[中文用户指南](doc/user_guide.zh_CN.md)；[英文用户指南](doc/user_guide.md)也介绍了同一场景。
 
-在 [`examples/prompt_stream.rs`](examples/prompt_stream.rs) 中，原生 SSE 和 WebSocket 路由共用一个 `StreamAdmissionState`。默认每个请求最多缓冲 1 MiB 请求体，共享接纳容量为 256 个并发许可，从开始接纳到 handler 生成响应头的期限为 10 秒。响应头就绪后期限即结束，不会覆盖 SSE 流本身或 WebSocket 升级后的会话。SSE 和 WebSocket 会话容量仍分别由 `SseConnectionPolicy` 和 `WsUpgradePolicy` 管理。
+在 [`examples/prompt_stream.rs`](examples/prompt_stream.rs) 中，原生 SSE 和 WebSocket 路由共用一个 `StreamAdmissionState`。接纳期限在响应头就绪后结束，不覆盖后续 SSE 流或 WebSocket 会话。会话容量仍分别由 `SseConnectionPolicy` 和 `WsUpgradePolicy` 管理。请求预算和运行边界见[用户指南](doc/user_guide.zh_CN.md)。
 
 ## 限额与运行边界
 
-Controller 路径捕获使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧式 `/:id`、`/*rest` 路径段会在注册前被拒绝。JSON 提取器接受 `application/json` 和符合 token 语法的 `application/*+json` subtype；畸形 subtype 返回 `415 Unsupported Media Type`。
+`WebServer` 按调用方提供的 Router 运行。原生短请求分支需显式安装 `RequestLimitLayer`，原生 SSE/WS 分支需显式安装 `StreamAdmissionLayer`；Controller 路由使用 builder 的策略。短请求和流式接纳属于不同容量域。每个 builder 默认拥有独立状态域；调用方也可显式共享 `LimitState` 或 `StreamAdmissionState`，让 Controller、原生路由和其他 builder 使用同一容量。期限依赖 Tokio 协作式取消，不让出执行权的同步工作会延迟检查和清理。
 
-`WsSession::close()` 可重复调用；如果等待期间取消了 close future，可以再次调用完成关闭。显式关闭后，`recv()` 返回 `None`。`WsSession::closed()` 提供一个 owned 通知：两个受管 I/O 任务释放资源后 future 才会就绪，应用可将它与可取消工作一起 select，并调用 `close()` 释放队列中的入站消息。它不会自动结束 handler 或应用自行启动的任务。传输读取错误可通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；宿主停服可能直接取消 handler，不保证交付该错误。未匹配请求的诊断日志只使用固定标记 `<unmatched>`，不会记录请求 URI 或秘密信息。`request_header_timeout` 和 SSE keep-alive interval 若为零或无法表示为 Tokio 截止时间，会以 `WebServerError::InvalidConfig` 拒绝。
+认证、授权、业务状态以及流式数据的保存和重放由应用负责。WebSocket 升级前应完成认证；Origin 检查只限制浏览器来源。示例 token 和无认证停服入口仅供 loopback 演示。队列与请求体预算、setter 顺序、停服和读取错误语义、TLS 轮换、迁移及排障细节见[中文用户指南](doc/user_guide.zh_CN.md)或[英文用户指南](doc/user_guide.md)。现行边界与资料导航见[架构概览](doc/2026-10-09-rs-web-architecture.zh_CN.md)、[生命周期设计摘要](doc/2026-10-09-rs-web-lifecycle-design.zh_CN.md)和[文档索引](doc/README.md)。
 
-- Controller 的 `short` 路由默认使用 `HttpLimits::default()`；原生 Axum 路由必须在需要限额的短请求分支上显式安装 `RequestLimitLayer`。`WebServer` 不会替传入的 Router 自动添加路由限额。
-- Controller 的 `sse`/`ws` 路由共用 builder 的 `StreamAdmissionState`；添加路由前可用 `with_stream_admission_limits` 替换预算。原生 Axum 分支必须显式安装 `StreamAdmissionLayer`：`new` 创建独立预算，`from_state` 可共享预算。默认每个状态域最多缓冲 1 MiB/请求、接纳 256 个请求，并在响应头产生前限时 10 秒。256 MiB 是并发请求体载荷的估算，不是缓冲分配或进程峰值；增量缓冲会在复制后释放已处理的数据帧，但仍有 Vec 增长余量、扩容期间的临时共存、当前帧、trailers、分配器和传输开销。`RequestLimitLayer` 仍是独立的短请求策略。传输连接数和 SSE/WS 会话额度另行计算；SSE 也占用 HTTP 连接。
-- 认证、授权、业务状态，以及流式数据的保存和重放由应用负责。WebSocket 升级前必须先完成认证；Origin 检查只限制浏览器来源。示例 token 和无认证停服入口仅供 loopback 演示。
-- `DiagnosticLayer::new()` 记录请求及响应头元数据。需要响应体终止结果时，在 `RequestLimitLayer` 外侧显式安装 `DiagnosticLayer::with_body_diagnostics()`；事件使用允许列表字段，不含正文或错误文本，也不声称客户端已断连或网络已送达。
-- WebSocket 的 `queue_limits` 配置出站队列；`inbound_queue_limits` 单独配置入站预算，默认每连接最多排队 64 条消息和累计 1 MiB payload。通道满时最多等待至 `idle_timeout`，字节预算不足则立即以 `1013` 关闭。每次普通出站发送和通知触发的 flush 使用 `write_timeout`（默认 60 秒）；为兼容旧配置，`idle_timeout` 仍会同时设置读写期限，随后调用 `.write_timeout(...)` 即可分开设置。超时会关闭会话并丢弃 sink，不保证背压时 Close 帧能送达对端。该期限限制的是单次操作等待，不检测字节级进度；提高写期限可适应慢读端而不延长入站等待。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，另有每个活跃连接最多一条 1 MiB 协议重组消息；该估算不含分配开销和应用自有内存，也不是 I/O 结束后仍被 handler 或 session 保留的内存上限。
-- 配置时先设 `idle_timeout`，再用 `write_timeout` 单独调整出站期限。`closed()` 完成后，`termination()` 会给出稳定的本地终止原因；它不代表 Close 握手完成或业务成功。迁移细节见[中文用户指南](doc/user_guide.zh_CN.md)。
-- WebSocket 出站发送会校验 Close code；需要保留被拒消息时可用 `try_send_recoverable`。有限重试策略和迁移说明见[中文用户指南](doc/user_guide.zh_CN.md)。
-- 启用 HTTPS 需要 `tls` 与有效证书，也可由部署方配置可信反向代理。停服由应用发起，并遵守服务端配置的截止时间。
-- `ServerOptions::validate_detailed()` 提供安全的字段和原因码，旧 `validate()` 错误类型保持不变。TLS 默认仍使用绑定时快照；需要新握手使用显式重载配置时，使用 `TlsConfig::from_reloadable_rustls` 并保留 `RustlsConfig` clone。校验与轮换合同见[用户指南](doc/user_guide.zh_CN.md)。
-- `serve` 已开始运行后，丢弃其 future 或 abort 所在任务会关闭受管会话登记并通知现有会话，但无法等待异步排空或生成停服报告；后续清理需要 Tokio runtime 继续运行。优雅停服请完成 shutdown future 并等待 `serve` 返回。
-
-限额细节、TLS 配置、生命周期行为和排障方法见[中文用户指南](doc/user_guide.zh_CN.md)或[英文用户指南](doc/user_guide.md)。更多背景可查阅 [API 文档](https://docs.rs/qubit-web)、[历史中文设计记录](doc/2026-10-08-rs-web-design.md)和[生命周期设计摘要](doc/2026-10-09-rs-web-lifecycle-design.en.md)。
-
-期限采用 Tokio 协作式取消，不让出执行权的同步工作会延迟检查和清理。HTTP/HTTPS handler 可通过 Axum `ConnectInfo<SocketAddr>` 提取直接 TCP 对端；代理与执行边界见[用户指南](doc/user_guide.zh_CN.md)。
-
-[固定互操作 workflow](.github/workflows/downstream-interop.yml) 保留固定消费者基线。独立的[当前消费者 WS/WSS workflow](.github/workflows/downstream-current-interop.yml) 会在 PR 修改 `src/**`、`qubit-web-macros/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`tests/**`、`scripts/check-downstream-interop.py`、`.infra/**` 或 `.github/workflows/downstream*interop.yml` 时运行，也会在每周一 03:17 UTC 和手动触发时检查 rs-websocket `main`。该 job 设置了 `continue-on-error`，因此它是非阻断兼容性信号；整体 workflow 显示绿色不能证明该检查通过，应查看 job/step outcome 和 summary。固定基线与当前 `main` 是两项独立信号。
+[固定互操作 workflow](.github/workflows/downstream-interop.yml) 保留固定消费者基线；[当前消费者 WS/WSS workflow](.github/workflows/downstream-current-interop.yml) 则提供针对 rs-websocket `main` 的非阻塞兼容信号。两者是独立信号；CI 触发条件、调度和结果解释集中见[文档索引](doc/README.md)。
 
 ## 测试
 

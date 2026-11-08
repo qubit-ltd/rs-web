@@ -129,7 +129,68 @@ let app: Router = Router::new()
         .layer(RequestLimitLayer::from_state(shared)));
 ```
 
-共享额度只约束使用该状态克隆的 layer，不会自动成为整个进程的上限；Controller builder 保持自己的状态域。
+共享额度只约束使用该状态克隆的路由，不会自动成为整个进程的上限。若要让 Controller 短路由加入同一容量域，应在添加 Controller 前把 state 的克隆传给 `with_limit_state`。添加时会捕获 builder 当前 state；之后替换只影响后续添加的 Controller。每次添加前最后调用的短请求 state 或 limits setter 决定该 Controller 使用的容量域。独立构造的 state 仍彼此隔离。
+
+下面的完整装配让 Controller 与原生 Axum 路由共享短请求容量：
+
+```rust
+use std::sync::Arc;
+use axum::{Router, routing::get};
+use qubit_web::{ControllerRoutes, HttpLimits, RequestLimitLayer, rest_controller};
+use qubit_web::limit::LimitState;
+
+fn main() -> Result<(), qubit_web::mvc::ControllerRouteError> {
+struct Health;
+#[rest_controller("/health")]
+impl Health {
+    #[get_mapping("")]
+    async fn check(&self) -> &'static str { "ok" }
+}
+
+let state = LimitState::new(HttpLimits::default());
+let controllers = ControllerRoutes::<()>::new()
+    .with_limit_state(state.clone())
+    .add(Arc::new(Health))?
+    .finish();
+let native: Router<()> = Router::new()
+    .route("/native", get(|| async { "ok" }))
+    .layer(RequestLimitLayer::from_state(state));
+let app = controllers.merge(native);
+let _ = app;
+Ok(())
+}
+```
+
+流式接纳使用另一份 state 和 setter。将同一个 `StreamAdmissionState` 传给 Controller builder 和原生长连接分支；短请求的 `LimitState` 不参与此预算：
+
+```rust
+use std::sync::Arc;
+use axum::{Router, routing::get};
+use qubit_web::{ControllerRoutes, StreamAdmissionLayer, StreamAdmissionLimits, StreamAdmissionState, rest_controller};
+
+fn main() -> Result<(), qubit_web::mvc::ControllerRouteError> {
+struct Events;
+#[rest_controller("/events")]
+impl Events {
+    #[route("", method = "GET", kind = "sse")]
+    async fn stream(&self) -> &'static str { "event" }
+}
+
+let state = StreamAdmissionState::new(StreamAdmissionLimits::default());
+let controllers = ControllerRoutes::<()>::new()
+    .with_stream_admission_state(state.clone())
+    .add(Arc::new(Events))?
+    .finish();
+let native: Router<()> = Router::new()
+    .route("/native-events", get(|| async { "event" }))
+    .layer(StreamAdmissionLayer::from_state(state));
+let app = controllers.merge(native);
+let _ = app;
+Ok(())
+}
+```
+
+即使同一 builder 同时配置两者，短请求和流式接纳 state 仍属于不同容量域。
 
 `ControllerRoutes::add` 会在注册前检查当前 Controller 的全部路由声明。重复的 method/path、无效路径、超过 25 个普通参数或匹配模板冲突（例如参数别名和重叠通配符）会返回 `ControllerRouteError`；末尾 catch-all 不计入数量。不同 method 可以共用同一模板，`finish()` 直接返回 `Router`。路径捕获请使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧式 `/:id`、`/*rest` 会被拒绝。检查范围是 builder 收集的声明；之后与原生 Axum Router 合并仍遵循 Axum 自身行为。`rest_controller` 也支持在同一模块中装配末段名称相同、但实际类型不同的 Controller。
 
@@ -263,7 +324,7 @@ RequestLimitLayer::new(http_limits);
 StreamAdmissionLayer::from_state(shared.clone());
 ```
 
-每次调用 `StreamAdmissionLayer::new(limits)` 都会创建独立容量域。`ControllerRoutes` 会让同一 builder 中的 `sse`/`ws` 路由共用一个状态域；添加 Controller 前调用 `with_stream_admission_limits(limits)` 可替换默认预算。`with_http_limits` 只配置 `short` 路由，因此 builder 中短请求和流式接纳额度彼此独立。
+每次调用 `StreamAdmissionLayer::new(limits)` 都会创建独立容量域。`ControllerRoutes` 默认让同一 builder 中的 `sse`/`ws` 路由共用自己的状态域；添加 Controller 前可用 `with_stream_admission_limits(limits)` 替换，或用 `with_stream_admission_state(state.clone())` 与原生分支或另一个 builder 共享。添加 Controller 时会捕获当前 state。`with_http_limits` 和 `with_limit_state` 只配置 `short` 路由，因此 builder 中短请求和流式接纳额度彼此独立。
 
 每个流式接纳状态域默认允许单个请求体缓冲 1 MiB、同时接纳 256 个请求，并在 handler 生成响应头前限时 10 秒。256 MiB 是并发请求体载荷的估算，不是缓冲分配或进程峰值上限。增量缓冲在复制后释放已处理的数据帧，但 Vec 增长余量、扩容期间的临时共存、当前帧、trailers、分配器行为和传输缓冲仍会占用额外资源；请按内存预算调低请求体或并发上限。layer 会在 handler 运行前收齐请求体，因此超限或读取失败的 body 不会进入 handler。SSE 响应体和 WebSocket 会话不受该接纳期限限制。
 

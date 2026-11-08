@@ -115,7 +115,68 @@ let app: Router = Router::new()
         .layer(RequestLimitLayer::from_state(shared)));
 ```
 
-The shared allowance applies only to layers using clones of this state. It is not an automatic process-wide cap, and Controller builders keep their own state domain.
+The shared allowance applies only to routes using clones of this state. It is not an automatic process-wide cap. To include Controller short routes in the same domain, pass a clone to `with_limit_state` before adding their Controller; adding a Controller captures the builder's current state, so a later replacement applies only to later additions. The last short-request state or limits setter called before an addition selects that Controller's domain. Independent state values remain independent.
+
+This complete assembly shares one short-request domain between a Controller and a native Axum route:
+
+```rust
+use std::sync::Arc;
+use axum::{Router, routing::get};
+use qubit_web::{ControllerRoutes, HttpLimits, RequestLimitLayer, rest_controller};
+use qubit_web::limit::LimitState;
+
+fn main() -> Result<(), qubit_web::mvc::ControllerRouteError> {
+struct Health;
+#[rest_controller("/health")]
+impl Health {
+    #[get_mapping("")]
+    async fn check(&self) -> &'static str { "ok" }
+}
+
+let state = LimitState::new(HttpLimits::default());
+let controllers = ControllerRoutes::<()>::new()
+    .with_limit_state(state.clone())
+    .add(Arc::new(Health))?
+    .finish();
+let native: Router<()> = Router::new()
+    .route("/native", get(|| async { "ok" }))
+    .layer(RequestLimitLayer::from_state(state));
+let app = controllers.merge(native);
+let _ = app;
+Ok(())
+}
+```
+
+Stream admission has a separate state and setter. Share one `StreamAdmissionState` with the Controller builder and native long-lived branch; do not use the short-request `LimitState` for this budget:
+
+```rust
+use std::sync::Arc;
+use axum::{Router, routing::get};
+use qubit_web::{ControllerRoutes, StreamAdmissionLayer, StreamAdmissionLimits, StreamAdmissionState, rest_controller};
+
+fn main() -> Result<(), qubit_web::mvc::ControllerRouteError> {
+struct Events;
+#[rest_controller("/events")]
+impl Events {
+    #[route("", method = "GET", kind = "sse")]
+    async fn stream(&self) -> &'static str { "event" }
+}
+
+let state = StreamAdmissionState::new(StreamAdmissionLimits::default());
+let controllers = ControllerRoutes::<()>::new()
+    .with_stream_admission_state(state.clone())
+    .add(Arc::new(Events))?
+    .finish();
+let native: Router<()> = Router::new()
+    .route("/native-events", get(|| async { "event" }))
+    .layer(StreamAdmissionLayer::from_state(state));
+let app = controllers.merge(native);
+let _ = app;
+Ok(())
+}
+```
+
+The short-request and stream-admission states remain independent capacity domains even when both are configured on the same builder.
 
 `ControllerRoutes::add` checks the complete set of Controller route declarations before registering them. It returns `ControllerRouteError` for duplicate method/path pairs, invalid paths, more than 25 non-wildcard parameters, or matching-template conflicts such as parameter aliases and overlapping wildcards. A final catch-all parameter does not count toward the limit. Different methods can share one template, and `finish()` returns the `Router` directly. Use Axum capture syntax such as `/{id}` and `/{*rest}`; legacy `/:id` and `/*rest` segments are rejected. This check covers declarations collected by the builder; later merges with native Axum routers retain Axum's own behavior. `rest_controller` also supports distinct Controller types with the same terminal type name in one module.
 
@@ -249,7 +310,7 @@ RequestLimitLayer::new(http_limits);
 StreamAdmissionLayer::from_state(shared.clone());
 ```
 
-Each `StreamAdmissionLayer::new(limits)` creates a separate capacity domain. The `ControllerRoutes` builder creates one shared stream domain for its `sse`/`ws` routes; call `with_stream_admission_limits(limits)` before `add` to replace it. `with_http_limits` configures only `short` routes, so a builder has two independent request-policy domains.
+Each `StreamAdmissionLayer::new(limits)` creates a separate capacity domain. The `ControllerRoutes` builder creates its own stream domain by default for `sse`/`ws` routes; call `with_stream_admission_limits(limits)` before `add` to replace it, or use `with_stream_admission_state(state.clone())` to share a domain with native branches or another builder. A Controller captures the current state when added. `with_http_limits` and `with_limit_state` configure only `short` routes, so a builder has two independent request-policy domains.
 
 Defaults per stream-admission state are 1 MiB per buffered body, 256 concurrent admissions, and 10 seconds from entering admission through handler response headers. The 256 MiB product estimates concurrent payload bytes; it is not a bound on buffer allocation or process peak memory. Incremental buffering releases each prior input data-frame owner after copying it, while vector spare capacity, temporary coexistence during growth, the current frame, trailers, allocator behavior, and transport buffers remain additional costs. Lower the body or concurrency limit to fit your memory budget. The layer reads the complete body before invoking the handler, so an oversized or unreadable body cannot reach handler code. An active SSE response body or WebSocket session is outside this deadline.
 
