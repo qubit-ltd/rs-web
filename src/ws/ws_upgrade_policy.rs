@@ -560,6 +560,7 @@ impl WsUpgradePolicy {
                     explicitly_closed: false,
                     queue,
                     shutdown: session_shutdown,
+                    server_shutdown: shutdown.clone(),
                     closed,
                     termination,
                     idle_timeout: policy.inner.idle_timeout,

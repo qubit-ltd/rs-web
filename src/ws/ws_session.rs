@@ -64,6 +64,8 @@ pub struct WsSession {
     pub(super) queue: WsSendQueue,
     /// Cancellation token shared by the application and both tasks.
     pub(super) shutdown: CancellationToken,
+    /// Parent server token used to distinguish host shutdown from local close.
+    pub(super) server_shutdown: CancellationToken,
     /// Completes after both I/O tasks release their managed resources.
     pub(super) closed: CancellationToken,
     /// Final termination snapshot shared with the I/O resource owner.
@@ -125,21 +127,26 @@ impl WsSession {
         if self.explicitly_closed {
             return None;
         }
-        let message = match tokio::time::Instant::now().checked_add(self.idle_timeout) {
+        let (message, idle_expired) = match tokio::time::Instant::now().checked_add(self.idle_timeout) {
             Some(deadline) => select! {
                 biased;
-                _ = self.shutdown.cancelled() => None,
+                _ = self.shutdown.cancelled() => (None, false),
                 message = timeout_at(deadline, self.incoming.recv()) => {
                     match message {
-                        Ok(message) => message.map(InboundMessage::into_message),
-                        Err(_) => None,
+                        Ok(message) => (message.map(InboundMessage::into_message), false),
+                        Err(_) => (None, true),
                     }
                 }
             },
-            None => None,
+            None => (None, true),
         };
         if message.is_some() {
             return message.map(Ok);
+        }
+        if idle_expired {
+            self.termination.record(WsTermination::IdleTimeout);
+        } else if self.server_shutdown.is_cancelled() {
+            self.termination.record(WsTermination::ServerShutdown);
         }
         self.cleanup().await;
         if self.explicitly_closed {
@@ -222,11 +229,15 @@ impl WsSession {
     /// writer reaches it, while preserving that frame's code and reason.
     pub async fn close(&mut self) {
         self.explicitly_closed = true;
+        self.record_local_termination(WsTermination::LocalClose);
         self.inbound_state.clear_read_error();
         self.cleanup().await;
     }
     /// Runs the shutdown cleanup for the active WebSocket session.
     async fn cleanup(&mut self) {
+        if self.server_shutdown.is_cancelled() {
+            self.termination.record(WsTermination::ServerShutdown);
+        }
         self.queue.close();
         self.shutdown.cancel();
         self.incoming.close();
@@ -246,6 +257,16 @@ impl WsSession {
     }
 }
 
+impl WsSession {
+    fn record_local_termination(&self, cause: WsTermination) {
+        if self.server_shutdown.is_cancelled() {
+            self.termination.record(WsTermination::ServerShutdown);
+        } else {
+            self.termination.record(cause);
+        }
+    }
+}
+
 /// Waits for one session task without losing its handle if the caller is
 /// cancelled.
 /// # Parameters
@@ -261,6 +282,11 @@ async fn wait_task(slot: &mut Option<JoinHandle<()>>) {
 impl Drop for WsSession {
     /// Releases the resources owned by this guard.
     fn drop(&mut self) {
+        self.record_local_termination(if self.explicitly_closed {
+            WsTermination::LocalClose
+        } else {
+            WsTermination::HandlerDropped
+        });
         self.queue.close();
         self.shutdown.cancel();
     }
@@ -289,6 +315,7 @@ mod tests {
     use super::WsSession;
     use crate::ws::WsSendError;
     use crate::ws::WsSendQueue;
+    use crate::ws::WsTermination;
 
     #[derive(Clone, Default)]
     struct SharedLog {
@@ -342,6 +369,7 @@ mod tests {
             explicitly_closed: false,
             queue: WsSendQueue::new(1, 1024),
             shutdown: CancellationToken::new(),
+            server_shutdown: CancellationToken::new(),
             closed: CancellationToken::new(),
             termination: Arc::new(crate::ws::internal::TerminationState::default()),
             idle_timeout: Duration::from_secs(1),
@@ -365,6 +393,19 @@ mod tests {
         );
         active.shutdown.cancel();
         assert_eq!(active.try_send(Message::text("four")), Err(WsSendError::Closed));
+    }
+
+    #[tokio::test]
+    async fn test_local_close_and_handler_drop_record_distinct_causes() {
+        let mut local = session(tokio::spawn(pending::<()>()), tokio::spawn(pending::<()>()));
+        let local_termination = local.termination.clone();
+        local.close().await;
+        assert_eq!(local_termination.candidate(), Some(WsTermination::LocalClose));
+
+        let dropped = session(tokio::spawn(pending::<()>()), tokio::spawn(pending::<()>()));
+        let dropped_termination = dropped.termination.clone();
+        drop(dropped);
+        assert_eq!(dropped_termination.candidate(), Some(WsTermination::HandlerDropped));
     }
 
     #[tokio::test]
@@ -486,6 +527,7 @@ mod tests {
             explicitly_closed: false,
             queue: WsSendQueue::new(1, 1024),
             shutdown: CancellationToken::new(),
+            server_shutdown: CancellationToken::new(),
             closed: CancellationToken::new(),
             termination: Arc::new(crate::ws::internal::TerminationState::default()),
             idle_timeout: Duration::MAX,

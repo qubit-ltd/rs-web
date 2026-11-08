@@ -26,6 +26,7 @@ use super::SessionLifecycle;
 use super::close::get_close_deadline;
 use super::reader_context::ReaderContext;
 use super::reader_wait_result::ReaderWaitResult;
+use crate::ws::WsTermination;
 use crate::ws::internal::CloseQueueOnDrop;
 use crate::ws::ws_send_queue::WsSendQueue;
 /// Selects the shutdown deadline when present, otherwise computes an idle
@@ -76,6 +77,9 @@ pub(in crate::ws) async fn reader_loop(
         let next = select! {
             biased;
             _ = lifecycle.shutdown.cancelled(), if deadline.is_none() => {
+                if lifecycle.server_shutdown.is_cancelled() {
+                    lifecycle.termination.record(WsTermination::ServerShutdown);
+                }
                 deadline = Some(get_close_deadline(
                     &lifecycle.close_deadline,
                     lifecycle.server_deadline.as_ref(),
@@ -93,6 +97,7 @@ pub(in crate::ws) async fn reader_loop(
         let next = match next {
             ReaderWaitResult::Timed(result) => result,
             ReaderWaitResult::IdleDeadlineUnrepresentable => {
+                lifecycle.termination.record(WsTermination::IdleTimeout);
                 lifecycle.close_code.store(1001, Ordering::Release);
                 deadline = Some(get_close_deadline(
                     &lifecycle.close_deadline,
@@ -107,6 +112,7 @@ pub(in crate::ws) async fn reader_loop(
             Ok(Some(Ok(message @ Message::Ping(_)))) => {
                 queue.notify.notify_one();
                 let Ok(message) = inbound_state.try_wrap(message) else {
+                    lifecycle.termination.record(WsTermination::InboundBackpressure);
                     lifecycle.close_code.store(1013, Ordering::Release);
                     lifecycle.shutdown.cancel();
                     deadline.get_or_insert_with(|| {
@@ -129,6 +135,11 @@ pub(in crate::ws) async fn reader_loop(
                 break;
             }
             Ok(Some(Ok(message @ Message::Close(_)))) => {
+                let code = match &message {
+                    Message::Close(Some(frame)) => Some(frame.code),
+                    _ => None,
+                };
+                lifecycle.termination.record(WsTermination::PeerClose { code });
                 queue.close();
                 queue.notify.notify_one();
                 if let Some(ack) = close_ack.take() {
@@ -141,6 +152,7 @@ pub(in crate::ws) async fn reader_loop(
             }
             Ok(Some(Ok(message))) => {
                 let Ok(message) = inbound_state.try_wrap(message) else {
+                    lifecycle.termination.record(WsTermination::InboundBackpressure);
                     lifecycle.close_code.store(1013, Ordering::Release);
                     lifecycle.shutdown.cancel();
                     deadline.get_or_insert_with(|| {
@@ -163,6 +175,7 @@ pub(in crate::ws) async fn reader_loop(
                 break;
             }
             Ok(Some(Err(error))) => {
+                lifecycle.termination.record(WsTermination::ReadError);
                 queue.close();
                 lifecycle
                     .close_code
@@ -185,6 +198,7 @@ pub(in crate::ws) async fn reader_loop(
                 break;
             }
             Err(_) if deadline.is_none() => {
+                lifecycle.termination.record(WsTermination::IdleTimeout);
                 lifecycle.close_code.store(1001, Ordering::Release);
                 deadline = Some(get_close_deadline(
                     &lifecycle.close_deadline,
@@ -243,6 +257,9 @@ fn handle_delivery(
             false
         }
         DeliveryResult::Cancelled => {
+            if lifecycle.server_shutdown.is_cancelled() {
+                lifecycle.termination.record(WsTermination::ServerShutdown);
+            }
             *deadline = Some(get_close_deadline(
                 &lifecycle.close_deadline,
                 lifecycle.server_deadline.as_ref(),
@@ -251,6 +268,7 @@ fn handle_delivery(
             true
         }
         DeliveryResult::TimedOut => {
+            lifecycle.termination.record(WsTermination::InboundBackpressure);
             queue.close();
             lifecycle.close_code.store(1013, Ordering::Release);
             lifecycle.shutdown.cancel();

@@ -57,11 +57,13 @@ type PeerClosedWaiterTestState = (
     ServerContext,
     Arc<Mutex<Option<oneshot::Sender<ClosedFuture>>>>,
     Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    Arc<Mutex<Option<oneshot::Sender<Option<WsTermination>>>>>,
 );
 type ClosedWaiterTestState = (
     WsUpgradePolicy,
     ServerContext,
     Arc<Mutex<Option<oneshot::Sender<ClosedFuture>>>>,
+    Arc<Mutex<Option<oneshot::Sender<Option<WsTermination>>>>>,
 );
 type CloseNotificationTestState = (WsUpgradePolicy, ServerContext, Arc<Mutex<Option<oneshot::Sender<()>>>>);
 type CloseOnlyTestState = (WsUpgradePolicy, ServerContext, Arc<Mutex<Option<oneshot::Sender<()>>>>);
@@ -76,6 +78,7 @@ impl<T> Drop for AbortOnDrop<T> {
 use qubit_web::diagnostic::DiagnosticLayer;
 use qubit_web::ws::WsPolicyError;
 use qubit_web::ws::WsSendError;
+use qubit_web::ws::WsTermination;
 use qubit_web::ws::WsUpgradePolicy;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -905,7 +908,7 @@ fn test_corrected_policy_limits_are_valid() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_read_error_is_delivered_once() {
-    type ResultState = Arc<Mutex<Option<oneshot::Sender<(bool, bool, bool)>>>>;
+    type ResultState = Arc<Mutex<Option<oneshot::Sender<(bool, bool, bool, Option<WsTermination>)>>>>;
 
     async fn upgrade(
         State((policy, context, result_tx)): State<(WsUpgradePolicy, ServerContext, ResultState)>,
@@ -917,13 +920,12 @@ async fn test_read_error_is_delivered_once() {
             let second_is_none = session.recv().await.is_none();
             session.close().await;
             let after_close_is_none = session.recv().await.is_none();
-            let _ =
-                result_tx
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .unwrap()
-                    .send((first_is_error, second_is_none, after_close_is_none));
+            let _ = result_tx.lock().unwrap().take().unwrap().send((
+                first_is_error,
+                second_is_none,
+                after_close_is_none,
+                session.termination(),
+            ));
         })
     }
 
@@ -953,7 +955,7 @@ async fn test_read_error_is_delivered_once() {
         .await
         .expect("handler should report read error delivery")
         .expect("handler result should be sent");
-    assert_eq!(result, (true, true, true));
+    assert_eq!(result, (true, true, true, Some(WsTermination::ReadError)));
     shutdown.cancel();
     let _report = serving.await.unwrap().unwrap();
 }
@@ -966,8 +968,8 @@ async fn test_inbound_byte_budget_closes_connection() {
         ws: WebSocketUpgrade,
     ) -> Response {
         policy.on_upgrade(ws, &headers, context, |session| async move {
-            let _session = session;
-            pending::<()>().await;
+            session.closed().await;
+            assert_eq!(session.termination(), Some(WsTermination::InboundBackpressure));
         })
     }
 
@@ -1003,8 +1005,8 @@ async fn test_inbound_utf8_budget_counts_payload_bytes() {
         ws: WebSocketUpgrade,
     ) -> Response {
         policy.on_upgrade(ws, &headers, context, |session| async move {
-            let _session = session;
-            pending::<()>().await;
+            session.closed().await;
+            assert_eq!(session.termination(), Some(WsTermination::InboundBackpressure));
         })
     }
 
@@ -1208,10 +1210,12 @@ async fn test_session_exits_on_shutdown_and_releases_connection_permit() {
     .await
     .unwrap();
     shutdown.cancel();
-    let (opcode, _) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
+    let (opcode, payload) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
         .unwrap();
     assert_eq!(opcode, 8);
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1001);
+    assert_eq!(&payload[2..], b"server shutdown");
     assert_eq!(
         policy.active_connections(),
         1,
@@ -1295,7 +1299,7 @@ async fn test_peer_close_closes_send_queue_before_handler_resumes() {
 #[tokio_test]
 async fn test_peer_close_notifies_owned_waiter_and_releases_single_capacity() {
     async fn upgrade(
-        State((policy, context, waiter_tx, release_rx)): State<PeerClosedWaiterTestState>,
+        State((policy, context, waiter_tx, release_rx, termination_tx)): State<PeerClosedWaiterTestState>,
         headers: HeaderMap,
         ws: WebSocketUpgrade,
     ) -> Response {
@@ -1309,6 +1313,9 @@ async fn test_peer_close_notifies_owned_waiter_and_releases_single_capacity() {
             if let Some(release) = release {
                 let _ = release.await;
                 session.close().await;
+                if let Some(tx) = termination_tx.lock().unwrap().take() {
+                    let _ = tx.send(session.termination());
+                }
             } else {
                 pending::<()>().await;
             }
@@ -1320,14 +1327,16 @@ async fn test_peer_close_notifies_owned_waiter_and_releases_single_capacity() {
         .unwrap();
     let address = server.local_addr();
     let context = server.context();
-    let policy = WsUpgradePolicy::new().max_connections(1);
+    let policy = WsUpgradePolicy::new().max_connections(1).inbound_queue_limits(1, 1024);
     let (waiter_tx, waiter_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
+    let (termination_tx, termination_rx) = oneshot::channel();
     let app = Router::new().route("/ws", get(upgrade)).with_state((
         policy.clone(),
         context.clone(),
         Arc::new(Mutex::new(Some(waiter_tx))),
         Arc::new(Mutex::new(Some(release_rx))),
+        Arc::new(Mutex::new(Some(termination_tx))),
     ));
     let serving = spawn(
         server
@@ -1352,6 +1361,13 @@ async fn test_peer_close_notifies_owned_waiter_and_releases_single_capacity() {
     let (_second_client, status) = handshake(address, None).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
     release_tx.send(()).unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(1), termination_rx)
+            .await
+            .expect("handler should observe the frozen peer-close result")
+            .unwrap(),
+        Some(WsTermination::PeerClose { code: Some(1000) })
+    );
     serving.abort();
 }
 
@@ -1365,6 +1381,7 @@ async fn test_idle_timeout_notifies_closed_waiter() {
         policy.on_upgrade(ws, &headers, context, move |mut session| async move {
             while session.recv().await.is_some() {}
             session.closed().await;
+            assert_eq!(session.termination(), Some(WsTermination::IdleTimeout));
             if let Some(notify) = notify.lock().unwrap().take() {
                 let _ = notify.send(());
             }
@@ -1389,10 +1406,12 @@ async fn test_idle_timeout_notifies_closed_waiter() {
     );
     let (mut client, status) = handshake(address, None).await;
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
-    let (opcode, _) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
+    let (opcode, payload) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
         .await
         .expect("idle timeout should send a Close frame");
     assert_eq!(opcode, 8);
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1001);
+    assert_eq!(&payload[2..], b"idle timeout");
     send_masked_close(&mut client).await;
     timeout(Duration::from_secs(1), notify_rx)
         .await
@@ -1404,7 +1423,7 @@ async fn test_idle_timeout_notifies_closed_waiter() {
 #[tokio_test]
 async fn test_server_shutdown_notifies_owned_closed_waiter() {
     async fn upgrade(
-        State((policy, context, waiter_tx)): State<ClosedWaiterTestState>,
+        State((policy, context, waiter_tx, termination_tx)): State<ClosedWaiterTestState>,
         headers: HeaderMap,
         ws: WebSocketUpgrade,
     ) -> Response {
@@ -1413,7 +1432,12 @@ async fn test_server_shutdown_notifies_owned_closed_waiter() {
             if let Some(waiter_tx) = waiter_tx {
                 let _ = waiter_tx.send(Box::pin(session.closed()));
             }
-            pending::<()>().await;
+            tokio::spawn(async move {
+                session.closed().await;
+                if let Some(tx) = termination_tx.lock().unwrap().take() {
+                    let _ = tx.send(session.termination());
+                }
+            });
         })
     }
 
@@ -1426,10 +1450,12 @@ async fn test_server_shutdown_notifies_owned_closed_waiter() {
     let context = server.context();
     let shutdown = CancellationToken::new();
     let (waiter_tx, waiter_rx) = oneshot::channel();
+    let (termination_tx, termination_rx) = oneshot::channel();
     let app = Router::new().route("/ws", get(upgrade)).with_state((
         WsUpgradePolicy::new().max_connections(1),
         context,
         Arc::new(Mutex::new(Some(waiter_tx))),
+        Arc::new(Mutex::new(Some(termination_tx))),
     ));
     let serving = spawn(
         server
@@ -1443,10 +1469,23 @@ async fn test_server_shutdown_notifies_owned_closed_waiter() {
         .expect("handler should publish an owned waiter")
         .unwrap();
     shutdown.cancel();
-    let _ = timeout(Duration::from_secs(1), read_server_frame(&mut client)).await;
+    let (opcode, payload) = timeout(Duration::from_secs(1), read_server_frame(&mut client))
+        .await
+        .expect("server shutdown should send a Close frame");
+    assert_eq!(opcode, 8);
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1001);
+    assert_eq!(&payload[2..], b"server shutdown");
+    send_masked_close(&mut client).await;
     timeout(Duration::from_secs(1), ended)
         .await
         .expect("server shutdown should release both I/O resources");
+    assert_eq!(
+        timeout(Duration::from_secs(1), termination_rx)
+            .await
+            .expect("handler task should read the frozen termination snapshot")
+            .unwrap(),
+        Some(WsTermination::ServerShutdown)
+    );
     let _report = timeout(Duration::from_secs(1), serving)
         .await
         .expect("server shutdown should finish")
@@ -1695,8 +1734,8 @@ async fn test_inbound_backpressure_closes_with_try_again_later() {
         ws: WebSocketUpgrade,
     ) -> Response {
         policy.on_upgrade(ws, &headers, context, |session| async move {
-            let _session = session;
-            pending::<()>().await;
+            session.closed().await;
+            assert_eq!(session.termination(), Some(WsTermination::InboundBackpressure));
         })
     }
 

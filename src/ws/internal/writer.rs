@@ -40,6 +40,7 @@ use super::close::send_close_and_wait;
 use super::control_flush_outcome::ControlFlushOutcome;
 use super::flush_outcome::FlushOutcome;
 use super::send_outcome::SendOutcome;
+use crate::ws::WsTermination;
 use crate::ws::internal::CloseQueueOnDrop;
 use crate::ws::ws_send_queue::WsSendQueue;
 use crate::ws::ws_send_queue::message_size;
@@ -170,12 +171,19 @@ pub(in crate::ws) async fn writer_loop<S>(
         termination,
         ..
     } = lifecycle;
-    let _ = (server_shutdown, termination);
     let _close_queue_on_drop = CloseQueueOnDrop::new(queue.clone());
     loop {
         if shutdown.is_cancelled() {
             let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
-            send_close_and_wait(&mut sink, &mut close_ack, close_code.load(Ordering::Acquire), deadline).await;
+            record_server_shutdown(&server_shutdown, &termination);
+            send_close_and_wait(
+                &mut sink,
+                &mut close_ack,
+                close_code.load(Ordering::Acquire),
+                deadline,
+                &termination,
+            )
+            .await;
             return;
         }
         let message = loop {
@@ -187,7 +195,8 @@ pub(in crate::ws) async fn writer_loop<S>(
                 biased;
                 _ = shutdown.cancelled() => {
                     let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
-                    send_close_and_wait(&mut sink, &mut close_ack, close_code.load(Ordering::Acquire), deadline).await;
+                    record_server_shutdown(&server_shutdown, &termination);
+                    send_close_and_wait(&mut sink, &mut close_ack, close_code.load(Ordering::Acquire), deadline, &termination).await;
                     return;
                 }
                 _ = &mut close_ack => {
@@ -215,15 +224,18 @@ pub(in crate::ws) async fn writer_loop<S>(
                         ControlFlushOutcome::Flushed(FlushOutcome::Flushed) => {}
                         ControlFlushOutcome::Flushed(FlushOutcome::Cancelled) => {
                             let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
-                            send_close_and_wait(&mut sink, &mut close_ack, close_code.load(Ordering::Acquire), deadline).await;
+                            record_server_shutdown(&server_shutdown, &termination);
+                            send_close_and_wait(&mut sink, &mut close_ack, close_code.load(Ordering::Acquire), deadline, &termination).await;
                             return;
                         }
                         ControlFlushOutcome::Flushed(FlushOutcome::Failed) => {
+                            termination.record(WsTermination::WriteError);
                             tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "flush");
                             shutdown.cancel();
                             return;
                         }
                         ControlFlushOutcome::Flushed(FlushOutcome::TimedOut) => {
+                            termination.record(WsTermination::WriteTimeout);
                             queue.close();
                             let _ = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
                             shutdown.cancel();
@@ -236,6 +248,7 @@ pub(in crate::ws) async fn writer_loop<S>(
         let Some(message) = message else { continue };
         let message_bytes = message_size(&message);
         if matches!(message, Message::Close(_)) {
+            record_local_close(&server_shutdown, &termination);
             // A queued application Close starts the protocol close phase when
             // the writer reaches it. Reject later sends immediately and have
             // the reader use the same absolute deadline while waiting for the
@@ -256,6 +269,7 @@ pub(in crate::ws) async fn writer_loop<S>(
                     tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "flush");
                 }
             } else if send_failed {
+                termination.record(WsTermination::WriteError);
                 tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "send");
             }
             return;
@@ -275,6 +289,7 @@ pub(in crate::ws) async fn writer_loop<S>(
         match sent {
             SendOutcome::Sent => {}
             SendOutcome::SinkError => {
+                termination.record(WsTermination::WriteError);
                 tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "send");
                 let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
                 shutdown.cancel();
@@ -296,16 +311,39 @@ pub(in crate::ws) async fn writer_loop<S>(
             }
             SendOutcome::Shutdown => {
                 let deadline = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
-                send_close_and_wait(&mut sink, &mut close_ack, close_code.load(Ordering::Acquire), deadline).await;
+                record_server_shutdown(&server_shutdown, &termination);
+                send_close_and_wait(
+                    &mut sink,
+                    &mut close_ack,
+                    close_code.load(Ordering::Acquire),
+                    deadline,
+                    &termination,
+                )
+                .await;
                 return;
             }
             SendOutcome::TimedOut => {
+                termination.record(WsTermination::WriteTimeout);
                 queue.close();
                 let _ = get_close_deadline(&close_deadline, server_deadline.as_ref(), shutdown_timeout);
                 shutdown.cancel();
                 return;
             }
         }
+    }
+}
+
+fn record_server_shutdown(server_shutdown: &CancellationToken, termination: &super::TerminationState) {
+    if server_shutdown.is_cancelled() {
+        termination.record(WsTermination::ServerShutdown);
+    }
+}
+
+fn record_local_close(server_shutdown: &CancellationToken, termination: &super::TerminationState) {
+    if server_shutdown.is_cancelled() {
+        termination.record(WsTermination::ServerShutdown);
+    } else {
+        termination.record(WsTermination::LocalClose);
     }
 }
 
@@ -364,6 +402,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::Barrier;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -403,10 +442,40 @@ mod tests {
     use crate::ServerOptions;
     use crate::WebServer;
     use crate::ws::WsSendQueue;
+    use crate::ws::WsTermination;
     use crate::ws::WsUpgradePolicy;
     use crate::ws::internal::SessionLifecycle;
     use crate::ws::internal::SessionResources;
+    use crate::ws::internal::TerminationState;
     use crate::ws::ws_send_error::WsSendError;
+
+    #[test]
+    fn test_concurrent_termination_records_freeze_one_first_winner() {
+        let state = Arc::new(TerminationState::default());
+        let barrier = Arc::new(Barrier::new(3));
+        let candidates = [WsTermination::ReadError, WsTermination::WriteError];
+        let workers: Vec<_> = candidates
+            .into_iter()
+            .map(|candidate| {
+                let state = state.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    state.record(candidate);
+                })
+            })
+            .collect();
+        barrier.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let winner = state.candidate().unwrap();
+        assert!(matches!(winner, WsTermination::ReadError | WsTermination::WriteError));
+        state.finalize();
+        state.record(WsTermination::ServerShutdown);
+        assert_eq!(state.snapshot(), Some(winner));
+    }
 
     #[derive(Clone, Default)]
     struct SharedLog(Arc<std::sync::Mutex<Vec<u8>>>);
@@ -609,10 +678,12 @@ mod tests {
             .expect("initial message should be queued");
         let reached_failure = Arc::new(Notify::new());
         let shutdown = CancellationToken::new();
+        let resources = Arc::new(SessionResources::new(permit, session));
+        let termination = resources.termination_state();
         let lifecycle = SessionLifecycle {
             shutdown: shutdown.clone(),
-            server_shutdown: shutdown.clone(),
-            termination: Arc::new(crate::ws::internal::TerminationState::default()),
+            server_shutdown: CancellationToken::new(),
+            termination: termination.clone(),
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1011)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
             server_deadline: None,
@@ -624,7 +695,6 @@ mod tests {
             failed: false,
             notified: reached_failure.clone(),
         };
-        let resources = Arc::new(SessionResources::new(permit, session));
         let (ack_tx, ack_rx) = oneshot::channel();
         let writer = tokio::spawn(
             async move {
@@ -651,6 +721,7 @@ mod tests {
             .expect("writer must exit after sink failure")
             .expect("writer task must not panic");
         assert!(shutdown.is_cancelled(), "writer failure must cancel the session");
+        assert_eq!(termination.snapshot(), Some(WsTermination::WriteError));
         let output = log.contents();
         let failures: Vec<_> = output
             .lines()
@@ -835,16 +906,17 @@ mod tests {
         let notify = queue.notify.clone();
         let writer_notify = notify.clone();
         let shutdown = CancellationToken::new();
+        let resources = Arc::new(SessionResources::new(permit, session));
+        let termination = resources.termination_state();
         let lifecycle = SessionLifecycle {
             shutdown: shutdown.clone(),
-            server_shutdown: shutdown.clone(),
-            termination: Arc::new(crate::ws::internal::TerminationState::default()),
+            server_shutdown: CancellationToken::new(),
+            termination: termination.clone(),
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1000)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
             server_deadline: None,
             shutdown_timeout: Duration::from_secs(1),
         };
-        let resources = Arc::new(SessionResources::new(permit, session));
         let (ack_tx, ack_rx) = oneshot::channel();
         let reached_send = Arc::new(Notify::new());
         let control_flush_started = Arc::new(Notify::new());
@@ -1359,16 +1431,17 @@ mod tests {
             .try_send(Message::binary(vec![1; 128]))
             .expect("message should be queued");
         let shutdown = CancellationToken::new();
+        let resources = Arc::new(SessionResources::new(permit, session));
+        let termination = resources.termination_state();
         let lifecycle = SessionLifecycle {
             shutdown: shutdown.clone(),
-            server_shutdown: shutdown.clone(),
-            termination: Arc::new(crate::ws::internal::TerminationState::default()),
+            server_shutdown: CancellationToken::new(),
+            termination: termination.clone(),
             close_code: Arc::new(std::sync::atomic::AtomicU16::new(1001)),
             close_deadline: Arc::new(std::sync::Mutex::new(None)),
             server_deadline: None,
             shutdown_timeout: Duration::from_millis(100),
         };
-        let resources = Arc::new(SessionResources::new(permit, session));
         let (ack_tx, ack_rx) = oneshot::channel();
         let writer = tokio::spawn({
             let queue = queue.clone();
@@ -1432,6 +1505,7 @@ mod tests {
             .expect("writer should time out without external closure")
             .expect("writer should not panic");
         assert!(shutdown.is_cancelled(), "write timeout cancels the session token");
+        assert_eq!(termination.snapshot(), Some(WsTermination::WriteTimeout));
         assert!(queue.is_empty(), "write timeout releases the in-flight queue charge");
         assert_eq!(
             context.active_sessions(),

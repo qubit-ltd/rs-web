@@ -12,6 +12,8 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::time::Duration;
 
+use super::TerminationState;
+use crate::ws::WsTermination;
 use axum::extract::ws::CloseFrame;
 use axum::extract::ws::Message;
 use axum::http::StatusCode;
@@ -84,12 +86,14 @@ pub(in crate::ws) async fn send_close_and_wait<S>(
     close_ack: &mut oneshot::Receiver<()>,
     code: u16,
     deadline: Instant,
+    termination: &TerminationState,
 ) where
     S: Sink<Message> + Unpin,
 {
-    match timeout_at(deadline, sink.send(server_shutdown_close(code))).await {
+    match timeout_at(deadline, sink.send(shutdown_close(code, termination.candidate()))).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => {
+            termination.record(WsTermination::WriteError);
             tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "send");
             return;
         }
@@ -98,6 +102,7 @@ pub(in crate::ws) async fn send_close_and_wait<S>(
     if matches!(timeout_at(deadline, close_ack).await, Ok(Ok(())))
         && matches!(timeout_at(deadline, sink.flush()).await, Ok(Err(_)))
     {
+        termination.record(WsTermination::WriteError);
         tracing::warn!(event = "websocket_io_failure", direction = "write", operation = "flush");
     }
 }
@@ -112,11 +117,15 @@ pub(in crate::ws) async fn send_close_and_wait<S>(
 /// A close message with a reason corresponding to the selected code.
 #[must_use]
 #[inline]
-fn server_shutdown_close(code: u16) -> Message {
+fn shutdown_close(code: u16, termination: Option<WsTermination>) -> Message {
     Message::Close(Some(CloseFrame {
         code,
         reason: match code {
-            1001 => "server shutdown",
+            1001 => match termination {
+                Some(WsTermination::IdleTimeout) => "idle timeout",
+                Some(WsTermination::ServerShutdown) => "server shutdown",
+                _ => "session closed",
+            },
             1013 => "inbound backpressure",
             _ => "protocol limit",
         }
