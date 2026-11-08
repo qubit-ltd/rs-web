@@ -9,6 +9,8 @@
 
 mod config_options_error;
 mod configured_web;
+mod stream_admission_limits_from_config;
 
 pub use config_options_error::ConfigOptionsError;
 pub use configured_web::ConfiguredWeb;
+pub use stream_admission_limits_from_config::stream_admission_limits_from_config;
