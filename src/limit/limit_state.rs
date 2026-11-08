@@ -21,7 +21,9 @@ use super::http_limits::HttpLimits;
 /// shares that capacity. Each call to [`RequestLimitLayer::new`] creates an
 /// independent domain; use [`RequestLimitLayer::from_state`] with clones of
 /// this state to share capacity across branches. This is not a process-wide
-/// limit, and controller builders retain their own state.
+/// limit. Controller builders create their own state by default; their explicit
+/// shared-state setter can install this state, or a clone, for subsequently
+/// registered Controllers.
 ///
 /// [`RequestLimitLayer::new`]: super::request_limit_layer::RequestLimitLayer::new
 /// [`RequestLimitLayer::from_state`]: super::request_limit_layer::RequestLimitLayer::from_state

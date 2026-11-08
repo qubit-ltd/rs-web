@@ -106,6 +106,67 @@ where
         self
     }
 
+    /// Uses an existing short-request capacity domain for Controllers added
+    /// afterward.
+    ///
+    /// Clone the state to share its body, deadline, and concurrency budgets
+    /// with native Axum routes or another [`ControllerRoutes`] builder. The
+    /// state is captured when [`Self::add`] registers each Controller:
+    /// replacing it later affects only Controllers added afterward. The
+    /// most recently called same-kind setter selects the state for
+    /// subsequent registrations. A separately constructed state remains an
+    /// independent domain, and this short-request domain is independent of
+    /// stream admission.
+    ///
+    /// The concurrency permit covers handler processing and response-body
+    /// streaming. This capacity is not a pool of cumulative request-body bytes
+    /// and does not impose a service-wide absolute deadline.
+    ///
+    /// # Parameters
+    ///
+    /// * `state` - Existing short-request state, usually cloned for native
+    ///   routes using [`crate::RequestLimitLayer::from_state`].
+    ///
+    /// # Returns
+    ///
+    /// This builder with `state` installed for Controllers added afterward.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use axum::Router;
+    /// use axum::routing::get;
+    /// use qubit_web::HttpLimits;
+    /// use qubit_web::RequestLimitLayer;
+    /// use qubit_web::limit::LimitState;
+    /// use qubit_web::mvc::ControllerRoutes;
+    /// use qubit_web::rest_controller;
+    ///
+    /// struct Health;
+    /// #[rest_controller("/health")]
+    /// impl Health {
+    ///     #[get_mapping("")]
+    ///     async fn get(&self) -> &'static str { "ok" }
+    /// }
+    ///
+    /// let state = LimitState::new(HttpLimits::default());
+    /// let controllers = ControllerRoutes::<()>::new()
+    ///     .with_limit_state(state.clone())
+    ///     .add(Arc::new(Health))?
+    ///     .finish();
+    /// let native: Router<()> = Router::new()
+    ///     .route("/native", get(|| async { "ok" }))
+    ///     .layer(RequestLimitLayer::from_state(state));
+    /// let app = controllers.merge(native);
+    /// # let _ = app;
+    /// # Ok::<(), qubit_web::mvc::ControllerRouteError>(())
+    /// ```
+    pub fn with_limit_state(mut self, state: LimitState) -> Self {
+        self.limit_state = state;
+        self
+    }
+
     /// Replaces the default admission budgets for SSE and WebSocket routes
     /// added to this builder afterward.
     ///
@@ -118,6 +179,67 @@ where
     ///   router.
     pub fn with_stream_admission_limits(mut self, limits: StreamAdmissionLimits) -> Self {
         self.stream_state = StreamAdmissionState::new(limits);
+        self
+    }
+
+    /// Uses an existing stream-admission capacity domain for Controllers added
+    /// afterward.
+    ///
+    /// Clone the state to share its body, deadline, and admission capacity with
+    /// native Axum routes or another [`ControllerRoutes`] builder. The state is
+    /// captured when [`Self::add`] registers each Controller: replacing it
+    /// later affects only Controllers added afterward. The most recently
+    /// called same-kind setter selects the state for subsequent
+    /// registrations. A separately constructed state remains independent,
+    /// and stream admission is separate from short-request capacity.
+    ///
+    /// A permit covers request buffering and handler execution up to response
+    /// headers. It is released when headers are produced or the admission
+    /// future is cancelled; it does not count ongoing SSE or WebSocket
+    /// sessions.
+    ///
+    /// # Parameters
+    ///
+    /// * `state` - Existing admission state, usually cloned for native routes
+    ///   using [`crate::StreamAdmissionLayer::from_state`].
+    ///
+    /// # Returns
+    ///
+    /// This builder with `state` installed for Controllers added afterward.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use axum::Router;
+    /// use axum::routing::get;
+    /// use qubit_web::StreamAdmissionLayer;
+    /// use qubit_web::StreamAdmissionLimits;
+    /// use qubit_web::StreamAdmissionState;
+    /// use qubit_web::mvc::ControllerRoutes;
+    /// use qubit_web::rest_controller;
+    ///
+    /// struct Events;
+    /// #[rest_controller("/events")]
+    /// impl Events {
+    ///     #[route("", method = "GET", kind = "sse")]
+    ///     async fn get(&self) -> &'static str { "event" }
+    /// }
+    ///
+    /// let state = StreamAdmissionState::new(StreamAdmissionLimits::default());
+    /// let controllers = ControllerRoutes::<()>::new()
+    ///     .with_stream_admission_state(state.clone())
+    ///     .add(Arc::new(Events))?
+    ///     .finish();
+    /// let native: Router<()> = Router::new()
+    ///     .route("/native-events", get(|| async { "event" }))
+    ///     .layer(StreamAdmissionLayer::from_state(state));
+    /// let app = controllers.merge(native);
+    /// # let _ = app;
+    /// # Ok::<(), qubit_web::mvc::ControllerRouteError>(())
+    /// ```
+    pub fn with_stream_admission_state(mut self, state: StreamAdmissionState) -> Self {
+        self.stream_state = state;
         self
     }
 
