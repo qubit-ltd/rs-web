@@ -47,7 +47,7 @@
 
 SSE 先经过请求接纳，然后由 `SseConnectionPolicy` 预留策略容量并注册 server session。`SessionStream` 持有应用 stream 和 `SseConnectionGuard`；自然结束或响应被丢弃时释放 guard 并取消 producer token。长期 SSE 路由不应套用普通短请求 deadline。取消 token 只是信号，应用 producer 需要主动检查它。
 
-WebSocket upgrade 接纳同样不会在请求体接纳后结束。策略预留 session 槽位并注册托管 session。`SessionResources` 在 I/O 工作间共享 policy permit 和 session guard。reader 处理 peer 帧与 close 状态；writer 从出站队列取数据并执行 sink send/flush。每次普通出站发送和通知触发的 flush 都有独立的绝对 `write_timeout` deadline；入站活动和无关通知不会重置它。`idle_timeout` 仍是同时设置入站与写入期限的兼容入口，之后调用读或写 setter 可分别覆盖对应值，最终配置取决于 setter 顺序。Close 流程使用独立的关闭 deadline，因此普通写期限不是所有 Close 操作的期限。配置细节见[用户指南中的入站与写入期限](user_guide.zh_CN.md#分别设置入站与写入期限)。最后一个 I/O 资源引用释放时才归还容量和 session 注册。队列插入成功仅表示数据进入本地队列，不表示 socket 写入完成或对端收到。peer Close、writer 完成、server 取消和队列关闭是不同事件；见 `src/ws/internal/reader.rs`、`writer.rs`、`close.rs` 与 `session_lifecycle.rs`。
+WebSocket upgrade 接纳同样不会在请求体接纳后结束。策略预留 session 槽位并注册托管 session。`SessionResources` 在 I/O 工作间共享 policy permit 和 session guard。reader 处理 peer 帧与 close 状态；writer 从出站队列取数据并执行 sink send/flush。每次普通出站发送和通知触发的 flush 都有独立的绝对 `write_timeout` deadline；入站活动和无关通知不会重置它。`idle_timeout` 同时设置入站等待与普通写操作期限；之后调用 `write_timeout` 仅覆盖写期限，再次调用 `idle_timeout` 则重新设置两者。目前没有仅修改入站期限的独立 setter。Close 流程使用独立的关闭 deadline，因此普通写期限不是所有 Close 操作的期限。配置细节见[用户指南中的入站与写入期限](user_guide.zh_CN.md#分别设置入站与写入期限)。最后一个 I/O 资源引用释放时才归还容量和 session 注册。队列插入成功仅表示数据进入本地队列，不表示 socket 写入完成或对端收到。peer Close、writer 完成、server 取消和队列关闭是不同事件；见 `src/ws/internal/reader.rs`、`writer.rs`、`close.rs` 与 `session_lifecycle.rs`。
 
 ## Server 关闭时序
 
