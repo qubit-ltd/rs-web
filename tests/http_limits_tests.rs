@@ -1091,8 +1091,18 @@ async fn test_unpolled_response_body_deadline_releases_capacity_and_drops_source
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
-async fn test_dropping_response_near_deadline_drops_source_once_and_releases_capacity() {
+#[tokio::test(start_paused = true)]
+async fn test_response_drop_before_deadline_releases_capacity_once() {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = LimitSharedWriter(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::INFO)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let _guard = tracing::dispatcher::set_default(&dispatch);
     let drops = Arc::new(AtomicUsize::new(0));
     let body_drops = drops.clone();
     let limits = HttpLimits::default()
@@ -1108,34 +1118,142 @@ async fn test_dropping_response_near_deadline_drops_source_once_and_releases_cap
                 async move { Response::new(Body::new(DropObservedResponse(drops))) }
             }),
         )
-        .route("/ok", post(|| async { "ok" }))
-        .layer(RequestLimitLayer::new(limits));
+        .route("/ok", post(|| async { Body::empty() }))
+        .layer(RequestLimitLayer::new(limits))
+        .layer(DiagnosticLayer::with_body_diagnostics());
 
-    let first = app
+    let started = tokio::time::Instant::now();
+    let deadline = started + std::time::Duration::from_millis(50);
+    let response = app
         .clone()
         .oneshot(Request::post("/stalled").body(Body::empty()).unwrap())
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(45)).await;
-    drop(first);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while drops.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the application body must be dropped by timeout or response drop");
+    tokio::time::advance(std::time::Duration::from_millis(49)).await;
+    assert!(tokio::time::Instant::now() < deadline);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    drop(response);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 
-    let next = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        app.oneshot(Request::post("/ok").body(Body::empty()).unwrap()),
-    )
-    .await
-    .expect("timeout or response drop must release capacity")
-    .unwrap();
+    let next = app
+        .oneshot(Request::post("/ok").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     assert_eq!(next.status(), StatusCode::OK);
+    drop(next);
+
+    tokio::time::advance(std::time::Duration::from_millis(2)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    let stalled_events: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("event=\"response_body_end\"") && line.contains("route=/stalled"))
+        .collect();
+    assert_eq!(stalled_events.len(), 1, "expected one stalled-body event: {log}");
+    assert!(
+        stalled_events[0].contains("outcome=\"dropped\""),
+        "wrong outcome: {log}"
+    );
+    assert!(
+        !stalled_events[0].contains("outcome=\"timeout\""),
+        "drop must win: {log}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_response_timeout_before_drop_releases_capacity_once() {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = LimitSharedWriter(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::INFO)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let body_drops = drops.clone();
+    let limits = HttpLimits::default()
+        .with_max_concurrent_requests(1)
+        .unwrap()
+        .with_request_timeout(std::time::Duration::from_millis(50))
+        .unwrap();
+    let app = Router::new()
+        .route(
+            "/stalled",
+            post(move || {
+                let drops = body_drops.clone();
+                async move { Response::new(Body::new(DropObservedResponse(drops))) }
+            }),
+        )
+        .route("/ok", post(|| async { Body::empty() }))
+        .layer(RequestLimitLayer::new(limits))
+        .layer(DiagnosticLayer::with_body_diagnostics());
+
+    let started = tokio::time::Instant::now();
+    let deadline = started + std::time::Duration::from_millis(50);
+    let mut response = app
+        .clone()
+        .oneshot(Request::post("/stalled").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+    tokio::time::advance(std::time::Duration::from_millis(51)).await;
+    assert!(tokio::time::Instant::now() > deadline);
+    // This is only a failure bound; virtual time above establishes that the
+    // request deadline has passed. A wall-clock bound keeps a broken watcher
+    // from hanging while the paused runtime repeatedly schedules this task.
+    let watcher_limit = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while drops.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < watcher_limit,
+            "deadline watcher did not drop the application body"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+    let next = app
+        .oneshot(Request::post("/ok").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(next.status(), StatusCode::OK);
+    drop(next);
+
+    let first_error = std::future::poll_fn(|context| Pin::new(response.body_mut()).poll_frame(context))
+        .await
+        .expect("the timeout error should be emitted once")
+        .unwrap_err();
+    assert!(first_error.to_string().contains("deadline"));
+    assert!(
+        std::future::poll_fn(|context| Pin::new(response.body_mut()).poll_frame(context))
+            .await
+            .is_none()
+    );
+    drop(response);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+    let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    let stalled_events: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("event=\"response_body_end\"") && line.contains("route=/stalled"))
+        .collect();
+    assert_eq!(stalled_events.len(), 1, "expected one stalled-body event: {log}");
+    assert!(
+        stalled_events[0].contains("outcome=\"timeout\""),
+        "wrong outcome: {log}"
+    );
+    assert!(
+        !stalled_events[0].contains("outcome=\"dropped\""),
+        "timeout must win: {log}"
+    );
 }
 
 #[test]
