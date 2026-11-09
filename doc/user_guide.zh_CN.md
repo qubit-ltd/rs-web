@@ -559,7 +559,13 @@ accept 遇到 socket I/O 错误时，`InvalidInput`、`PermissionDenied`、`Unsu
 
 `request_header_timeout` 默认 10 秒，用于限制 HTTP/1 请求头；零值或 Tokio 无法通过 `Instant::checked_add` 表示的期限（包括 `Duration::MAX`）会以 `WebServerError::InvalidConfig` 拒绝。SSE keep-alive interval 也必须是正数且可表示。未匹配请求的诊断日志只使用固定标记 `<unmatched>`，不会记录 URI、查询参数或秘密信息。HTTPS TLS 握手也沿用该期限。`transport_idle_timeout` 默认 30 秒，在 handler 和响应体都不活跃时回收空闲 HTTP/1/2 连接。活跃请求停滞不会由空闲期限中断；此类情况应使用路由限额或部署层策略处理。`HttpLimits::with_request_timeout` 与传输空闲期限不同：Controller `short` 路由默认使用该请求期限，原生 Axum 路由则只有显式安装 `RequestLimitLayer` 后才使用。
 
-WebSocket 的 `idle_timeout` 必须为正且能构造 Tokio deadline；不可表示时返回 `WsPolicyError::IdleTimeoutTooLarge`；不可表示的写期限返回 `WsPolicyError::WriteTimeoutTooLarge`。穷尽匹配 `WsPolicyError` 的调用方需处理这两个分支或使用兜底分支。每次普通出站发送及通知触发的 flush 使用独立的 `write_timeout` 完成期限（默认 60 秒）；期限从操作开始计算，入站消息和无关队列通知不会重置它。该期限限制操作等待，不检测字节级进度。超时后 writer 关闭队列、设置共享关闭 deadline、取消会话并丢弃 sink，不会重试该 sink，也不保证背压时 Close 帧能送达。需要容忍慢读端时，可单独提高 `write_timeout`，不会因此延长入站等待；`idle_timeout` 仍是同时设置读写期限的兼容入口。`queue_limits` 配置出站队列；`inbound_queue_limits(messages, bytes)` 单独配置入站队列及每连接累计 payload 字节预算，默认是 64 条排队消息和 1 MiB。出站字节预算按排队及 in-flight 消息的可见 payload 字节计费，直到每次发送完成；`Close(Some(_))` 还会计入两字节关闭码。短小的共享 `Bytes` 切片可能仍持有较大的底层分配；队列、分配器、sink 和传输缓冲也会增加额外内存。因此该预算不限制底层存储大小或进程 RSS。若需要更紧的存储边界，可在入队前创建紧凑的 `Bytes`；队列移动消息，不会复制。reader 等待通道空位时最多另持有一条消息，该 payload 也计入相同字节预算。通道满时最多等待至 `idle_timeout`，然后以关闭码 `1013`（原因 `inbound backpressure`）关闭；若剩余字节预算不足以容纳消息，则立即以 `1013` 关闭。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，每个活跃连接还最多有一条 1 MiB 协议重组消息。该估算不含分配开销和应用自有内存，也不限制 I/O 结束后仍被 handler 或 session 保留的内存。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应定期读取消息，再将较长处理交给应用任务。传输读取错误通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；显式 `close()` 会清除待交付错误，此后 `recv()` 返回 `None`。宿主停服可能直接取消 handler，不保证交付该错误。`WsSession::try_send` 成功只表示消息进入出站队列，不保证网络已送达。准入错误按 `Closed`、`InvalidCloseCode`、`MessageTooLarge`、`Backpressure` 的顺序检查。`InvalidCloseCode` 表示服务端不能发送该 Close code（包括保留码和仅客户端可用的 1010），属于输入问题，修正后再发送；原消息不应按背压重试。`MessageTooLarge` 表示消息超过总字节预算或固定控制帧限制；`Backpressure` 表示当前条数或剩余字节容量不足。Ping/Pong payload 超过 125 字节、Close reason 超过 123 个 UTF-8 字节都会返回 `MessageTooLarge`；长度按字节计算，增大队列预算不能放宽这些协议限制。应用可按策略对 `Backpressure` 退避。普通数据消息超限时可缩小、拆成应用层消息或拒绝；控制帧内容超限时应缩短 payload 或 reason，不要分片控制帧。同一消息的 `MessageTooLarge` 不会因重试恢复；`Closed` 后停止发送。新增 `InvalidCloseCode` 会影响穷尽匹配 `WsSendError` 的代码：增加该分支并修正 Close code，不要重试原输入。旧 `try_send` 方法签名不变，但拒绝时仍会丢弃消息；若应用需要保留拒绝消息，可改用 `WsSession::try_send_recoverable` 或 `WsSendQueue::try_send_recoverable`。同一条 `MessageTooLarge` 消息无法靠重试恢复；原先将单条超限消息断言为 `Backpressure` 的测试也需更新。对端或会话关闭时会返回 `WsSendError::Closed`（匹配变体时为 `Closed`）。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。通过 `try_send` 排队的 Close 会保留其关闭码和原因；writer 开始处理该帧时会关闭出站队列，后续发送返回 `Closed`，其后的排队消息可能丢弃，等待对端确认的时间受共享关闭 deadline 限制。writer 取出该 Close 前成功的 `try_send` 仍只表示入队。
+### 入站容量与关闭码 1013
+
+`inbound_queue_limits(messages, bytes)` 配置独立的入站队列及每连接累计 payload 字节预算，默认每连接最多排队 64 条消息和 1 MiB。reader 等待通道空位时最多另持有一条消息，该 payload 也计入相同字节预算。通道满时最多等待至 `idle_timeout`，然后以关闭码 `1013`（原因 `inbound backpressure`）关闭；若剩余字节预算不足以容纳消息，则立即以 `1013` 关闭。128 个活跃默认连接的排队/待交付 payload 约为 128 MiB，每个活跃连接还最多有一条 1 MiB 协议重组消息。该估算不含分配开销和应用自有内存，也不限制 I/O 结束后仍被 handler 或 session 保留的内存。`WsSession::recv()` 将消息所有权交给应用后，该消息不再计入队列预算。应定期读取消息，再将较长处理交给应用任务。
+
+### 出站预算与有界重试
+
+`queue_limits` 配置独立的出站队列，默认最多排队 64 条消息和 1 MiB。出站字节预算按排队及 in-flight 消息的可见 payload 字节计费，直到每次发送完成；`Close(Some(_))` 还会计入两字节关闭码。短小的共享 `Bytes` 切片可能仍持有较大的底层分配；队列、分配器、sink 和传输缓冲也会增加额外内存。因此该预算不限制底层存储大小或进程 RSS。若需要更紧的存储边界，可在入队前创建紧凑的 `Bytes`；队列移动消息，不会复制。`WsSession::try_send` 成功只表示消息进入出站队列，不保证网络送达。
 
 如果队列拒绝消息后应用仍需拿回该消息，可使用 `try_send_recoverable`，再从 `WsSendFailure` 取出原消息。只对 `Backpressure` 考虑重试，并同时设置最大次数和截止时间；还要限制留待重试的消息条数或总字节数。遇到 `Closed` 就停止发送；遇到 `InvalidCloseCode` 则先改正 code。不要在队列满时忙轮询，也不要把拒绝消息无限堆在应用缓冲区。该 API 不会等待容量空出，也不提供容量通知；入队成功仍不等于网络送达。
 
@@ -577,9 +583,17 @@ assert_eq!(message.into_text().unwrap(), "retryable");
 
 这段代码只演示取回消息，不包含重试调度。有限重试次数、截止时间以及待重试消息预算都由应用决定。
 
+### 控制帧与不可重试的拒绝
+
+准入错误按 `Closed`、`InvalidCloseCode`、`MessageTooLarge`、`Backpressure` 的顺序检查。`InvalidCloseCode` 表示服务端不能发送该 Close code（包括保留码和仅客户端可用的 1010）；应修正 code，不要按背压重试原消息。`MessageTooLarge` 表示消息超过总字节预算或固定控制帧限制；`Backpressure` 表示当前条数或剩余字节容量不足。Ping/Pong payload 超过 125 字节、Close reason 超过 123 个 UTF-8 字节都会返回 `MessageTooLarge`；长度按字节计算，增大队列预算不能放宽这些协议限制。应用可按策略对 `Backpressure` 退避。普通数据消息超限时可缩小、拆成应用层消息或拒绝；控制帧内容超限时应缩短 payload 或 reason，不要分片控制帧。同一消息的 `MessageTooLarge` 不会因重试恢复；对端或会话关闭后会返回 `WsSendError::Closed`，此后停止发送。新增 `InvalidCloseCode` 会影响穷尽匹配 `WsSendError` 的代码：增加该分支并修正 Close code，不要重试原输入。旧 `try_send` 方法签名不变，但拒绝时仍会丢弃消息；若应用需要保留拒绝消息，可改用 `WsSession::try_send_recoverable` 或 `WsSendQueue::try_send_recoverable`。原先将单条超限消息断言为 `Backpressure` 的测试也需更新。
+
+### 关闭处理与读取错误交付
+
+传输读取错误通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；显式 `close()` 会清除待交付错误，此后 `recv()` 返回 `None`。宿主停服可能直接取消 handler，不保证交付该错误。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。通过 `try_send` 排队的 Close 会保留其关闭码和原因；writer 开始处理该帧时会关闭出站队列，后续发送返回 `Closed`，其后的排队消息可能丢弃，等待对端确认的时间受共享关闭 deadline 限制。writer 取出该 Close 前成功的 `try_send` 仍只表示入队。
+
 ### 分别设置入站与写入期限
 
-`idle_timeout` 为兼容旧调用，仍会同时设置读帧等待、入站通道交付、`WsSession::recv()` 等待和普通写操作期限。需要分开配置时，先调用 `idle_timeout`，再调用 `write_timeout`；如果顺序相反，后调用的 `idle_timeout` 会把写期限也改回相同值。两个默认值都是 60 秒，必须为正且能构造 Tokio deadline。Close 握手仍受共享停服期限约束。
+`idle_timeout` 为兼容旧调用，仍会同时设置读帧等待、入站通道交付、`WsSession::recv()` 等待和普通写操作期限。需要分开配置时，先调用 `idle_timeout`，再调用 `write_timeout`；如果顺序相反，后调用的 `idle_timeout` 会把写期限也改回相同值。入站 `idle_timeout` 和出站 `write_timeout` 各自默认 60 秒，必须为正且能构造 Tokio deadline。每次普通出站发送及通知触发的 flush 都使用一个从操作开始计算的 `write_timeout` 完成期限；入站消息和无关队列通知不会重置期限。它限制操作等待，不检测字节级进度。超时后 writer 关闭队列、设置共享关闭 deadline、取消会话并丢弃 sink，不会重试该 sink，也不保证 Close 帧能送达。Close 握手仍受共享停服期限约束。期限依赖 Tokio 协作式调度，不能中止不让出执行权的同步代码、`spawn_blocking` 工作或应用自行启动的任务。
 
 ```rust
 use std::time::Duration;
@@ -591,7 +605,7 @@ let policy = WsUpgradePolicy::new()
 policy.validate().expect("valid WebSocket policy");
 ```
 
-这个顺序表示入站等待最长十分钟，普通写操作最长十秒。零值返回 `WsPolicyError::ZeroLimit`，不可表示的写期限返回 `WsPolicyError::WriteTimeoutTooLarge`。新增错误变体会影响穷尽匹配 `WsPolicyError` 的代码；请增加对应分支。期限依赖 Tokio 协作式调度，只约束操作等待，不检测字节级进度，也不能中止不让出执行权的同步代码、`spawn_blocking` 工作或应用自行启动的任务。
+这个顺序表示入站等待最长十分钟，普通写操作最长十秒。`Duration::ZERO` 返回 `WsPolicyError::ZeroLimit`；不可表示的入站期限返回 `WsPolicyError::IdleTimeoutTooLarge`，不可表示的写期限返回 `WsPolicyError::WriteTimeoutTooLarge`。新增错误变体会影响穷尽匹配 `WsPolicyError` 的代码；请增加对应分支。旧 `idle_timeout` 调用及其组合行为保持源码兼容。
 
 ### 读取最终终止原因
 
@@ -617,7 +631,7 @@ tokio::select! {
 
 `process_next_item` 和 `apply_result` 由应用实现。`ended` 就绪后调用 `close()` 会清理尚未读取的入站消息。该通知只表示两个 I/O 任务已释放资源，不表示 Close 帧已送达、handler 或业务工作已完成，也不会停止应用另行启动的任务。必须继续的工作应先接管所需输入，再由应用独立管理。
 
-`WsUpgradePolicy::validate()` 按最终配置字段值校验；同一 setter 后续设置的值会覆盖此前的值。`max_connections` 和 `inbound_queue_limits` 的消息条数范围都是 `1..=tokio::sync::Semaphore::MAX_PERMITS`：零值返回 `WsPolicyError::ZeroLimit`；连接数超过上限返回 `WsPolicyError::ConnectionLimitTooLarge`，入站条数超过上限返回 `WsPolicyError::InboundQueueLimitTooLarge`。入站字节预算也必须为正。穷尽匹配 `WsPolicyError` 的调用方应增加 `InboundQueueLimitTooLarge` 分支。无效策略会使 `on_upgrade` 返回 HTTP 500，不能完成升级。例如，先设为零、再修正为 1 后，校验通过：
+`WsUpgradePolicy::validate()` 按最终配置字段值校验；同一 setter 后续设置的值会覆盖此前的值。`max_connections` 和 `inbound_queue_limits` 的消息条数范围都是 `1..=tokio::sync::Semaphore::MAX_PERMITS`：零值返回 `WsPolicyError::ZeroLimit`；连接数超过上限返回 `WsPolicyError::ConnectionLimitTooLarge`，入站条数超过上限返回 `WsPolicyError::InboundQueueLimitTooLarge`。入站字节预算也必须为正。穷尽匹配 `WsPolicyError` 的调用方应增加 `InboundQueueLimitTooLarge`、`IdleTimeoutTooLarge` 和 `WriteTimeoutTooLarge` 分支，或使用兜底分支。无效策略会使 `on_upgrade` 返回 HTTP 500，不能完成升级。例如，先设为零、再修正为 1 后，校验通过：
 
 ```rust,ignore
 assert!(WsUpgradePolicy::new()
@@ -627,6 +641,8 @@ assert!(WsUpgradePolicy::new()
     .is_ok());
 ```
 
+### 按症状排查
+
 | 现象 | 检查方式 |
 | --- | --- |
 | 过载时客户端等待或连接失败 | 检查该实例的 transport 额度和系统 backlog。accept 之前不会有保证的 503。 |
@@ -635,10 +651,12 @@ assert!(WsUpgradePolicy::new()
 | 慢客户端没有立即观察到短响应超时 | 响应头发出后，期限会释放应用响应体和短请求许可；只有传输再次轮询时才能返回 body error。启用的响应体诊断事件会在期限到达时发出，无需等待再次轮询。它不会更改响应状态或关闭连接；传输连接由独立策略管理。 |
 | WS 建立后 `active_sessions()` 仍为 0 | 调用 `WsUpgradePolicy::on_upgrade` 并传入服务的 `ServerContext`；原生 Axum upgrade 不属于受管会话统计。 |
 | `WsUpgradePolicy::validate()` 报告连接数或入站队列配置无效 | 检查最终的 `max_connections` 和 `inbound_queue_limits`：零值对应 `WsPolicyError::ZeroLimit`；连接数超上限对应 `ConnectionLimitTooLarge`；入站条数超 `tokio::sync::Semaphore::MAX_PERMITS` 对应 `InboundQueueLimitTooLarge`；入站字节预算必须为正。修正设置后重新校验；无效策略不能升级。 |
-| 入站负载下 WebSocket 以 `1013` 关闭 | 应用可能没有及时调用 `WsSession::recv()`，也可能已用尽累计入站 payload 预算。默认每连接最多排队 64 条消息和 1 MiB；通道满时等待至 `idle_timeout`，字节预算不足时立即关闭。使用 `inbound_queue_limits` 调整字节预算，持续读取消息，并在接收后将较长处理交给应用任务。 |
+| 入站负载下 WebSocket 以 `1013` 关闭 | [入站容量与关闭码 1013](#入站容量与关闭码-1013)：应用可能没有及时调用 `WsSession::recv()`，也可能已用尽累计入站 payload 预算。默认每连接最多排队 64 条消息和 1 MiB；通道满时等待至 `idle_timeout`，字节预算不足时立即关闭。使用 `inbound_queue_limits` 调整字节预算，持续读取消息，并在接收后将较长处理交给应用任务。 |
+| WebSocket 写入停滞 | [分别设置入站与写入期限](#分别设置入站与写入期限)：普通写操作由 `write_timeout` 限时；不保证 Close 送达。 |
+| WebSocket 发送被拒绝 | [控制帧与不可重试的拒绝](#控制帧与不可重试的拒绝)及[出站预算与有界重试](#出站预算与有界重试)：区分永久输入/大小错误与临时 `Backpressure`。 |
 | 配置解析失败 | 查看 `ConfigOptionsError::field()`，检查地址、正数限额/期限、处于 `1..=tokio::sync::Semaphore::MAX_PERMITS` 的并发容量和整数类型。容量错误会指向 `http.max_concurrent_requests` 或 `transport.max_connections`，错误文本不会包含配置值。 |
 | HTTPS/WSS 无法连接 | 检查证书链、私钥匹配和客户端信任；TLS 阶段失败时请求还没进入 HTTP 路由。 |
-| 关闭时间超过预期 | 检查 shutdown timeout，并确认 handler/流生产者会响应取消。 |
+| 关闭或等待对端确认超过预期 | [关闭处理与读取错误交付](#关闭处理与读取错误交付)： 检查 shutdown timeout，并确认 handler/流生产者会响应取消。 |
 
 `WebServerError` 通过 `std::error::Error::source()` 暴露保留的 socket 错误。默认 `Display` 和 `Debug` 只显示错误类别；需要排查绑定或 accept 故障时，再由调用方显式检查 `source()`。
 

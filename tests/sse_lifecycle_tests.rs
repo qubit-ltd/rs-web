@@ -57,6 +57,16 @@ impl Stream for EventStream {
     }
 }
 
+struct FailingEvents;
+
+impl Stream for FailingEvents {
+    type Item = Result<Event, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(Some(Err(std::io::Error::other("synthetic SSE source failure"))))
+    }
+}
+
 struct PendingEvents;
 
 impl Stream for PendingEvents {
@@ -107,6 +117,34 @@ async fn raw_request(addr: SocketAddr, path: &str) -> String {
     let mut response = String::new();
     stream.read_to_string(&mut response).await.expect("read response");
     response
+}
+
+#[tokio_test]
+async fn test_sse_source_error_releases_resources_after_body_drop() {
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let context = server.context();
+    let policy = SseConnectionPolicy::new(NonZeroUsize::new(1).unwrap());
+    let connection = policy.begin(&context).expect("reserve SSE slot");
+    let cancellation = connection.cancellation_token();
+    assert_eq!(policy.active_connections(), 1);
+    assert_eq!(context.active_sessions(), 1);
+    let mut body = connection.into_sse(FailingEvents).into_response().into_body();
+    let frame = timeout(Duration::from_secs(1), poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)))
+        .await
+        .expect("source failure is observable");
+    assert!(matches!(frame, Some(Err(_))));
+    drop(body);
+    assert!(cancellation.is_cancelled());
+    assert_eq!(policy.active_connections(), 0);
+    assert_eq!(context.active_sessions(), 0);
+    let replacement = policy.begin(&context).expect("failed response returned its slot");
+    assert_eq!(policy.active_connections(), 1);
+    assert_eq!(context.active_sessions(), 1);
+    drop(replacement);
+    assert_eq!(policy.active_connections(), 0);
+    assert_eq!(context.active_sessions(), 0);
 }
 
 #[tokio_test]
