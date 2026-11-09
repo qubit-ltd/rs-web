@@ -1,0 +1,10 @@
+{
+  "scenarios": [
+    {"id":"readme-en-quick-start","manifest":{"source":"README.md","heading":"Install","language":"toml","ordinal":1},"code":{"source":"README.md","heading":"Quick start","language":"rust","ordinal":1},"wrapper":"binary"},
+    {"id":"readme-zh-quick-start","manifest":{"source":"README.zh_CN.md","heading":"安装","language":"toml","ordinal":1},"code":{"source":"README.zh_CN.md","heading":"快速开始","language":"rust","ordinal":1},"wrapper":"binary"},
+    {"id":"guide-en-prompt-stream","manifest":{"source":"doc/user_guide.md","heading":"Prepare settings and start the listener","language":"toml","ordinal":1},"code":{"source":"examples/prompt_stream.rs","whole_file":true},"wrapper":"binary"},
+    {"id":"guide-zh-prompt-stream","manifest":{"source":"doc/user_guide.zh_CN.md","heading":"配置并启动监听器","language":"toml","ordinal":1},"code":{"source":"examples/prompt_stream.rs","whole_file":true},"wrapper":"binary"},
+    {"id":"guide-en-extractor-budgets","manifest":{"source":"doc/user_guide.md","heading":"Prepare settings and start the listener","language":"toml","ordinal":1},"code":{"source":"doc/user_guide.md","heading":"Combine Axum extractor limits with request budgets","language":"rust","ordinal":1,"allow_ignore":true},"wrapper":"budget-router"},
+    {"id":"guide-zh-extractor-budgets","manifest":{"source":"doc/user_guide.zh_CN.md","heading":"配置并启动监听器","language":"toml","ordinal":1},"code":{"source":"doc/user_guide.zh_CN.md","heading":"原生提取器与请求体预算要分别配置","language":"rust","ordinal":1,"allow_ignore":true},"wrapper":"budget-router"}
+  ]
+}
