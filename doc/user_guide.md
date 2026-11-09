@@ -209,6 +209,10 @@ The short-request and stream-admission states remain independent capacity domain
 
 `ControllerRoutes::add` checks the complete set of Controller route declarations before registering them. It returns `ControllerRouteError` for duplicate method/path pairs, invalid paths, more than 25 non-wildcard parameters, or matching-template conflicts such as parameter aliases and overlapping wildcards. A final catch-all parameter does not count toward the limit. Different methods can share one template, and `finish()` returns the `Router` directly. Use Axum capture syntax such as `/{id}` and `/{*rest}`; legacy `/:id` and `/*rest` segments are rejected. This check covers declarations collected by the builder; later merges with native Axum routers retain Axum's own behavior. `rest_controller` also supports distinct Controller types with the same terminal type name in one module.
 
+### Keep route markers inside Controller impls
+
+`get_mapping`, the HTTP verb aliases such as `get`, and `route` are consumed by the enclosing `#[rest_controller("/...")]` attribute on an inherent impl. Using one on a method outside that Controller impl or on a free function is a compile-time error; it does not register a route. To expose a route, move the method into a `rest_controller` impl and mount the Controller with `ControllerRoutes`. Remove the route marker from a method or function that is only a helper.
+
 ### Give Controllers one root state type
 
 Controller methods extract state directly as `State<AppState>`. Every enabled method on a Controller that uses `State` must use the same state type, and the macro compares the written types without resolving aliases or renamed imports. It does not combine several child states into an inferred root state through `FromRef`. Keep the values the Controller needs on one cloneable root state and read them from its fields:

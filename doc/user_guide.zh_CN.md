@@ -223,6 +223,10 @@ Ok(())
 
 `ControllerRoutes::add` 会在注册前检查当前 Controller 的全部路由声明。重复的 method/path、无效路径、超过 25 个普通参数或匹配模板冲突（例如参数别名和重叠通配符）会返回 `ControllerRouteError`；末尾 catch-all 不计入数量。不同 method 可以共用同一模板，`finish()` 直接返回 `Router`。路径捕获请使用 Axum 语法，例如 `/{id}` 和 `/{*rest}`；旧式 `/:id`、`/*rest` 会被拒绝。检查范围是 builder 收集的声明；之后与原生 Axum Router 合并仍遵循 Axum 自身行为。`rest_controller` 也支持在同一模块中装配末段名称相同、但实际类型不同的 Controller。
 
+### 路由标记必须放在 Controller impl 中
+
+`get_mapping`、`get` 等 HTTP 动词别名以及 `route` 都由 inherent impl 上的 `#[rest_controller("/...")]` 外围属性消费。将这些标记单独用于 impl 外的方法或自由函数会产生编译错误，也不会注册路由。需要公开路由时，把方法放入 `rest_controller` impl，并通过 `ControllerRoutes` 显式挂载 Controller。仅作为 helper 的方法或函数应移除路由标记。
+
 ### Controller 使用单一根状态
 
 Controller handler 直接提取 `State<AppState>`。同一 Controller 中所有启用且使用 `State` 的方法，状态类型必须一致；宏按源码中写出的类型判断，不会解析类型别名或重命名导入，也不会通过 `FromRef` 把多个子状态拼成推断出的根状态。把 Controller 所需数据放在一个可克隆的根状态里，再从字段或方法读取：

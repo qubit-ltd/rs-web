@@ -1,0 +1,7 @@
+error: route mapping attributes must be inside a #[rest_controller(...)] impl block
+  --> tests/ui/controller_orphan_route.rs:11:1
+   |
+11 | / async fn check() -> &'static str {
+12 | |     "ok"
+13 | | }
+   | |_^

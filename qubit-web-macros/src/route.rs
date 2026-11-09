@@ -6,36 +6,45 @@
 //    Licensed under the Apache License, Version 2.0.
 // =============================================================================
 use proc_macro2::TokenStream;
+use syn::Error;
 
-/// Preserves a verb-specific attribute for the enclosing `rest_controller`
-/// macro.
+/// Rejects a verb-specific route attribute used outside `rest_controller`.
 ///
-/// The parent macro reads `_method` and `_args` from the retained marker while
-/// expanding the enclosing impl; returning `input` prevents this helper macro
-/// from removing the annotated method.
+/// These attributes are consumed by the enclosing `rest_controller` macro.
+/// Using one independently is a compile-time error and does not register a
+/// route.
 ///
 /// # Parameters
 ///
 /// - `_method`: HTTP verb associated with the marker attribute.
 /// - `_args`: marker path and options, interpreted by the parent macro.
-/// - `input`: annotated method tokens to pass through unchanged.
+/// - `input`: annotated method tokens reported in the diagnostic.
 #[must_use]
 #[inline]
 pub fn expand_mapping(_method: &str, _args: TokenStream, input: TokenStream) -> TokenStream {
-    input
+    Error::new_spanned(
+        input,
+        "route mapping attributes must be inside a #[rest_controller(...)] impl block",
+    )
+    .into_compile_error()
 }
 
-/// Preserves a generic route marker for the enclosing `rest_controller` macro.
+/// Rejects a generic route attribute used outside `rest_controller`.
 ///
-/// The parent macro parses the route arguments while it expands the enclosing
-/// impl; returning `input` keeps the annotated method available for that pass.
+/// This attribute is consumed by the enclosing `rest_controller` macro.
+/// Using it independently is a compile-time error and does not register a
+/// route.
 ///
 /// # Parameters
 ///
 /// - `_args`: path, methods, and transport options parsed by the parent macro.
-/// - `input`: annotated method tokens to pass through unchanged.
+/// - `input`: annotated method tokens reported in the diagnostic.
 #[must_use]
 #[inline]
 pub fn expand_route(_args: TokenStream, input: TokenStream) -> TokenStream {
-    input
+    Error::new_spanned(
+        input,
+        "route mapping attributes must be inside a #[rest_controller(...)] impl block",
+    )
+    .into_compile_error()
 }

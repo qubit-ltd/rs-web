@@ -106,7 +106,7 @@ macro_rules! mapping_macro {
     ($($name:ident => $method:literal),* $(,)?) => {$ (
         #[doc = concat!(
             "Declares a ", $method, " route on an async `&self` Controller method.\n\n",
-            "The argument is a string literal child path, optionally followed by `kind = \"short\"`, `kind = \"sse\"`, or `kind = \"ws\"`. The controller prefix is supplied by `#[rest_controller(\"/...\")]`."
+            "The argument is a string literal child path, optionally followed by `kind = \"short\"`, `kind = \"sse\"`, or `kind = \"ws\"`. The controller prefix is supplied by `#[rest_controller(\"/...\")]`. This marker must be on a method inside that Controller impl; using it by itself is a compile-time error and does not register a route."
         )]
         #[must_use]
         #[proc_macro_attribute]
@@ -135,8 +135,10 @@ mapping_macro! {
 /// for each supported method (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`,
 /// or `OPTIONS`); optionally set `kind` to `short`, `sse`, or `ws`. A `ws`
 /// route accepts only `GET`. The kind selects a route-limit policy and does
-/// not verify the handler's protocol behavior. Duplicate
-/// methods, unknown options, and invalid route templates produce compile-time
+/// not verify the handler's protocol behavior. This marker must be inside a
+/// `#[rest_controller(...)]` inherent impl; using it independently is a
+/// compile-time error and does not register a route. Duplicate methods,
+/// unknown options, and invalid route templates produce compile-time
 /// diagnostics.
 ///
 /// # Parameters

@@ -89,6 +89,21 @@ impl Health {
     async fn check(&self) -> &'static str {
         "ok"
     }
+
+    #[qubit_web::get("/alias")]
+    async fn alias(&self) -> &'static str {
+        "alias"
+    }
+
+    #[qubit_web::post_mapping("/qualified")]
+    async fn qualified(&self) -> &'static str {
+        "qualified"
+    }
+
+    #[qubit_web::route("/multi", method = "GET", method = "POST")]
+    async fn multi_method(&self) -> &'static str {
+        "multi"
+    }
 }
 
 #[rest_controller("/left")]
@@ -109,6 +124,12 @@ impl right::Duplicate {
 
 #[test]
 fn test_macro_crate_documentation_example_compiles() {
+    let metadata = <Health as ControllerDefinition<()>>::route_metadata();
+    assert!(metadata.iter().any(|route| route.path() == "/health"));
+    assert!(metadata.iter().any(|route| route.path() == "/health/alias"));
+    assert!(metadata.iter().any(|route| route.path() == "/health/qualified"));
+    assert!(metadata.iter().any(|route| route.path() == "/health/multi"));
+
     let router = ControllerRoutes::<()>::new()
         .add(Arc::new(Health))
         .expect("add Health controller")
