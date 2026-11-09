@@ -8,7 +8,17 @@
 
 ## Investigations and interoperability
 
-The [consumer contracts workflow](../.github/workflows/consumer-contracts.yml) checks the WebSocket dependency graph against both the committed lockfile and a fresh resolution, then runs the two existing oversized-message tests that assert close code 1009. Its documentation job compiles six selected examples extracted directly from the English and Chinese README and user guides. The workflow runs for relevant pull request paths, every Monday at 04:29 UTC, and on manual dispatch. Run the same checks locally with `python3 -m unittest discover -s scripts/tests -v`, `python3 scripts/check-ws-backend.py`, and `python3 scripts/check-documentation-contracts.py`.
+The [consumer contracts workflow](../.github/workflows/consumer-contracts.yml) checks the WebSocket dependency graph against both the committed lockfile and a fresh resolution, then runs the two existing oversized-message tests that assert close code 1009. Its documentation job compiles six selected examples extracted directly from the English and Chinese README and user guides. The workflow runs for relevant pull request paths, every Monday at 04:29 UTC, and on manual dispatch. Run the locked checks locally with:
+
+```bash
+python3 -m unittest discover -s scripts/tests -v
+python3 scripts/check-ws-backend.py
+cargo test --locked --features ws --test websocket_tests test_oversized_reassembled_message_is_closed_by_axum_limit
+cargo test --locked --features ws --test websocket_tests test_oversized_single_frame_is_rejected_even_when_message_limit_is_larger
+python3 scripts/check-documentation-contracts.py
+```
+
+For the fresh dependency signal, run `cargo update` before `python3 scripts/check-ws-backend.py`, then run both Cargo tests above; use a disposable checkout because `cargo update` changes `Cargo.lock`.
 
 The guides above document current behavior. The [fixed WebSocket interoperability workflow](../.github/workflows/downstream-interop.yml) preserves the pinned `rs-websocket` baseline and tests it against the event checkout of `rs-web`. The separate [current-consumer WS/WSS workflow](../.github/workflows/downstream-current-interop.yml) runs against `rs-websocket` `main` when a pull request changes `src/**`, `qubit-web-macros/**`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `tests/**`, `scripts/check-downstream-interop.py`, `.infra/**`, or `.github/workflows/downstream*interop.yml`; it also runs every Monday at 03:17 UTC and on manual dispatch. It covers both WS and WSS, copies the fixed WSS scenarios into a disposable crate, and verifies that Cargo resolves both `qubit-web` and `qubit-websocket` directly to the intended local checkouts before running them. Cargo-relative local dependencies are prepared in one shared parent directory so both repository checkouts resolve the same dependency paths. The current-consumer job uses `continue-on-error`, making it a non-blocking compatibility signal; inspect its job and step outcomes and summary because overall workflow success does not prove this check passed. The pinned baseline and current `main` are separate signals. The [HTTP/2 resource investigation](http2-resource-investigation-20261103.md) records the WEB-004 protocol experiment and its limits.
 
