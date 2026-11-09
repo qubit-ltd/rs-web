@@ -124,7 +124,12 @@ fn test_impl_cfg_macro_consumer_compiles_with_feature_disabled_and_enabled() {
     let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("macro-impl-cfg");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
 
-    for feature in [None, Some("impl-enabled")] {
+    for feature in [
+        None,
+        Some("impl-enabled"),
+        Some("param-enabled"),
+        Some("impl-enabled,param-enabled"),
+    ] {
         let mut command = Command::new(&cargo);
         command
             .arg("test")

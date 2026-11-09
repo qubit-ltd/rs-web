@@ -7,6 +7,7 @@ edition = "2024"
 
 [features]
 impl-enabled = []
+param-enabled = []
 
 [dependencies]
 qubit-web = { path = "../../../..", default-features = false }

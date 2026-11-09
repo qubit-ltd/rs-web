@@ -69,6 +69,28 @@ use proc_macro::TokenStream;
 /// `FromRef<Child>` implementation changes the Controller's inferred root
 /// state.
 ///
+/// Conditional parameter attributes such as `#[cfg(...)]` and
+/// `#[cfg_attr(..., cfg(...))]` are not supported on mapped method parameters.
+/// Put complementary conditions on two mapped methods instead, keeping the
+/// same route path in each configuration:
+///
+/// ```ignore
+/// #[cfg(feature = "authenticated")]
+/// #[get_mapping("/search")]
+/// async fn search(&self, _: axum::extract::Extension<User>) -> &'static str {
+///     "authenticated"
+/// }
+///
+/// #[cfg(not(feature = "authenticated"))]
+/// #[get_mapping("/search")]
+/// async fn search(&self) -> &'static str {
+///     "public"
+/// }
+/// ```
+///
+/// This lets the conditionally present extractor type and any associated
+/// `State` type exist only in the method where they are used.
+///
 /// # Parameters
 ///
 /// - `args`: a string literal containing the controller path prefix.

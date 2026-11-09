@@ -7,6 +7,67 @@
 // =============================================================================
 use qubit_web::rest_controller;
 
+#[cfg(feature = "param-enabled")]
+type ConditionalParameter = axum::extract::Extension<()>;
+
+struct OrdinaryParameterCfg;
+
+impl OrdinaryParameterCfg {
+    async fn cfg(&self, #[cfg(feature = "param-enabled")] _: ConditionalParameter) {}
+
+    async fn cfg_attr(&self, #[cfg_attr(not(feature = "param-enabled"), cfg(any()))] _: ConditionalParameter) {}
+}
+
+struct ParameterCfg;
+
+#[rest_controller("/parameter-cfg")]
+impl ParameterCfg {
+    #[cfg(feature = "param-enabled")]
+    #[get_mapping("/cfg")]
+    async fn cfg(&self, _: ConditionalParameter) -> &'static str {
+        "ok"
+    }
+
+    #[cfg(not(feature = "param-enabled"))]
+    #[get_mapping("/cfg")]
+    async fn cfg(&self) -> &'static str {
+        "ok"
+    }
+
+    #[cfg(feature = "param-enabled")]
+    #[get_mapping("/cfg-attr")]
+    async fn cfg_attr(&self, _: ConditionalParameter) -> &'static str {
+        "ok"
+    }
+
+    #[cfg(not(feature = "param-enabled"))]
+    #[get_mapping("/cfg-attr")]
+    async fn cfg_attr(&self) -> &'static str {
+        "ok"
+    }
+}
+
+#[cfg(feature = "param-enabled")]
+#[derive(Clone)]
+struct ConditionalState;
+
+struct ConditionalStateParameterCfg;
+
+#[rest_controller("/parameter-state-cfg")]
+impl ConditionalStateParameterCfg {
+    #[cfg(feature = "param-enabled")]
+    #[get_mapping("")]
+    async fn state(&self, _: axum::extract::State<ConditionalState>) -> &'static str {
+        "ok"
+    }
+
+    #[cfg(not(feature = "param-enabled"))]
+    #[get_mapping("")]
+    async fn state(&self) -> &'static str {
+        "ok"
+    }
+}
+
 #[cfg(feature = "impl-enabled")]
 type MissingWhenDisabled = axum::extract::Extension<()>;
 

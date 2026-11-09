@@ -1,0 +1,5 @@
+error: conditional parameters are not supported; use mutually exclusive method-level cfg attributes
+  --> tests/ui/controller_parameter_cfg.rs:15:27
+   |
+15 |     async fn route(&self, #[cfg(any())] _: axum::extract::Extension<()>) -> &'static str {
+   |                           ^^^^^^^^^^^^^

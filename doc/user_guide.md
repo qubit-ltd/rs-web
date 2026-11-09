@@ -239,6 +239,24 @@ let router = ControllerRoutes::<AppState>::new()
 
 This assembles a `Router<()>` ready for `WebServer::serve`. If a handler needs a child component, access it through a field or method on `AppState`; do not rely on `FromRef<Child>` to infer the Controller state. The compile-fail contract for mixed state types is covered by the existing conditional-state UI test.
 
+Mapped Controller parameters cannot carry conditional `cfg` or `cfg_attr(..., cfg(...))` attributes. Use mutually exclusive method-level conditions and repeat the route mapping so the route stays the same in either configuration:
+
+```rust,ignore
+#[cfg(feature = "authenticated")]
+#[get_mapping("/search")]
+async fn search(&self, _: axum::extract::Extension<User>) -> &'static str {
+    "authenticated"
+}
+
+#[cfg(not(feature = "authenticated"))]
+#[get_mapping("/search")]
+async fn search(&self) -> &'static str {
+    "public"
+}
+```
+
+Define conditional extractor and `State` types only for the methods that use them. The method-level conditions keep each parameter list and its generated handler in sync.
+
 Controller methods can return opaque response types and use `Self` in extractor types, including const expressions such as `Extension<[u8; Self::N]>` and qualified associated constants such as `Extension<[u8; <Self as BufferLimit>::N]>`. A method may also accept `Extension<Arc<Self>>` and return `impl IntoResponse`, or return `Result<impl IntoResponse, StatusCode>`. The generated route converts the value to Axum's concrete `Response` while the Controller instance remains alive; the method's declared return type does not need to change.
 
 ### Combine Axum extractor limits with request budgets

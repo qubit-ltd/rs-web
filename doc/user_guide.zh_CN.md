@@ -253,6 +253,24 @@ let router = ControllerRoutes::<AppState>::new()
 
 这样得到可交给 `WebServer::serve` 的 `Router<()>`。handler 若需要某个子组件，应从 `AppState` 的字段或方法取得；不能依赖 `FromRef<Child>` 来推断 Controller 状态类型。已有 conditional-state UI 测试覆盖了混用状态类型时的编译失败合同。
 
+映射方法的参数不能带条件 `cfg` 或 `cfg_attr(..., cfg(...))` 属性。请在两个互斥的方法级条件上重复同一路由映射，使两种配置下的路由保持一致：
+
+```rust,ignore
+#[cfg(feature = "authenticated")]
+#[get_mapping("/search")]
+async fn search(&self, _: axum::extract::Extension<User>) -> &'static str {
+    "authenticated"
+}
+
+#[cfg(not(feature = "authenticated"))]
+#[get_mapping("/search")]
+async fn search(&self) -> &'static str {
+    "public"
+}
+```
+
+条件 extractor 和 `State` 类型只需在对应方法中定义。方法级条件可让每个参数列表与生成的 handler 保持一致。
+
 Controller 方法也可以用 `impl IntoResponse` 返回不透明响应类型，并在 extractor 类型中使用 `Self`，包括 `Extension<[u8; Self::N]>` 这样的常量表达式，以及 `Extension<[u8; <Self as BufferLimit>::N]>` 这样的限定关联常量。参数也可写为 `Extension<Arc<Self>>`，返回值可为 `impl IntoResponse` 或 `Result<impl IntoResponse, StatusCode>`。生成的路由会在 Controller 实例仍存活时把结果转换为 Axum 的具体 `Response`，无需改写方法的返回签名。
 
 ### 原生提取器与请求体预算要分别配置

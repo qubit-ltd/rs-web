@@ -470,6 +470,17 @@ fn validate_method(method: &ImplItemFn) -> syn::Result<()> {
             "mapped controller methods cannot be generic",
         ));
     }
+    for input in method.sig.inputs.iter().skip(1) {
+        let FnArg::Typed(argument) = input else { continue };
+        for attr in &argument.attrs {
+            if !effective_cfg(std::slice::from_ref(attr))?.is_empty() {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "conditional parameters are not supported; use mutually exclusive method-level cfg attributes",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -550,6 +561,11 @@ mod tests {
         );
         assert!(validate_method(&shared).is_ok());
 
+        let attributed: ImplItemFn = syn::parse_quote!(
+            async fn route(&self, #[cfg_attr(all(), allow(unused_variables))] _: u8) {}
+        );
+        assert!(validate_method(&attributed).is_ok());
+
         let invalid: [ImplItemFn; 4] = [
             syn::parse_quote!(
                 async fn route(&mut self) {}
@@ -568,5 +584,22 @@ mod tests {
             let error = validate_method(method).expect_err("only immutable `&self` is supported");
             assert_eq!(error.to_string(), "mapped controller methods must use `&self`",);
         }
+    }
+
+    #[test]
+    fn test_validate_method_rejects_conditional_parameter_attributes() {
+        let cfg: ImplItemFn = syn::parse_quote!(
+            async fn route(&self, #[cfg(feature = "extra")] _: u8) {}
+        );
+        let error = validate_method(&cfg).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "conditional parameters are not supported; use mutually exclusive method-level cfg attributes"
+        );
+
+        let cfg_attr: ImplItemFn = syn::parse_quote!(
+            async fn route(&self, #[cfg_attr(feature = "extra", cfg(any()))] _: u8) {}
+        );
+        assert_eq!(validate_method(&cfg_attr).unwrap_err().to_string(), error.to_string());
     }
 }
