@@ -1,0 +1,113 @@
+name: Consumer contracts
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'qubit-web-macros/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'tests/**'
+      - 'examples/**'
+      - 'scripts/**'
+      - 'README.md'
+      - 'README.zh_CN.md'
+      - 'doc/**'
+      - '.infra/**'
+      - '.github/workflows/consumer-contracts.yml'
+  schedule:
+    - cron: '29 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  websocket-contract:
+    name: WebSocket dependency resolution (${{ matrix.resolution }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        resolution: [locked, fresh]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: interop/rs-web
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Prepare pinned local path dependencies
+        working-directory: interop/rs-web
+        run: ./.infra/bin/prepare-local-path-dependencies.sh
+      - name: Record toolchain
+        working-directory: interop/rs-web
+        run: rustc -vV | tee "$RUNNER_TEMP/rustc-version.txt"
+      - name: Resolve fresh dependencies
+        if: matrix.resolution == 'fresh'
+        working-directory: interop/rs-web
+        run: cargo update --manifest-path Cargo.toml
+      - name: Check WebSocket backend package identity
+        working-directory: interop/rs-web
+        run: python3 scripts/check-ws-backend.py --manifest-path Cargo.toml
+      - name: Verify oversized message closes with 1009
+        working-directory: interop/rs-web
+        run: cargo test --locked --features ws --test websocket_tests test_oversized_reassembled_message_is_closed_by_axum_limit
+      - name: Verify oversized frame closes with 1009
+        working-directory: interop/rs-web
+        run: cargo test --locked --features ws --test websocket_tests test_oversized_single_frame_is_rejected_even_when_message_limit_is_larger
+      - name: Record resolved backend packages
+        if: always()
+        working-directory: interop/rs-web
+        run: |
+          cargo metadata --format-version 1 --locked --features ws --manifest-path Cargo.toml > "$RUNNER_TEMP/metadata.json"
+          python3 - "$RUNNER_TEMP/metadata.json" <<'PY'
+          import json
+          import sys
+
+          metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+          names = {"axum", "tokio-tungstenite", "tungstenite"}
+          for package in metadata["packages"]:
+              if package["name"] in names:
+                  print(f'{package["name"]} {package["version"]} id={package["id"]} source={package.get("source") or "path"} manifest={package["manifest_path"]}')
+          PY
+      - name: Upload dependency resolution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: websocket-resolution-${{ matrix.resolution }}
+          path: |
+            interop/rs-web/Cargo.lock
+            ${{ runner.temp }}/rustc-version.txt
+            ${{ runner.temp }}/metadata.json
+          if-no-files-found: warn
+
+  documentation-contracts:
+    name: Compile selected documentation examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: interop/rs-web
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare pinned local path dependencies
+        working-directory: interop/rs-web
+        run: ./.infra/bin/prepare-local-path-dependencies.sh
+      - name: Run documentation contract unit tests
+        working-directory: interop/rs-web
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Compile six documentation scenarios
+        working-directory: interop/rs-web
+        run: >-
+          python3 scripts/check-documentation-contracts.py
+          --target-dir "$RUNNER_TEMP/rs-web-doc-contract-target"
+          --artifacts-dir "$RUNNER_TEMP/rs-web-doc-contract-artifacts"
+      - name: Upload documentation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation-contract-diagnostics
+          path: ${{ runner.temp }}/rs-web-doc-contract-artifacts
+          if-no-files-found: warn
