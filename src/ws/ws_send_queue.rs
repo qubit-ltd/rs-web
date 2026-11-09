@@ -22,7 +22,13 @@ use super::ws_send_failure::WsSendFailure;
 /// A nonblocking bounded queue for outbound WebSocket messages.
 ///
 /// Closing the queue rejects future sends and discards pending messages while
-/// preserving accounting for messages already being sent.
+/// preserving accounting for messages already being sent. The byte budget
+/// counts visible message payload bytes (including the two-byte code of a
+/// `Close(Some(_))` frame), not backing allocation size or total memory use.
+/// A short [`Bytes`](axum::body::Bytes) slice may keep a larger shared
+/// allocation alive, and queue, allocator, sink, and transport overhead are
+/// additional costs. Applications that need tighter storage bounds can create
+/// a compact `Bytes` value before enqueueing; the queue does not copy messages.
 ///
 /// Debug output contains only queue counts, capacity limits, and closed state;
 /// message payloads are omitted.
@@ -46,7 +52,7 @@ pub struct WsSendQueue {
     pub(super) notify: Arc<Notify>,
     /// Maximum pending and in-flight message count.
     max_messages: usize,
-    /// Maximum bytes retained by pending and in-flight messages.
+    /// Maximum charged payload bytes across pending and in-flight messages.
     max_bytes: usize,
 }
 
@@ -68,14 +74,20 @@ impl std::fmt::Debug for WsSendQueue {
 }
 
 impl WsSendQueue {
-    /// Creates a queue bounded by message count and total payload bytes.
+    /// Creates a queue bounded by message count and charged payload bytes.
+    ///
+    /// The byte budget counts each message's visible payload length; a
+    /// `Close(Some(_))` also charges its two-byte status code. It does not
+    /// bound the backing storage retained by shared payloads such as a short
+    /// `Bytes` slice, queue or allocator overhead, sink or transport buffers,
+    /// or process memory. Messages are moved into the queue without copying.
     ///
     /// # Parameters
     ///
     /// * `max_messages` - Maximum queued plus in-flight message count. Zero
     ///   rejects every message with [`WsSendError::Backpressure`].
-    /// * `max_bytes` - Maximum total payload bytes. Zero permits only
-    ///   zero-payload messages.
+    /// * `max_bytes` - Maximum total charged payload bytes across queued and
+    ///   in-flight messages. Zero permits only zero-payload messages.
     ///
     /// [`Self::try_send`] checks errors in this order: [`WsSendError::Closed`],
     /// [`WsSendError::InvalidCloseCode`], [`WsSendError::MessageTooLarge`],
@@ -281,11 +293,78 @@ pub(super) fn message_size(message: &Message) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    use axum::body::Bytes;
     use axum::extract::ws::Message;
 
     use super::WsSendQueue;
     use super::message_size;
     use crate::ws::ws_send_error::WsSendError;
+
+    struct Owner {
+        data: Vec<u8>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl AsRef<[u8]> for Owner {
+        fn as_ref(&self) -> &[u8] {
+            &self.data
+        }
+    }
+
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn test_shared_payload_owner_lives_until_queued_message_is_cleared() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let bytes = Bytes::from_owner(Owner {
+            data: vec![0; 1024 * 1024],
+            drops: drops.clone(),
+        });
+        let payload = bytes.slice(..1);
+        drop(bytes);
+
+        let queue = WsSendQueue::new(1, 1);
+        queue.try_send(Message::Binary(payload)).unwrap();
+        assert_eq!(queue.state.lock().unwrap().queued_bytes, 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        queue.close();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(queue.is_empty());
+        assert_eq!(queue.state.lock().unwrap().queued_bytes, 0);
+    }
+
+    #[test]
+    fn test_shared_payload_owner_lives_until_in_flight_message_finishes() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let bytes = Bytes::from_owner(Owner {
+            data: vec![0; 1024 * 1024],
+            drops: drops.clone(),
+        });
+        let payload = bytes.slice(..1);
+        drop(bytes);
+
+        let queue = WsSendQueue::new(1, 1);
+        queue.try_send(Message::Binary(payload)).unwrap();
+        let message = queue.take_next().unwrap();
+        queue.close();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(queue.state.lock().unwrap().queued_bytes, 1);
+
+        queue.finish_message(message_size(&message));
+        drop(message);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(queue.is_empty());
+        assert_eq!(queue.state.lock().unwrap().queued_bytes, 0);
+    }
 
     #[test]
     fn test_oversized_message_is_not_temporary_backpressure() {
