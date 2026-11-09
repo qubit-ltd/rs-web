@@ -3,7 +3,6 @@
 import argparse
 import json
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,7 +18,19 @@ class ContractError(Exception):
 def heading_blocks(text):
     lines = text.splitlines()
     headings = []
+    fence_char = None
+    fence_length = 0
     for index, line in enumerate(lines):
+        if fence_char is not None:
+            if re.match(r"^\s*" + re.escape(fence_char) + r"{" + str(fence_length) + r",}\s*$", line):
+                fence_char = None
+                fence_length = 0
+            continue
+        opening = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
+        if opening:
+            fence_char = opening.group(1)[0]
+            fence_length = len(opening.group(1))
+            continue
         match = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", line)
         if match:
             headings.append((index, len(match.group(1)), match.group(2)))
@@ -53,9 +64,10 @@ def extract_fence(root, spec):
             close += 1
         if close == end:
             raise ContractError(f"{path}:{i+1}: unclosed fenced block")
-        tag = info.strip().split(",", 1)[0].strip()
+        info_tokens = [token.strip().lower() for token in info.split(",")]
+        tag = info_tokens[0]
         if tag == spec["language"]:
-            ignored = info.strip().endswith(",ignore")
+            ignored = "ignore" in info_tokens[1:]
             if ignored and not spec.get("allow_ignore", False):
                 pass
             else:
@@ -140,9 +152,14 @@ def run(root, artifacts_dir=None, target_dir=None):
                     if artifacts:
                         (artifacts / sid / "stderr.txt").write_text(result.stderr, encoding="utf-8")
                     raise ContractError(f"scenario {sid} failed at {scenario['code']['source']}:{code_line}\ncommand: {' '.join(cmd)}\n{result.stderr}")
-                metadata = subprocess.run(["cargo", "metadata", "--format-version", "1", "--manifest-path", str(project / "Cargo.toml")], cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                metadata_cmd = ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(project / "Cargo.toml")]
+                metadata = subprocess.run(metadata_cmd, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
                 if metadata.returncode:
-                    raise ContractError(f"scenario {sid}: cargo metadata failed: {metadata.stderr}")
+                    if artifacts:
+                        saved = artifacts / sid
+                        (saved / "command.txt").write_text(" ".join(metadata_cmd) + "\n", encoding="utf-8")
+                        (saved / "stderr.txt").write_text(metadata.stderr, encoding="utf-8")
+                    raise ContractError(f"scenario {sid} failed at {scenario['code']['source']}:{code_line}\ncommand: {' '.join(metadata_cmd)}\n{metadata.stderr}")
                 packages = json.loads(metadata.stdout).get("packages", [])
                 qweb = [p for p in packages if p.get("name") == "qubit-web"]
                 expected = (root / "Cargo.toml").resolve()
