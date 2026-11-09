@@ -296,6 +296,8 @@ curl -i http://127.0.0.1:3001/prompts \
 
 启用 `json` feature 后，handler 可接收 `Result<BoundedJson<T>, JsonRejection>`，针对每类失败返回应用自己的响应。公共类型路径为 `qubit_web::json::JsonRejection`。默认响应仍是：JSON 无效或请求体读取失败返回 `400`，JSON 预算超限返回 `413`，媒体类型不支持返回 `415`。这段 handler 只处理 `BoundedJson` 的拒绝；请求限额等中间件生成的响应不会自动改写成应用格式。
 
+`BoundedJson` 接受 `application/json` 和合法的 `application/*+json` 媒体类型，且参数必须为空或仅有一个 `charset=utf-8`。参数名和值都不区分大小写，UTF-8 值也可以用双引号括起。例如，`Content-Type: application/json; charset="UTF-8"` 会被接受。其他参数（包括 `profile`）、重复的 `charset`、非 UTF-8 字符集或格式错误的参数都会以 `JsonRejection::UnsupportedMediaType` 返回 HTTP 415；例如，`application/json; profile=example` 会被拒绝。这是该 extractor 的输入策略。
+
 ```rust,ignore
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

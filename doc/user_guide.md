@@ -282,6 +282,8 @@ While reading JSON input, `BoundedJson` copies each data frame into a contiguous
 
 With the `json` feature, a handler can accept `Result<BoundedJson<T>, JsonRejection>` and choose its own response for each failure category. `JsonRejection` is available at `qubit_web::json::JsonRejection`; its default response remains `400` for invalid JSON and body-read failure, `413` for an exceeded JSON budget, and `415` for an unsupported media type. This application response only handles `BoundedJson` rejections; middleware-generated responses, such as request-limit rejection, are not automatically replaced.
 
+`BoundedJson` accepts `application/json` and valid `application/*+json` media types with no parameter or one `charset=utf-8` parameter. The parameter name and value are case-insensitive, and the UTF-8 value may be enclosed in double quotes. For example, `Content-Type: application/json; charset="UTF-8"` is accepted. Any other parameter (including `profile`), repeated `charset`, a non-UTF-8 charset, or a malformed parameter is rejected with HTTP 415 as `JsonRejection::UnsupportedMediaType`; for example, `application/json; profile=example` is rejected. This is the extractor's input policy.
+
 ```rust,ignore
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

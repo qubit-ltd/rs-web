@@ -25,6 +25,13 @@ use super::json_rejection::JsonRejection;
 
 /// A request JSON value decoded under the selected [`JsonLimits`].
 ///
+/// The extractor accepts `application/json` and valid `application/*+json`
+/// media types with no parameters or a single `charset=utf-8` parameter. The
+/// parameter name and value are case-insensitive, and the UTF-8 value may be
+/// double-quoted. Other parameters, duplicate charset parameters, non-UTF-8
+/// charsets, and malformed parameters are rejected with HTTP 415 as
+/// [`JsonRejection::UnsupportedMediaType`].
+///
 /// While buffering, `BoundedJson` copies each data frame into a `Vec` and
 /// drops the frame's `Bytes` handle before polling the next frame. The input
 /// byte budget limits JSON payload bytes, not total memory: vector spare
