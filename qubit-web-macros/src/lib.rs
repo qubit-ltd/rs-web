@@ -23,9 +23,9 @@ use proc_macro::TokenStream;
 ///
 /// Place this attribute on a non-generic inherent `impl` block. Its string
 /// argument is the absolute controller path prefix; mapped methods append a
-/// child path to that prefix. Use `#[route(path, method = "GET", kind = "sse")`
-/// for explicit methods and transport kinds. Supported kinds are `short`,
-/// `sse`, and `ws`; generic impl blocks and `where` clauses produce
+/// child path to that prefix. Use `#[route("/events", method = "GET", kind =
+/// "sse")]` for explicit methods and transport kinds. Supported kinds are
+/// `short`, `sse`, and `ws`; generic impl blocks and `where` clauses produce
 /// compile-time diagnostics. The kind selects a route-limit policy; it does
 /// not verify that the handler implements the corresponding wire protocol.
 /// A `ws` route must declare only `GET` methods.

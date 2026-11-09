@@ -109,7 +109,7 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 
 `WebServer` 按调用方提供的 Router 运行。原生短请求分支需显式安装 `RequestLimitLayer`，原生 SSE/WS 分支需显式安装 `StreamAdmissionLayer`；Controller 路由使用 builder 的策略。短请求和流式接纳属于不同容量域。每个 builder 默认拥有独立状态域；调用方也可显式共享 `LimitState` 或 `StreamAdmissionState`，让 Controller、原生路由和其他 builder 使用同一容量。期限依赖 Tokio 协作式取消，不让出执行权的同步工作会延迟检查和清理。
 
-认证、授权、业务状态以及流式数据的保存和重放由应用负责。WebSocket 升级前应完成认证；Origin 检查只限制浏览器来源。示例 token 和无认证停服入口仅供 loopback 演示。队列与请求体预算、setter 顺序、停服和读取错误语义、TLS 轮换、迁移及排障细节见[中文用户指南](doc/user_guide.zh_CN.md)或[英文用户指南](doc/user_guide.md)。现行边界与资料导航见[架构概览](doc/2026-10-09-rs-web-architecture.zh_CN.md)、[生命周期设计摘要](doc/2026-10-09-rs-web-lifecycle-design.zh_CN.md)和[文档索引](doc/README.md)。
+认证、授权、业务状态以及流式数据的保存和重放由应用负责。WebSocket 升级前应完成认证；Origin 检查只限制浏览器来源。示例 token 和无认证停服入口仅供 loopback 演示。队列与请求体预算、setter 顺序、停服和读取错误语义、TLS 轮换、迁移及排障细节见[中文用户指南](doc/user_guide.zh_CN.md)或[英文用户指南](doc/user_guide.md)。两份指南介绍现行运行与生命周期边界；[文档索引](doc/README.md)列出指南和调查记录。
 
 [固定互操作 workflow](.github/workflows/downstream-interop.yml) 保留固定消费者基线；[当前消费者 WS/WSS workflow](.github/workflows/downstream-current-interop.yml) 则提供针对 rs-websocket `main` 的非阻塞兼容信号。两者是独立信号；CI 触发条件、调度和结果解释集中见[文档索引](doc/README.md)。
 

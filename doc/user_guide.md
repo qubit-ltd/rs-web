@@ -648,7 +648,7 @@ assert!(WsUpgradePolicy::new()
 
 `WebServerError` exposes retained socket errors through `std::error::Error::source()`. Its default `Display` and `Debug` intentionally show only the error category; inspect `source()` explicitly when diagnosing bind or accept failures.
 
-See the [Chinese guide](user_guide.zh_CN.md), [README](../README.md), [API documentation](https://docs.rs/qubit-web), the [historical Chinese design record](2026-10-08-rs-web-design.md), and the [current lifecycle design summary](2026-10-09-rs-web-lifecycle-design.en.md) for next steps.
+See the [Chinese guide](user_guide.zh_CN.md), [README](../README.md), [API documentation](https://docs.rs/qubit-web), and [documentation index](README.md) for related guidance and investigation records.
 
 ## Deadlines and peer address
 

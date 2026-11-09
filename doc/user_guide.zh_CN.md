@@ -622,7 +622,7 @@ assert!(WsUpgradePolicy::new()
 
 `WebServerError` 通过 `std::error::Error::source()` 暴露保留的 socket 错误。默认 `Display` 和 `Debug` 只显示错误类别；需要排查绑定或 accept 故障时，再由调用方显式检查 `source()`。
 
-继续阅读[英文指南](user_guide.md)、[中文版 README](../README.zh_CN.md)、[API 文档](https://docs.rs/qubit-web)、[历史中文设计记录](2026-10-08-rs-web-design.md)和[当前中文生命周期设计摘要](2026-10-09-rs-web-lifecycle-design.zh_CN.md)。
+继续阅读[英文指南](user_guide.md)、[中文版 README](../README.zh_CN.md)、[API 文档](https://docs.rs/qubit-web)和[文档索引](README.md)，查看相关指南与调查记录。
 
 ## 期限与对端地址
 
