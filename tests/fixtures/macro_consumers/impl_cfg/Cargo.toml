@@ -10,7 +10,7 @@ impl-enabled = []
 param-enabled = []
 
 [dependencies]
-qubit-web = { path = "../../../..", default-features = false }
+qubit-web = { path = "../../../../", default-features = false , version = "^0.3" }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 tokio = { version = "1.54", features = ["macros", "rt"] }
 tower = { version = "0.5", features = ["util"] }

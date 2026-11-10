@@ -6,8 +6,8 @@ edition = "2024"
 [workspace]
 
 [dependencies]
-qubit-web = { path = "../../..", default-features = false, features = ["ws", "tls"] }
-qubit-websocket = { git = "https://github.com/qubit-ltd/rs-websocket", rev = "94f9da8c486998efcae693a15c5c021c7cece601", default-features = false }
+qubit-web = { path = "../../../", default-features = false, features = ["ws", "tls"] , version = "^0.3" }
+qubit-websocket = { default-features = false , version = "^0.3", path = "../../../../rs-websocket" }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
 tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = "0.26"
