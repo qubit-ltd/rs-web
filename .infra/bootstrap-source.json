@@ -1,7 +1,7 @@
 {
   "config_sources": {
     "rs-infra-ci": "sha256:2cc68b5ab050769382d7e9af468cb60b2261fb8e387d0ced9974c8d068964271",
-    "rs-infra-dependency": "sha256:57812f71262c0fa41d547144bc400869607c61a77e8795d62a68d12948c16266",
+    "rs-infra-dependency": "sha256:66ef1c9a2069fc0f52e71f645667a9609192b8b998cf65fd09b75b105d2fa91d",
     "rs-infra-style": "sha256:f5ebba934dfcd04bb4b7a3847f27b8a73dcab28afbfe7cb2a9c2e884ebc4564c",
     "rs-infra-tools": "sha256:b52fdcc1a8382533f3f5f56d0f458fca1e30baa853f6acb394d913ec32972166"
   },
@@ -52,7 +52,7 @@
     },
     ".infra/bin/update-dependencies-by-prefix.sh": {
       "executable": true,
-      "sha256": "d4ac94580d20a0c25daa76056665f0a2a9562e0699c64e9594a556d1357bb5dc"
+      "sha256": "adf032c27b0894f0b762cb534851086595f17ce69ece9f0838076f55ecccbb9c"
     },
     ".infra/bootstrap-check.py": {
       "executable": true,
@@ -60,7 +60,7 @@
     },
     ".infra/bootstrap.sh": {
       "executable": true,
-      "sha256": "194ebbc3b09ee0a45f70ec9f1e4bab9419efe8a163e13939418b65b2b5c9a010"
+      "sha256": "efb236dddf9f03c929071b1b86afffe827542d9cc7b44dc31f2de927c9265f39"
     },
     ".infra/dependency/policy.toml": {
       "executable": false,
@@ -82,9 +82,13 @@
       "executable": false,
       "sha256": "8b06df05501e5dc3874a33f6ed1ddd10e16e6ebf8912e19542c398db2d5f096c"
     },
+    ".infra/dependency/policy/baselines/v2026.11.09.txt": {
+      "executable": false,
+      "sha256": "422e593d2b90c7219f1c9647b1cbaffb0d8b45f5327103b1bdc11d7caf9163e7"
+    },
     ".infra/dependency/policy/current.toml": {
       "executable": false,
-      "sha256": "62dd3356ec284c2f9e785c8c5433f7bbf7153b3050ea0a0f4791f653c5c33d13"
+      "sha256": "b917bc85f8d0e4a1310b69c1d43fb168d38229058320799c62c43fd8f1d507b4"
     },
     ".infra/lib/style_analyze.py": {
       "executable": true,
@@ -111,8 +115,8 @@
       "sha256": "e32ec3e600a5095ed7a95e5f6d0c30abf1d9f5b0647952fe43d2c60c1c92ad4a"
     }
   },
-  "package_sha256": "230513b67991ae9ddbe6e2cab5c003f31739df053603dc31970440823427b918",
+  "package_sha256": "c6149af0891c20460768bbed7bf4109154d15cb9b398280f28e399cec3d9baf9",
   "schema": 1,
   "source_repository": "https://github.com/qubit-ltd/rs-infra-tools.git",
-  "source_revision": "632214d25310d9ffaf3469b4c05b273a8f8c36b3"
+  "source_revision": "218174dca104dae513bd0eba373fc413806e6cf0"
 }

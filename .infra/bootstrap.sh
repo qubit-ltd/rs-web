@@ -171,6 +171,10 @@ case "$entrypoint" in
         fi
         run_latest rs-infra-dependency --project "$project_root" --recursive check
         ;;
+    .infra/bin/update-dependencies-by-prefix.sh)
+        prepare_dependencies
+        run_latest rs-infra-dependency --project "$project_root" update-prefix "$@"
+        ;;
     .infra/bin/infra-tool.sh)
         exec "$shared_root/.infra/lib/infra-tool.sh" "$@"
         ;;
