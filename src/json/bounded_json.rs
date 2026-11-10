@@ -39,6 +39,11 @@ use super::json_rejection::JsonRejection;
 /// Deserialization remains synchronous, so these budgets do not bound CPU
 /// time in a custom `Deserialize` implementation.
 ///
+/// After media-type validation, a parseable `Content-Length` above the input
+/// byte budget is rejected before polling the body. An absent or unparsable
+/// declaration continues through the existing body-reading path. Actual body
+/// bytes are still checked regardless of the declared length.
+///
 /// This extractor is available with the `json` feature.
 ///
 /// # Type Parameters
@@ -113,6 +118,15 @@ where
         let limits = request.extensions().get::<JsonLimits>().copied().unwrap_or_default();
         if !is_json_content_type(request.headers().get(header::CONTENT_TYPE)) {
             return Err(JsonRejection::UnsupportedMediaType);
+        }
+        if request
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|length| length > limits.max_input_bytes.get() as u64)
+        {
+            return Err(JsonRejection::BudgetExceeded);
         }
         let (_, body) = request.into_parts();
         let bytes = buffer_json_body(body, limits.max_input_bytes.get()).await?;

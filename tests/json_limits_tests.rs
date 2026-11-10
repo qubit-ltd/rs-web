@@ -34,6 +34,7 @@ use qubit_web::StreamAdmissionLayer;
 use qubit_web::StreamAdmissionLimits;
 use qubit_web::json::BoundedJson;
 use qubit_web::json::JsonLimits;
+use qubit_web::json::JsonRejection;
 use qubit_web::json::json_response;
 use serde::Serialize;
 use serde::Serializer;
@@ -45,6 +46,20 @@ use tower::ServiceExt;
 struct CountingOwner {
     bytes: Vec<u8>,
     active: Arc<AtomicUsize>,
+}
+
+struct MustNotPollBody;
+
+impl HttpBody for MustNotPollBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        panic!("oversized declared body must not be polled");
+    }
 }
 
 impl CountingOwner {
@@ -372,6 +387,117 @@ async fn test_body_read_failure_is_not_reported_as_budget_exceeded() {
 async fn test_accepts_input_exactly_at_byte_budget() {
     let limits = JsonLimits::default().with_max_input_bytes(2).unwrap();
     assert_eq!(send_with_limits("42", limits).await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_declared_json_length_over_budget_does_not_poll_body() {
+    let mut request = Request::post("/")
+        .header("content-type", "application/json")
+        .header("content-length", "2")
+        .body(Body::new(MustNotPollBody))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(JsonLimits::default().with_max_input_bytes(1).unwrap());
+    let rejection = BoundedJson::<u64>::from_request(request, &()).await.unwrap_err();
+    assert!(matches!(&rejection, JsonRejection::BudgetExceeded));
+    let response = axum::response::IntoResponse::into_response(rejection);
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(
+        String::from_utf8(body.to_vec())
+            .unwrap()
+            .contains("json_budget_exceeded")
+    );
+}
+
+#[tokio::test]
+async fn test_declared_json_length_checks_media_type_first() {
+    let mut request = Request::post("/")
+        .header("content-type", "text/plain")
+        .header("content-length", "2")
+        .body(Body::new(MustNotPollBody))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(JsonLimits::default().with_max_input_bytes(1).unwrap());
+    assert!(matches!(
+        BoundedJson::<u64>::from_request(request, &()).await,
+        Err(JsonRejection::UnsupportedMediaType)
+    ));
+}
+
+#[tokio::test]
+async fn test_declared_json_length_equal_to_budget_is_read() {
+    let mut request = Request::post("/")
+        .header("content-type", "application/json")
+        .header("content-length", "2")
+        .body(Body::from("42"))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(JsonLimits::default().with_max_input_bytes(2).unwrap());
+    assert_eq!(BoundedJson::<u64>::from_request(request, &()).await.unwrap().0, 42);
+}
+
+#[tokio::test]
+async fn test_missing_or_invalid_declared_json_length_uses_body_budget() {
+    for declaration in [None, Some("invalid")] {
+        let mut builder = Request::post("/").header("content-type", "application/json");
+        if let Some(value) = declaration {
+            builder = builder.header("content-length", value);
+        }
+        let mut request = builder.body(Body::from("42")).unwrap();
+        request
+            .extensions_mut()
+            .insert(JsonLimits::default().with_max_input_bytes(2).unwrap());
+        assert_eq!(BoundedJson::<u64>::from_request(request, &()).await.unwrap().0, 42);
+    }
+}
+
+#[tokio::test]
+async fn test_actual_oversized_body_still_exceeds_budget() {
+    let mut request = Request::post("/")
+        .header("content-type", "application/json")
+        .header("content-length", "1")
+        .body(Body::from("42"))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(JsonLimits::default().with_max_input_bytes(1).unwrap());
+    assert!(matches!(
+        BoundedJson::<u64>::from_request(request, &()).await,
+        Err(JsonRejection::BudgetExceeded)
+    ));
+}
+
+#[tokio::test]
+async fn test_u64_max_declared_json_length_is_rejected_without_polling() {
+    let mut request = Request::post("/")
+        .header("content-type", "application/json")
+        .header("content-length", "18446744073709551615")
+        .body(Body::new(MustNotPollBody))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(JsonLimits::default().with_max_input_bytes(1).unwrap());
+    assert!(matches!(
+        BoundedJson::<u64>::from_request(request, &()).await,
+        Err(JsonRejection::BudgetExceeded)
+    ));
+}
+
+#[tokio::test]
+async fn test_overflowing_declared_json_length_falls_back_to_body_read() {
+    let mut request = Request::post("/")
+        .header("content-type", "application/json")
+        .header("content-length", "18446744073709551616")
+        .body(Body::from("42"))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(JsonLimits::default().with_max_input_bytes(2).unwrap());
+    assert_eq!(BoundedJson::<u64>::from_request(request, &()).await.unwrap().0, 42);
 }
 
 #[tokio::test]
