@@ -1,10 +1,8 @@
 error: route path contains a duplicate parameter name
-  --> tests/ui/controller_duplicate_path_parameter.rs:13:1
+  --> tests/ui/controller_duplicate_path_parameter.rs:15:11
    |
-13 | #[rest_controller("/items/{id}")]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the attribute macro `rest_controller` (in Nightly builds, run with -Z macro-backtrace for more info)
+15 |     #[get("/{id}")]
+   |           ^^^^^^^
 
 warning: unused import: `qubit_web::get`
  --> tests/ui/controller_duplicate_path_parameter.rs:8:5

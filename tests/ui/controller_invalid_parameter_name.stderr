@@ -1,10 +1,8 @@
 error: route parameter names must be nonempty and cannot contain braces, slashes, or wildcard markers
-  --> tests/ui/controller_invalid_parameter_name.rs:13:1
+  --> tests/ui/controller_invalid_parameter_name.rs:15:11
    |
-13 | #[rest_controller("/items")]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the attribute macro `rest_controller` (in Nightly builds, run with -Z macro-backtrace for more info)
+15 |     #[get("/{bad*name}")]
+   |           ^^^^^^^^^^^^^
 
 warning: unused import: `qubit_web::get`
  --> tests/ui/controller_invalid_parameter_name.rs:8:5

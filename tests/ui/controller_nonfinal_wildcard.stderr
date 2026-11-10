@@ -1,10 +1,8 @@
 error: wildcard route parameters must be the final segment
-  --> tests/ui/controller_nonfinal_wildcard.rs:13:1
+  --> tests/ui/controller_nonfinal_wildcard.rs:15:11
    |
-13 | #[rest_controller("/items")]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the attribute macro `rest_controller` (in Nightly builds, run with -Z macro-backtrace for more info)
+15 |     #[get("/{*rest}/tail")]
+   |           ^^^^^^^^^^^^^^^
 
 warning: unused import: `qubit_web::get`
  --> tests/ui/controller_nonfinal_wildcard.rs:8:5

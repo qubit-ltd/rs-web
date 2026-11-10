@@ -315,8 +315,9 @@ fn parse_options(options: Punctuated<Meta, Token![,]>, allow_method: bool) -> sy
 /// - `methods`: HTTP methods served by the route.
 /// - `kind`: Route strategy name.
 fn make_route(prefix: &str, child: LitStr, methods: Vec<String>, kind: String) -> syn::Result<Route> {
+    let span = child.span();
     let child = child.value();
-    validate_path(&child, false, child_span(&child))?;
+    validate_path(&child, false, span)?;
     let path = if prefix == "/" {
         if child.is_empty() { "/".to_owned() } else { child }
     } else if child.is_empty() {
@@ -324,17 +325,8 @@ fn make_route(prefix: &str, child: LitStr, methods: Vec<String>, kind: String) -
     } else {
         format!("{prefix}{child}")
     };
-    validate_template(&path, child_span(&path))?;
+    validate_template(&path, span)?;
     Ok(Route { path, methods, kind })
-}
-
-/// Produces the fallback call-site span used for synthesized path diagnostics.
-///
-/// # Parameters
-///
-/// - `_value`: Unused path value retained by this helper's interface.
-fn child_span(_value: &str) -> Span {
-    Span::call_site()
 }
 
 /// Checks absolute-path syntax and rejects query or fragment components.
