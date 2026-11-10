@@ -9,16 +9,14 @@
 //! guarantee a CPU time bound for user-provided `Deserialize` implementations;
 //! decoding is synchronous and does not yield to Tokio while it runs.
 
-use axum::body::Bytes;
 use axum::extract::FromRequest;
 use axum::extract::Request;
 use axum::http::header;
-use http_body_util::BodyExt;
-use http_body_util::Limited;
 use qubit_json::decode::JsonDecodeErrorKind;
 use qubit_json::decode::JsonDecoder;
 use serde::de::DeserializeOwned;
 
+use super::internal::buffer_json_body::buffer_json_body;
 use super::internal::content_type::is_json_content_type;
 use super::json_limits::JsonLimits;
 use super::json_rejection::JsonRejection;
@@ -32,11 +30,12 @@ use super::json_rejection::JsonRejection;
 /// charsets, and malformed parameters are rejected with HTTP 415 as
 /// [`JsonRejection::UnsupportedMediaType`].
 ///
-/// While buffering, `BoundedJson` copies each data frame into a `Vec` and
-/// drops the frame's `Bytes` handle before polling the next frame. The input
-/// byte budget limits JSON payload bytes, not total memory: vector spare
-/// capacity, allocation growth, the current frame, transport buffering,
-/// decoding, and the resulting `T` can require additional memory.
+/// While buffering, `BoundedJson` reuses a single data frame when it ends the
+/// body. Otherwise it copies each data frame into a `Vec` and drops the frame's
+/// `Bytes` handle before polling again. The input byte budget limits JSON
+/// payload bytes, not total memory: vector spare capacity, allocation growth,
+/// the current frame, transport buffering, decoding, and the resulting `T`
+/// can require additional memory.
 /// Deserialization remains synchronous, so these budgets do not bound CPU
 /// time in a custom `Deserialize` implementation.
 ///
@@ -116,21 +115,7 @@ where
             return Err(JsonRejection::UnsupportedMediaType);
         }
         let (_, body) = request.into_parts();
-        let mut body = Limited::new(body, limits.max_input_bytes.get());
-        let mut buffer = Vec::new();
-        while let Some(frame) = body.frame().await {
-            let frame = frame.map_err(|error| {
-                if error.is::<http_body_util::LengthLimitError>() {
-                    JsonRejection::BudgetExceeded
-                } else {
-                    JsonRejection::BodyReadFailed
-                }
-            })?;
-            if let Ok(data) = frame.into_data() {
-                buffer.extend_from_slice(&data);
-            }
-        }
-        let bytes = Bytes::from(buffer);
+        let bytes = buffer_json_body(body, limits.max_input_bytes.get()).await?;
         let mut decoder = JsonDecoder::with_limits(limits.decode_limits());
         decoder.decode_utf8::<T>(&bytes).map(BoundedJson).map_err(|error| {
             if error.kind() == JsonDecodeErrorKind::Budget {

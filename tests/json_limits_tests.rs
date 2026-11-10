@@ -30,6 +30,8 @@ use axum::response::Response;
 use axum::routing::post;
 use futures_util::stream;
 use hyper::body::Body as HttpBody;
+use qubit_web::StreamAdmissionLayer;
+use qubit_web::StreamAdmissionLimits;
 use qubit_web::json::BoundedJson;
 use qubit_web::json::JsonLimits;
 use qubit_web::json::json_response;
@@ -555,6 +557,90 @@ async fn test_rejects_structure_budget_exceeded() {
             .unwrap()
             .contains("json_budget_exceeded")
     );
+}
+
+#[tokio::test]
+async fn test_stream_admission_replay_works_with_bounded_json() {
+    let admission = StreamAdmissionLimits::default().with_max_body_bytes(16).unwrap();
+    let valid = Router::new()
+        .route("/", post(echo_number))
+        .layer(Extension(JsonLimits::default()))
+        .layer(StreamAdmissionLayer::new(admission));
+    let response = valid
+        .clone()
+        .oneshot(
+            Request::post("/")
+                .header("content-type", "application/json")
+                .body(Body::from("42"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(to_bytes(response.into_body(), usize::MAX).await.unwrap(), "42");
+
+    let byte_limited = Router::new()
+        .route("/", post(echo_number))
+        .layer(Extension(JsonLimits::default().with_max_input_bytes(1).unwrap()))
+        .layer(StreamAdmissionLayer::new(admission));
+    let response = byte_limited
+        .oneshot(
+            Request::post("/")
+                .header("content-type", "application/json")
+                .body(Body::from("42"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let structure_limited = Router::new()
+        .route("/", post(echo_array))
+        .layer(Extension(JsonLimits::default().with_max_sequence_items(1).unwrap()))
+        .layer(StreamAdmissionLayer::new(admission));
+    let response = structure_limited
+        .oneshot(
+            Request::post("/")
+                .header("content-type", "application/json")
+                .body(Body::from("[1,2]"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let invalid = Router::new()
+        .route("/", post(echo_number))
+        .layer(StreamAdmissionLayer::new(admission));
+    let response = invalid
+        .oneshot(
+            Request::post("/")
+                .header("content-type", "application/json")
+                .body(Body::from("not-json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let trailers = Router::new()
+        .route("/", post(echo_number))
+        .layer(StreamAdmissionLayer::new(admission));
+    let body = Body::new(ScriptedBody {
+        frames: VecDeque::from([ScriptedFrame::Data(b"42"), ScriptedFrame::Trailers]),
+        active: Arc::new(AtomicUsize::new(0)),
+    });
+    let response = trailers
+        .oneshot(
+            Request::post("/")
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(to_bytes(response.into_body(), usize::MAX).await.unwrap(), "42");
 }
 
 #[tokio::test]

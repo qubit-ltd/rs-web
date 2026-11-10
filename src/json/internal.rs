@@ -7,4 +7,5 @@
 // =============================================================================
 //! Private helpers shared by JSON operations.
 
+pub(in crate::json) mod buffer_json_body;
 pub(in crate::json) mod content_type;
