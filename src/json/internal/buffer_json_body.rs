@@ -214,6 +214,13 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ordinary_body_read_error_is_reported() {
+        let body = Body::new(FramesBody(VecDeque::from([Frame::Error])));
+        let result = buffer_json_body(body, 2).await;
+        assert!(matches!(result, Err(crate::json::JsonRejection::BodyReadFailed)));
+    }
+
+    #[tokio::test]
     async fn test_prior_frame_owner_is_dropped_before_next_poll() {
         let dropped = Arc::new(AtomicBool::new(false));
         let body = Body::new(DropBeforeNextPollBody {
