@@ -25,6 +25,7 @@ use tokio::spawn;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tracing::instrument::WithSubscriber;
 
 use super::internal::PolicyInner;
 use super::internal::SessionLifecycle;
@@ -529,97 +530,109 @@ impl WsUpgradePolicy {
             return server_shutting_down_response();
         };
 
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
+        let io_dispatch = dispatch.clone();
         let policy = self.clone();
         ws.max_frame_size(self.inner.max_frame_bytes)
             .max_message_size(self.inner.max_message_bytes)
-            .on_upgrade(move |socket| async move {
-                let queue = policy.send_queue();
-                let session_shutdown = shutdown.child_token();
-                let resources = Arc::new(super::internal::SessionResources::new(permit, session_guard));
-                let closed = resources.closed_token();
-                let termination = resources.termination_state();
-                let close_code = Arc::new(AtomicU16::new(1001));
-                let close_deadline = Arc::new(Mutex::new(None));
-                let writer_lifecycle = SessionLifecycle {
-                    shutdown: session_shutdown.clone(),
-                    server_shutdown: shutdown.clone(),
-                    termination: termination.clone(),
-                    close_code: close_code.clone(),
-                    close_deadline: close_deadline.clone(),
-                    server_deadline: server_deadline.clone(),
-                    shutdown_timeout,
-                };
-                let writer_queue = queue.clone();
-                let writer_notify = queue.notify.clone();
-                let (close_ack_sender, close_ack_receiver) = oneshot::channel();
-                let (sink, stream) = socket.split();
-                let write_timeout = policy.inner.write_timeout;
-                let writer_resources = resources.clone();
-                let writer = spawn(async move {
-                    observe_io_task(
-                        "writer",
-                        writer_loop(
-                            sink,
-                            writer_queue,
-                            writer_notify,
-                            write_timeout,
-                            writer_lifecycle,
-                            close_ack_receiver,
-                            writer_resources,
-                        ),
-                    )
-                    .await;
-                });
-                let inbound_state = Arc::new(super::internal::InboundState::new(policy.inner.inbound_queue_bytes));
-                let (incoming_tx, incoming_rx) = mpsc::channel(policy.inner.inbound_queue_messages);
-                let reader_lifecycle = SessionLifecycle {
-                    shutdown: session_shutdown.clone(),
-                    server_shutdown: shutdown.clone(),
-                    termination: termination.clone(),
-                    close_code: close_code.clone(),
-                    close_deadline: close_deadline.clone(),
-                    server_deadline: server_deadline.clone(),
-                    shutdown_timeout,
-                };
-                let reader_queue = queue.clone();
-                let reader_inbound_state = inbound_state.clone();
-                let reader_resources = resources.clone();
-                let idle_timeout = policy.inner.idle_timeout;
-                let reader = spawn(async move {
-                    observe_io_task(
-                        "reader",
-                        reader_loop(
-                            stream,
-                            incoming_tx,
-                            reader_queue,
-                            reader_lifecycle,
-                            close_ack_sender,
-                            idle_timeout,
-                            super::internal::ReaderContext::new(reader_inbound_state, reader_resources),
-                        ),
-                    )
-                    .await;
-                });
-                drop(resources);
-                let session = WsSession {
-                    incoming: incoming_rx,
-                    inbound_state,
-                    explicitly_closed: false,
-                    queue,
-                    shutdown: session_shutdown,
-                    server_shutdown: shutdown.clone(),
-                    closed,
-                    termination,
-                    idle_timeout: policy.inner.idle_timeout,
-                    shutdown_timeout,
-                    writer: Some(writer),
-                    reader: Some(reader),
-                };
-                select! {
-                    biased;
-                    _ = shutdown.cancelled() => {},
-                    _ = handler(session) => {},
+            .on_upgrade(move |socket| {
+                async move {
+                    let io_dispatch = io_dispatch.clone();
+                    let queue = policy.send_queue();
+                    let session_shutdown = shutdown.child_token();
+                    let resources = Arc::new(super::internal::SessionResources::new(permit, session_guard));
+                    let closed = resources.closed_token();
+                    let termination = resources.termination_state();
+                    let close_code = Arc::new(AtomicU16::new(1001));
+                    let close_deadline = Arc::new(Mutex::new(None));
+                    let writer_lifecycle = SessionLifecycle {
+                        shutdown: session_shutdown.clone(),
+                        server_shutdown: shutdown.clone(),
+                        termination: termination.clone(),
+                        close_code: close_code.clone(),
+                        close_deadline: close_deadline.clone(),
+                        server_deadline: server_deadline.clone(),
+                        shutdown_timeout,
+                    };
+                    let writer_queue = queue.clone();
+                    let writer_notify = queue.notify.clone();
+                    let (close_ack_sender, close_ack_receiver) = oneshot::channel();
+                    let (sink, stream) = socket.split();
+                    let write_timeout = policy.inner.write_timeout;
+                    let writer_resources = resources.clone();
+                    let writer = spawn(
+                        async move {
+                            observe_io_task(
+                                "writer",
+                                writer_loop(
+                                    sink,
+                                    writer_queue,
+                                    writer_notify,
+                                    write_timeout,
+                                    writer_lifecycle,
+                                    close_ack_receiver,
+                                    writer_resources,
+                                ),
+                            )
+                            .await;
+                        }
+                        .with_subscriber(io_dispatch.clone()),
+                    );
+                    let inbound_state = Arc::new(super::internal::InboundState::new(policy.inner.inbound_queue_bytes));
+                    let (incoming_tx, incoming_rx) = mpsc::channel(policy.inner.inbound_queue_messages);
+                    let reader_lifecycle = SessionLifecycle {
+                        shutdown: session_shutdown.clone(),
+                        server_shutdown: shutdown.clone(),
+                        termination: termination.clone(),
+                        close_code: close_code.clone(),
+                        close_deadline: close_deadline.clone(),
+                        server_deadline: server_deadline.clone(),
+                        shutdown_timeout,
+                    };
+                    let reader_queue = queue.clone();
+                    let reader_inbound_state = inbound_state.clone();
+                    let reader_resources = resources.clone();
+                    let idle_timeout = policy.inner.idle_timeout;
+                    let reader = spawn(
+                        async move {
+                            observe_io_task(
+                                "reader",
+                                reader_loop(
+                                    stream,
+                                    incoming_tx,
+                                    reader_queue,
+                                    reader_lifecycle,
+                                    close_ack_sender,
+                                    idle_timeout,
+                                    super::internal::ReaderContext::new(reader_inbound_state, reader_resources),
+                                ),
+                            )
+                            .await;
+                        }
+                        .with_subscriber(io_dispatch),
+                    );
+                    drop(resources);
+                    let session = WsSession {
+                        incoming: incoming_rx,
+                        inbound_state,
+                        explicitly_closed: false,
+                        queue,
+                        shutdown: session_shutdown,
+                        server_shutdown: shutdown.clone(),
+                        closed,
+                        termination,
+                        idle_timeout: policy.inner.idle_timeout,
+                        shutdown_timeout,
+                        writer: Some(writer),
+                        reader: Some(reader),
+                    };
+                    select! {
+                        biased;
+                        _ = shutdown.cancelled() => {},
+                        _ = handler(session) => {},
+                    }
                 }
+                .with_subscriber(dispatch)
             })
     }
 }

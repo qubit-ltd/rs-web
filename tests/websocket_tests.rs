@@ -180,6 +180,187 @@ async fn test_controller_stream_admission_preserves_native_websocket_upgrade() {
     assert!(timeout(Duration::from_secs(2), task).await.unwrap().unwrap().graceful);
 }
 
+#[cfg(target_os = "linux")]
+type RstSubscriberState = (
+    WsUpgradePolicy,
+    ServerContext,
+    tokio::sync::mpsc::UnboundedSender<(bool, Option<WsTermination>)>,
+);
+
+#[cfg(target_os = "linux")]
+async fn rst_subscriber_upgrade(
+    State((policy, context, read_error_tx)): State<RstSubscriberState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    policy.on_upgrade(ws, &headers, context, move |mut session| async move {
+        while let Some(result) = session.recv().await {
+            if let Err(error) = result {
+                let oversized = std::error::Error::source(&error)
+                    .and_then(|source| source.downcast_ref::<tungstenite::Error>())
+                    .is_some_and(|error| {
+                        matches!(
+                            error,
+                            tungstenite::Error::Capacity(tungstenite::error::CapacityError::MessageTooLong { .. })
+                        )
+                    });
+                let _ = read_error_tx.send((oversized, session.termination()));
+                return;
+            }
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn serve_with_scoped_dispatch(
+    policy: WsUpgradePolicy,
+    dispatch: tracing::Dispatch,
+    read_error_tx: tokio::sync::mpsc::UnboundedSender<(bool, Option<WsTermination>)>,
+) -> (SocketAddr, JoinHandle<ShutdownReport>) {
+    let server = WebServer::bind_http(ServerOptions::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let address = server.local_addr();
+    let context = server.context();
+    let app = Router::new()
+        .route("/ws", get(rst_subscriber_upgrade))
+        .with_state((policy, context, read_error_tx));
+    let shutdown = CancellationToken::new();
+    let task =
+        spawn(async move { server.serve(app, shutdown.cancelled_owned()).await.unwrap() }.with_subscriber(dispatch));
+    (address, task)
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct RstLinger {
+    enabled: std::ffi::c_int,
+    seconds: std::ffi::c_int,
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn setsockopt(
+        socket: std::ffi::c_int,
+        level: std::ffi::c_int,
+        option: std::ffi::c_int,
+        value: *const std::ffi::c_void,
+        length: u32,
+    ) -> std::ffi::c_int;
+}
+
+#[cfg(target_os = "linux")]
+fn reset_tcp_peer(stream: &TcpStream) {
+    use std::os::fd::AsRawFd;
+
+    let linger = RstLinger { enabled: 1, seconds: 0 };
+    // Linux SO_LINGER with a zero timeout causes close to send a TCP RST.
+    let result = unsafe {
+        setsockopt(
+            stream.as_raw_fd(),
+            1,
+            13,
+            (&linger as *const RstLinger).cast(),
+            std::mem::size_of::<RstLinger>() as u32,
+        )
+    };
+    assert_eq!(
+        result,
+        0,
+        "setsockopt(SO_LINGER) failed: {}",
+        io::Error::last_os_error()
+    );
+}
+
+#[cfg(target_os = "linux")]
+async fn send_oversized_then_reset(address: SocketAddr) {
+    let (mut client, status) = handshake(address, None).await;
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+    send_masked_text(&mut client, b"12345").await;
+    send_masked_text(&mut client, b"following-data").await;
+    reset_tcp_peer(&client);
+    drop(client);
+}
+
+#[cfg(target_os = "linux")]
+fn rst_test_dispatch(output: Arc<Mutex<Vec<u8>>>) -> tracing::Dispatch {
+    let writer = SharedWriter(output);
+    tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_max_level(Level::WARN)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_scoped_subscriber_survives_real_upgrade() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+
+    // The local default subscriber is the control observer. The same wire
+    // stimulus must produce a real oversized read error and writer close error.
+    let control_log = Arc::new(Mutex::new(Vec::new()));
+    let control_dispatch = rst_test_dispatch(control_log.clone());
+    tracing::dispatcher::with_default(&control_dispatch, || {
+        runtime.block_on(async {
+            let (read_error_tx, mut read_error_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (address, server_task) = serve_with_scoped_dispatch(
+                WsUpgradePolicy::new().max_message_bytes(4),
+                control_dispatch.clone(),
+                read_error_tx,
+            )
+            .await;
+            send_oversized_then_reset(address).await;
+            let (oversized, termination) = timeout(Duration::from_secs(2), read_error_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(oversized, "reader error did not report MessageTooLong");
+            assert_eq!(termination, Some(WsTermination::ReadError));
+            server_task.abort();
+        });
+    });
+    let control_output = String::from_utf8_lossy(&control_log.lock().unwrap()).into_owned();
+    assert!(
+        control_output.contains("event=\"websocket_io_failure\" direction=\"write\" operation=\"send\""),
+        "control stimulus did not produce the fixed writer-close event: {control_output}"
+    );
+
+    // Here only the server serve future receives the local dispatcher. The
+    // upgrade callback and spawned I/O tasks must inherit it from production.
+    let scoped_log = Arc::new(Mutex::new(Vec::new()));
+    let scoped_dispatch = rst_test_dispatch(scoped_log.clone());
+    runtime.block_on(async {
+        for _ in 0..5 {
+            let (read_error_tx, mut read_error_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (address, server_task) = serve_with_scoped_dispatch(
+                WsUpgradePolicy::new().max_message_bytes(4),
+                scoped_dispatch.clone(),
+                read_error_tx,
+            )
+            .await;
+            send_oversized_then_reset(address).await;
+            let (oversized, termination) = timeout(Duration::from_secs(2), read_error_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(oversized, "reader error did not report MessageTooLong");
+            assert_eq!(termination, Some(WsTermination::ReadError));
+            server_task.abort();
+        }
+    });
+    let scoped_output = String::from_utf8_lossy(&scoped_log.lock().unwrap()).into_owned();
+    assert_eq!(
+        scoped_output.matches("event=\"websocket_io_failure\"").count(),
+        5,
+        "scoped subscriber missed writer-close events: {scoped_output}"
+    );
+    assert!(!scoped_output.contains("following-data"));
+}
+
 #[test]
 fn test_websocket_payload_is_not_logged_at_trace() {
     const SECRET: &str = "ws-payload-secret-sentinel";
