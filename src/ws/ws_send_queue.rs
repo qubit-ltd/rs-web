@@ -209,17 +209,22 @@ impl WsSendQueue {
     /// Closes the queue, rejecting future messages and discarding pending ones.
     ///
     /// Messages already removed by the writer remain charged until
-    /// [`Self::finish_message`] completes. Repeated calls have no additional
+    /// [`Self::finish_message`] completes. Pending payloads are dropped after
+    /// releasing the queue state lock. Repeated calls have no additional
     /// effect.
     pub(in crate::ws) fn close(&self) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.closed {
-            return;
-        }
-        state.closed = true;
-        let queued_bytes = state.messages.iter().map(message_size).sum::<usize>();
-        state.messages.clear();
-        state.queued_bytes = state.queued_bytes.saturating_sub(queued_bytes);
+        let pending = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.closed {
+                return;
+            }
+            state.closed = true;
+            let pending = std::mem::take(&mut state.messages);
+            let queued_bytes = pending.iter().map(message_size).sum::<usize>();
+            state.queued_bytes = state.queued_bytes.saturating_sub(queued_bytes);
+            pending
+        };
+        drop(pending);
     }
 
     /// Releases byte and item capacity after a writer finishes sending a
@@ -338,6 +343,60 @@ mod tests {
 
         queue.close();
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(queue.is_empty());
+        assert_eq!(queue.state.lock().unwrap().queued_bytes, 0);
+    }
+
+    #[test]
+    fn test_close_drops_pending_owner_outside_lock_and_retains_in_flight() {
+        struct ReentrantOwner {
+            data: Vec<u8>,
+            queue: WsSendQueue,
+            observations: Arc<AtomicUsize>,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl AsRef<[u8]> for ReentrantOwner {
+            fn as_ref(&self) -> &[u8] {
+                &self.data
+            }
+        }
+
+        impl Drop for ReentrantOwner {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                if let Ok(state) = self.queue.state.try_lock()
+                    && state.closed
+                    && state.messages.is_empty()
+                    && state.in_flight_messages == 1
+                    && state.queued_bytes == 4
+                {
+                    self.observations.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        let queue = WsSendQueue::new(2, 8);
+        queue.try_send(Message::text("held")).unwrap();
+        let in_flight = queue.take_next().unwrap();
+        let observations = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let payload = Bytes::from_owner(ReentrantOwner {
+            data: vec![1, 2, 3],
+            queue: queue.clone(),
+            observations: observations.clone(),
+            drops: drops.clone(),
+        });
+        queue.try_send(Message::Binary(payload)).unwrap();
+        queue.close();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(observations.load(Ordering::SeqCst), 1);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.try_send(Message::text("x")), Err(WsSendError::Closed));
+        queue.close();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        queue.finish_message(message_size(&in_flight));
+        drop(in_flight);
         assert!(queue.is_empty());
         assert_eq!(queue.state.lock().unwrap().queued_bytes, 0);
     }
