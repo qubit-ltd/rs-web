@@ -314,6 +314,8 @@ fn test_scoped_subscriber_survives_real_upgrade() {
             )
             .await;
             send_oversized_then_reset(address).await;
+            // recv returns the stored read error only after cleanup has joined
+            // the reader and writer, so this channel also fences their logs.
             let (oversized, termination) = timeout(Duration::from_secs(2), read_error_rx.recv())
                 .await
                 .unwrap()
@@ -321,6 +323,7 @@ fn test_scoped_subscriber_survives_real_upgrade() {
             assert!(oversized, "reader error did not report MessageTooLong");
             assert_eq!(termination, Some(WsTermination::ReadError));
             server_task.abort();
+            assert!(server_task.await.unwrap_err().is_cancelled());
         });
     });
     let control_output = String::from_utf8_lossy(&control_log.lock().unwrap()).into_owned();
@@ -350,6 +353,7 @@ fn test_scoped_subscriber_survives_real_upgrade() {
             assert!(oversized, "reader error did not report MessageTooLong");
             assert_eq!(termination, Some(WsTermination::ReadError));
             server_task.abort();
+            assert!(server_task.await.unwrap_err().is_cancelled());
         }
     });
     let scoped_output = String::from_utf8_lossy(&scoped_log.lock().unwrap()).into_owned();
