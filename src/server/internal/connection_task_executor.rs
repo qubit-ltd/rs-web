@@ -61,8 +61,11 @@ impl ConnectionTaskExecutor {
     /// admission.
     ///
     /// Admission and shutdown are serialized by the state lock, so a task is
-    /// either registered in the owned `JoinSet` or rejected. Reaped task
-    /// futures are destroyed after the registration lock is released.
+    /// either registered in the owned `JoinSet` or rejected. Errors from
+    /// reaped tasks, including any panic payloads they own, are destroyed
+    /// after the registration lock is released. If destroying a reaped panic
+    /// payload itself panics, that panic propagates after the submitted task
+    /// has been registered.
     /// # Type Parameters
     ///
     /// * `F` - Application future type submitted to the executor.
@@ -74,13 +77,18 @@ impl ConnectionTaskExecutor {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        let mut reaped_errors = Vec::new();
         let mut state = self.lock_state();
         if !state.accepting {
             return None;
         }
 
         if let Some(tasks) = state.tasks.as_mut() {
-            while tasks.try_join_next().is_some() {}
+            while let Some(result) = tasks.try_join_next() {
+                if let Err(error) = result {
+                    reaped_errors.push(error);
+                }
+            }
         }
         state.active += 1;
 
@@ -98,6 +106,7 @@ impl ConnectionTaskExecutor {
             .expect("an accepting executor has a task set")
             .spawn(tracked);
         drop(state);
+        drop(reaped_errors);
         Some(abort_handle)
     }
 
@@ -143,6 +152,7 @@ where
 mod tests {
     use std::future::pending;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -158,6 +168,53 @@ mod tests {
     use super::super::connection_diagnostics::tests::SharedLog;
     use super::super::connection_diagnostics::tests::diagnostic_subscriber;
     use super::ConnectionTaskExecutor;
+
+    struct PanicPayload {
+        state: Arc<Mutex<super::task_executor_state::TaskExecutorState>>,
+        observed: Option<oneshot::Sender<bool>>,
+    }
+
+    impl Drop for PanicPayload {
+        fn drop(&mut self) {
+            let unlocked = self.state.try_lock().is_ok();
+            if let Some(sender) = self.observed.take() {
+                let _ = sender.send(unlocked);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reaped_panic_payload_is_dropped_outside_state_lock() {
+        let executor = ConnectionTaskExecutor::new();
+        let (tx, rx) = oneshot::channel();
+        let payload = PanicPayload {
+            state: executor.state.clone(),
+            observed: Some(tx),
+        };
+        let task = executor
+            .spawn(async move {
+                std::panic::panic_any(payload);
+            })
+            .expect("task accepted");
+        timeout(Duration::from_secs(2), async {
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("panic task finished");
+        executor.spawn(async {}).expect("followup task accepted");
+        let unlocked = timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("payload dropped")
+            .expect("drop observation sent");
+        let report = executor
+            .close()
+            .wait_until(tokio::time::Instant::now() + Duration::from_secs(2))
+            .await;
+        assert!(report.completed_by_deadline);
+        assert!(unlocked, "panic payload was destroyed while state was locked");
+    }
 
     struct DropSignal(Arc<AtomicBool>);
 
@@ -254,12 +311,12 @@ mod tests {
     async fn test_hyper_panic_is_reported_without_followup_spawn_or_shutdown() {
         let log = SharedLog::default();
         let dispatch = diagnostic_subscriber(&log);
-        async {
+        let spawn_dispatch = dispatch.clone();
+        async move {
             let executor = ConnectionTaskExecutor::new();
-            let state = Arc::clone(&executor.state);
             let (panicked_tx, panicked_rx) = oneshot::channel();
-            executor
-                .spawn(async move {
+            tracing::dispatcher::with_default(&spawn_dispatch, || {
+                executor.spawn(async move {
                     struct SignalOnDrop(Option<oneshot::Sender<()>>);
 
                     impl Drop for SignalOnDrop {
@@ -271,22 +328,16 @@ mod tests {
                     let _signal = SignalOnDrop(Some(panicked_tx));
                     panic!("immediate-private-panic-sentinel");
                 })
-                .expect("executor should accept task before shutdown");
+            })
+            .expect("executor should accept task before shutdown");
             timeout(Duration::from_secs(1), panicked_rx)
                 .await
                 .expect("panic should occur")
                 .expect("panic future reached unwinding");
 
-            timeout(Duration::from_secs(10), async {
-                loop {
-                    if state.lock().unwrap().active == 0 {
-                        break;
-                    }
-                    yield_now().await;
-                }
-            })
-            .await
-            .expect("panicked task should release its completion guard");
+            timeout(Duration::from_secs(10), log.wait_for("connection_task_panic"))
+                .await
+                .expect("panic event should be recorded without follow-up work");
 
             assert!(
                 log.contents().contains("connection_task_panic"),

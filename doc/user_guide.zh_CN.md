@@ -527,7 +527,7 @@ assert!(report.graceful);
 
 关闭开始后，服务会原子地禁止新的受管 SSE/WS 会话登记、停止接收新连接，并通知现有会话。HTTP 连接和已登记会话共用同一个关闭截止时间，该期限由 `ServerOptions` 设置并经 `ServerContext` 提供给 WebSocket 会话；`WsUpgradePolicy` 不单独设置停服期限。无法表示的停服期限会以 `WebServerError::InvalidConfig` 拒绝；若运行时期限异常，服务先取消会话并回收连接任务，再返回错误。只有两类工作都在截止时刻或之前实际结束，`graceful` 才为 `true`。会话统计使用截止时刻的快照，传输任务则在释放连接资源时记录完成时间。因此，即使报告延迟生成、`elapsed` 超过配置的停服时长，只要工作按时完成，仍可能是优雅停服；反过来，调度迟滞使等待返回 `Ok` 也不能把逾期完成判为优雅。非优雅时，`unfinished_managed_sessions` 记录截止时仍未结束的受管会话数。报告不表示任意应用后台任务都已停止。`WebServer` 拥有并跟踪连接任务，Hyper/hyper-util 驱动各连接。本实现尚不提供具有明确定义且可证明的强制关闭连接计数，因此 `forced_connections` 为 `None`。
 
-受管连接任务发生 panic 并被回收时，服务会发出级别为 `WARN`、事件名为 `connection_task_panic` 的 tracing 事件，`task_kind` 为 `transport` 或 `hyper`。事件不包含 panic payload、JoinError 文本、请求信息、对端地址或 task ID。取消任务不会触发此事件。该诊断不会改变停服期限或 `ShutdownReport::graceful`；宿主的 panic hook 与此 tracing 事件相互独立。
+受管连接任务的 panic 有两个不同的诊断时点。`task_kind="hyper"` 时，`TrackedFuture` 一旦在执行或受控清理期间观察到 panic，就会立即发出级别为 `WARN`、事件名为 `connection_task_panic` 的 tracing 事件，随后继续传播 panic；无需等到再次提交任务或停服回收。`task_kind="transport"` 时，服务在 join 或回收 transport 任务并观察到 panic `JoinError` 时发出该事件。普通任务取消不会产生 panic 事件；但若应用析构器在取消期间实际发生 panic，则会被记录。事件不包含 panic payload、JoinError 文本、请求信息、对端地址或 task ID。任一事件都不能证明任务已回收、资源已释放或停服已完成。诊断不会改变停服期限或 `ShutdownReport::graceful`；宿主的 panic hook 与此 tracing 事件相互独立。
 
 服务按前文命令启动后，下面发送超过 1 MiB 的请求体，`Content-Length` 会让 middleware 在 JSON 解码前返回 413：
 

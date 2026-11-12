@@ -106,6 +106,7 @@ pub(super) mod tests {
     use std::sync::atomic::AtomicU64;
     use std::thread;
 
+    use tokio::sync::Notify;
     use tracing::instrument::WithSubscriber;
     use tracing_subscriber::fmt::MakeWriter;
 
@@ -114,13 +115,20 @@ pub(super) mod tests {
     use super::record_task_result;
 
     #[derive(Clone, Default)]
-    pub(in super::super) struct SharedLog(Arc<Mutex<Vec<u8>>>);
+    pub(in super::super) struct SharedLog {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        changed: Arc<Notify>,
+    }
 
-    pub(in super::super) struct LogWriter(Arc<Mutex<Vec<u8>>>);
+    pub(in super::super) struct LogWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        changed: Arc<Notify>,
+    }
 
     impl Write for LogWriter {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            self.changed.notify_one();
             Ok(bytes.len())
         }
 
@@ -133,13 +141,26 @@ pub(super) mod tests {
         type Writer = LogWriter;
 
         fn make_writer(&'a self) -> Self::Writer {
-            LogWriter(Arc::clone(&self.0))
+            LogWriter {
+                bytes: Arc::clone(&self.bytes),
+                changed: Arc::clone(&self.changed),
+            }
         }
     }
 
     impl SharedLog {
         pub(in super::super) fn contents(&self) -> String {
-            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+            String::from_utf8_lossy(&self.bytes.lock().unwrap()).into_owned()
+        }
+
+        pub(in super::super) async fn wait_for(&self, needle: &str) {
+            loop {
+                let changed = self.changed.notified();
+                if self.contents().contains(needle) {
+                    return;
+                }
+                changed.await;
+            }
         }
     }
 
