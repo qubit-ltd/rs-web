@@ -1,7 +1,7 @@
 {
   "config_sources": {
     "rs-infra-ci": "sha256:2cc68b5ab050769382d7e9af468cb60b2261fb8e387d0ced9974c8d068964271",
-    "rs-infra-dependency": "sha256:66ef1c9a2069fc0f52e71f645667a9609192b8b998cf65fd09b75b105d2fa91d",
+    "rs-infra-dependency": "sha256:fac0cef3bfd3e6184dcc7284d6097bc0a8acdbe0269576b5b1a38eb58f61fd87",
     "rs-infra-style": "sha256:f5ebba934dfcd04bb4b7a3847f27b8a73dcab28afbfe7cb2a9c2e884ebc4564c",
     "rs-infra-tools": "sha256:b52fdcc1a8382533f3f5f56d0f458fca1e30baa853f6acb394d913ec32972166"
   },
@@ -16,7 +16,7 @@
     },
     ".infra/bin/cargo-update.sh": {
       "executable": true,
-      "sha256": "59e802477aaa12792c103b6bee39620ce1c825cecccc3c535456d61a2a8e8d0a"
+      "sha256": "b85eb162fa0116f83528cdb64148520cd7a2a686af88726eb656fbe18f8a4690"
     },
     ".infra/bin/ci-check.sh": {
       "executable": true,
@@ -86,9 +86,13 @@
       "executable": false,
       "sha256": "422e593d2b90c7219f1c9647b1cbaffb0d8b45f5327103b1bdc11d7caf9163e7"
     },
+    ".infra/dependency/policy/baselines/v2026.11.11.txt": {
+      "executable": false,
+      "sha256": "73667620dcced6577b18f927632b183b5b79764921009c55eaa080f1f15ae49a"
+    },
     ".infra/dependency/policy/current.toml": {
       "executable": false,
-      "sha256": "b917bc85f8d0e4a1310b69c1d43fb168d38229058320799c62c43fd8f1d507b4"
+      "sha256": "10534ca10b6fe80ddf04366a2442de9aa0464a7c8843d4159a0960c1a925a5e6"
     },
     ".infra/lib/style_analyze.py": {
       "executable": true,
@@ -115,8 +119,8 @@
       "sha256": "e32ec3e600a5095ed7a95e5f6d0c30abf1d9f5b0647952fe43d2c60c1c92ad4a"
     }
   },
-  "package_sha256": "c6149af0891c20460768bbed7bf4109154d15cb9b398280f28e399cec3d9baf9",
+  "package_sha256": "e053c57885bfe51630328a7b94cad190a5c9c7b38942a9ad7739096a0fc18729",
   "schema": 1,
   "source_repository": "https://github.com/qubit-ltd/rs-infra-tools.git",
-  "source_revision": "218174dca104dae513bd0eba373fc413806e6cf0"
+  "source_revision": "9a37b1849ea1ae49c3182b0a3bfd43f451a8827c"
 }

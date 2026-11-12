@@ -43,7 +43,17 @@ while IFS= read -r -d '' manifest; do
         continue
     fi
     echo "Updating Cargo dependencies in $crate_dir"
-    cargo update --manifest-path "$manifest"
+    if output=$(cargo update --manifest-path "$manifest" 2>&1); then
+        printf '%s\n' "$output"
+    else
+        status=$?
+        if [[ "$output" == *"current package believes it's in a workspace when it's not"* ]]; then
+            echo "Skipping Cargo manifest outside its workspace: $manifest"
+            continue
+        fi
+        printf '%s\n' "$output" >&2
+        exit "$status"
+    fi
 done < <(
     find "$project_root" \
         -type d \( \
