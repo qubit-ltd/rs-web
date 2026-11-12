@@ -1,5 +1,2 @@
 # relative git root<TAB>repository URL<TAB>commit
-../rs-redact	https://github.com/qubit-ltd/rs-redact	739b4e88203735315db5e602e7de4ddfbab787e3
-../rs-json	https://github.com/qubit-ltd/rs-json	6b72c09a044f9dd3352998fc3521b09c7ba5cfaa
-../rs-config	https://github.com/qubit-ltd/rs-config	52d0b0902c8d85d2c0e0ba269227bd63c9fbfef0
-../rs-value	https://github.com/qubit-ltd/rs-value	0ae2aecdc02df7940be1d7101e112f9edb004376
+../rs-config	https://github.com/qubit-ltd/rs-config	1b97b0c2293ac76d238b32b67f7df1f166374d90
