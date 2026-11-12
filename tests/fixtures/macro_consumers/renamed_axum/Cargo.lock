@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-web"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "futures-core",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-web-macros"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
