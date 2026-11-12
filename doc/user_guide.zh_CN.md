@@ -595,6 +595,18 @@ assert_eq!(message.into_text().unwrap(), "retryable");
 
 传输读取错误通过一次 `Some(Err(_))` 交付，后续读取返回 `None`；显式 `close()` 会清除待交付错误，此后 `recv()` 返回 `None`。宿主停服可能直接取消 handler，不保证交付该错误。`WsSession::close()` 可重复调用；如果等待期间取消 close future，可以再次调用重试。通过 `try_send` 排队的 Close 会保留其关闭码和原因；writer 开始处理该帧时会关闭出站队列，后续发送返回 `Closed`，其后的排队消息可能丢弃，等待对端确认的时间受共享关闭 deadline 限制。writer 取出该 Close 前成功的 `try_send` 仍只表示入队。
 
+如果希望在 WebSocket I/O 任务释放资源后停止应用工作，可使用 `WsSession::closed()`。它返回 owned future，因此可与应用提供的、支持取消安全等待的操作一起放入 `tokio::select!`：
+
+```rust,ignore
+let ended = session.closed();
+tokio::select! {
+    _ = ended => session.close().await,
+    result = process_next_item() => apply_result(result),
+}
+```
+
+`process_next_item` 和 `apply_result` 是由应用提供的占位函数。`closed()` 完成表示两个 WebSocket I/O 任务都已释放资源；它不表示 Close 帧已送达对端，也不表示 handler、业务工作或应用启动的任务已结束。如果 `ended` 分支获胜，调用 `close()` 会丢弃尚未读取的排队消息。必须继续的工作应先取得所需输入，再由应用单独管理。
+
 ### 分别设置入站与写入期限
 
 `idle_timeout` 为兼容旧调用，仍会同时设置读帧等待、入站通道交付、`WsSession::recv()` 等待和普通写操作期限。需要分开配置时，先调用 `idle_timeout`，再调用 `write_timeout`；如果顺序相反，后调用的 `idle_timeout` 会把写期限也改回相同值。入站 `idle_timeout` 和出站 `write_timeout` 各自默认 60 秒，必须为正且能构造 Tokio deadline。每次普通出站发送及通知触发的 flush 都使用一个从操作开始计算的 `write_timeout` 完成期限；入站消息和无关队列通知不会重置期限。它限制操作等待，不检测字节级进度。超时后 writer 关闭队列、设置共享关闭 deadline、取消会话并丢弃 sink，不会重试该 sink，也不保证 Close 帧能送达。Close 握手仍受共享停服期限约束。期限依赖 Tokio 协作式调度，不能中止不让出执行权的同步代码、`spawn_blocking` 工作或应用自行启动的任务。

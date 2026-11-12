@@ -20,7 +20,6 @@ use hyper::rt::Executor;
 use tokio::task::AbortHandle;
 use tokio::task::JoinSet;
 
-use super::connection_diagnostics::record_task_result;
 #[path = "connection_task_executor/task_completion_guard.rs"]
 mod task_completion_guard;
 #[path = "connection_task_executor/task_executor_state.rs"]
@@ -80,13 +79,8 @@ impl ConnectionTaskExecutor {
             return None;
         }
 
-        let mut failed_tasks = Vec::new();
         if let Some(tasks) = state.tasks.as_mut() {
-            while let Some(result) = tasks.try_join_next() {
-                if let Err(error) = result {
-                    failed_tasks.push(error);
-                }
-            }
+            while tasks.try_join_next().is_some() {}
         }
         state.active += 1;
 
@@ -95,6 +89,8 @@ impl ConnectionTaskExecutor {
             completion: Some(TaskCompletionGuard {
                 state: Arc::clone(&self.state),
             }),
+            panic_reported: false,
+            subscriber: TrackedFuture::<F>::current_subscriber(),
         };
         let abort_handle = state
             .tasks
@@ -102,9 +98,6 @@ impl ConnectionTaskExecutor {
             .expect("an accepting executor has a task set")
             .spawn(tracked);
         drop(state);
-        for error in failed_tasks {
-            record_task_result(Err(error), "hyper");
-        }
         Some(abort_handle)
     }
 
@@ -158,6 +151,7 @@ mod tests {
     use tokio::sync::Barrier;
     use tokio::sync::Notify;
     use tokio::sync::oneshot;
+    use tokio::task::yield_now;
     use tokio::time::timeout;
     use tracing::instrument::WithSubscriber;
 
@@ -257,11 +251,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shutdown_drain_reports_panic_but_not_deadline_cancellation() {
+    async fn test_hyper_panic_is_reported_without_followup_spawn_or_shutdown() {
         let log = SharedLog::default();
         let dispatch = diagnostic_subscriber(&log);
         async {
             let executor = ConnectionTaskExecutor::new();
+            let state = Arc::clone(&executor.state);
             let (panicked_tx, panicked_rx) = oneshot::channel();
             executor
                 .spawn(async move {
@@ -274,18 +269,82 @@ mod tests {
                     }
 
                     let _signal = SignalOnDrop(Some(panicked_tx));
+                    panic!("immediate-private-panic-sentinel");
+                })
+                .expect("executor should accept task before shutdown");
+            timeout(Duration::from_secs(1), panicked_rx)
+                .await
+                .expect("panic should occur")
+                .expect("panic future reached unwinding");
+
+            timeout(Duration::from_secs(10), async {
+                loop {
+                    if state.lock().unwrap().active == 0 {
+                        break;
+                    }
+                    yield_now().await;
+                }
+            })
+            .await
+            .expect("panicked task should release its completion guard");
+
+            assert!(
+                log.contents().contains("connection_task_panic"),
+                "panic event should not depend on a later spawn or shutdown: {}",
+                log.contents()
+            );
+
+            let output = log.contents();
+            assert_eq!(output.matches("connection_task_panic").count(), 1, "{output}");
+            assert!(output.contains("task_kind=\"hyper\""), "{output}");
+            assert!(!output.contains("immediate-private-panic-sentinel"), "{output}");
+            executor.spawn(async {}).expect("executor remains open");
+            let _report = executor
+                .close()
+                .wait_until(tokio::time::Instant::now() + Duration::from_secs(1))
+                .await;
+            let output = log.contents();
+            assert_eq!(output.matches("connection_task_panic").count(), 1, "{output}");
+        }
+        .with_subscriber(dispatch)
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_drain_reports_panic_but_not_deadline_cancellation() {
+        let log = SharedLog::default();
+        let dispatch = diagnostic_subscriber(&log);
+        async {
+            let executor = ConnectionTaskExecutor::new();
+            let (panic_now_tx, panic_now_rx) = oneshot::channel();
+            executor
+                .spawn(async move {
+                    panic_now_rx.await.expect("shutdown test releases panic");
                     panic!("executor-shutdown-panic-sentinel");
                 })
                 .expect("executor should accept panicking task");
             executor
                 .spawn(pending::<()>())
                 .expect("executor should accept pending task");
-            panicked_rx.await.expect("panic task reached unwinding");
-
-            let report = executor
-                .close()
-                .wait_until(tokio::time::Instant::now() + Duration::from_millis(20))
-                .await;
+            let shutdown = tokio::spawn(
+                executor
+                    .close()
+                    .wait_until(tokio::time::Instant::now() + Duration::from_millis(100)),
+            );
+            tokio::task::yield_now().await;
+            panic_now_tx.send(()).expect("panic task is still waiting");
+            timeout(Duration::from_secs(10), async {
+                loop {
+                    if log.contents().contains("connection_task_panic") {
+                        break;
+                    }
+                    yield_now().await;
+                }
+            })
+            .await
+            .expect("shutdown must report panic before pending task ends");
+            assert!(!shutdown.is_finished(), "pending task keeps shutdown waiting");
+            let report = shutdown.await.expect("shutdown task should finish");
             assert!(!report.completed_by_deadline);
             let output = log.contents();
             assert_eq!(output.matches("connection_task_panic").count(), 1, "{output}");
