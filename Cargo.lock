@@ -153,9 +153,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cc"
-version = "1.11.1"
+version = "1.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ff2a8126fff0f8c839080d619675a585e61720bb12d2baceae45769fd66f155"
+checksum = "33ef9e3e8154a45c7a95cff4c1299702106ad94062d7bb85fdc5d3a5afd91d45"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -656,9 +656,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-config"
-version = "0.15.1"
+version = "0.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9593850e35fd6afded57cad06c19d90bf642386dc9d74aaee29daa9e76eb0622"
+checksum = "eb000f21a0058a0f714c3361e65df32df94589bb947e453bc867c7bf7cc84071"
 dependencies = [
  "qubit-budget",
  "qubit-datatype",
@@ -710,9 +710,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-redact"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "928304809102caccb5e278ab88f6872d7654ccd66e8f0ea457702f4387bb4b17"
+checksum = "7d217d6f987adc5f32b9daa5d506e99c5a435f99b1493d5ab3ef55caf27a3c86"
 dependencies = [
  "qubit-budget",
  "qubit-json",
@@ -728,9 +728,9 @@ checksum = "89e16644d9ad9d6eafa3216b8a1d50db0cec09ef364f6cbd082ff49ea87bf154"
 
 [[package]]
 name = "qubit-value"
-version = "0.13.1"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1922c95bdc23540a21522d95a5fa3f3c6b34d05e47989e1ceb253af24514273b"
+checksum = "c61cce1fd9f368784d38ca6500f94524513ab720f0720514b718be96c0d8f95e"
 dependencies = [
  "qubit-budget",
  "qubit-datatype",
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-web"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "axum",
  "axum-server",
@@ -756,7 +756,7 @@ dependencies = [
  "qubit-budget",
  "qubit-config",
  "qubit-json",
- "qubit-web-macros",
+ "qubit-web-macros 0.3.1",
  "serde",
  "tokio",
  "tokio-rustls",
@@ -771,6 +771,18 @@ dependencies = [
 [[package]]
 name = "qubit-web-macros"
 version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b4275a7d0fe7e4cc0d9a574bc115eadbf8ef249de5c836742302d80bb36ab4e"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
+
+[[package]]
+name = "qubit-web-macros"
+version = "0.3.2"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -867,9 +879,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.16"
+version = "0.103.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
+checksum = "e3a0760a887c14823fca5a1c970b01d47c328c696c0c64829d1df50e8f853fd5"
 dependencies = [
  "aws-lc-rs",
  "ring",
