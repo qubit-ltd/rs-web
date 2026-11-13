@@ -645,9 +645,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-web"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "229d028ad04b954eab03fde92bc021893812414a9e0fecbffa00e94776711940"
+version = "0.3.2"
 dependencies = [
  "axum",
  "axum-server",
@@ -668,9 +666,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-web-macros"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b4275a7d0fe7e4cc0d9a574bc115eadbf8ef249de5c836742302d80bb36ab4e"
+version = "0.3.2"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

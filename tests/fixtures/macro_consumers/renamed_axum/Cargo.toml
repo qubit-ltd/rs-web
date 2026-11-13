@@ -6,5 +6,5 @@ edition = "2024"
 [workspace]
 
 [dependencies]
-qubit-web = { default-features = false , version = "^0.3" }
+qubit-web = { default-features = false , version = "^0.3", path = "../../../../" }
 framework = { package = "axum", version = "^0.8", default-features = false }
