@@ -111,8 +111,6 @@ curl -i -X POST http://127.0.0.1:3001/admin/shutdown
 
 认证、授权、业务状态以及流式数据的保存和重放由应用负责。WebSocket 升级前应完成认证；Origin 检查只限制浏览器来源。示例 token 和无认证停服入口仅供 loopback 演示。队列与请求体预算、setter 顺序、停服和读取错误语义、TLS 轮换、迁移及排障细节见[中文用户指南](doc/user_guide.zh_CN.md)或[英文用户指南](doc/user_guide.md)。两份指南介绍现行运行与生命周期边界；[文档索引](doc/README.md)列出指南和调查记录。
 
-[固定互操作 workflow](.github/workflows/downstream-interop.yml) 保留固定消费者基线；[当前消费者 WS/WSS workflow](.github/workflows/downstream-current-interop.yml) 则提供针对 rs-websocket `main` 的非阻塞兼容信号。两者是独立信号；CI 触发条件、调度和结果解释集中见[文档索引](doc/README.md)。
-
 ## 测试
 
 ```bash
