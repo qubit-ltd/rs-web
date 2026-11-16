@@ -688,7 +688,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-websocket"
-version = "0.3.2"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60f2f3ecbfa72a95cc6f85af0ffb810e769a003a2e82ead9d574bf0762c34e23"
 dependencies = [
  "bytes",
  "futures-util",
