@@ -103,6 +103,7 @@ pub(super) mod tests {
     use std::sync::Arc;
     use std::sync::Barrier;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
     use std::sync::atomic::AtomicU64;
     use std::thread;
 
@@ -165,6 +166,13 @@ pub(super) mod tests {
     }
 
     pub(in super::super) fn diagnostic_subscriber(log: &SharedLog) -> tracing::Dispatch {
+        // Keep a second registered dispatcher alive for tracing-core's interest
+        // cache. Its single-dispatcher fast path otherwise consults only the
+        // current thread, so a concurrent test without a subscriber can cache
+        // `Interest::never()` for a callsite used by these scoped subscribers.
+        static INTEREST_ANCHOR: OnceLock<tracing::Dispatch> = OnceLock::new();
+        INTEREST_ANCHOR.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+
         tracing::Dispatch::new(
             tracing_subscriber::fmt()
                 .with_max_level(tracing::Level::DEBUG)
