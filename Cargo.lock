@@ -557,9 +557,9 @@ checksum = "d5848f5a9e8117cf94f2f90faac24a87ff81600ff8628c1e3deaab572e76bfa1"
 
 [[package]]
 name = "mio"
-version = "1.2.4"
+version = "1.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
+checksum = "20521a903f02b0a573cd6840e9d0a5a0cc043d361fe924092cd70f8556cc9c4a"
 dependencies = [
  "libc",
  "wasi",
@@ -647,18 +647,18 @@ dependencies = [
 
 [[package]]
 name = "qubit-budget"
-version = "0.10.3"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69c4626ee27ff1e9e818a0791e9b4ee2dff0026d7ef1b0424b7cd285e6de6d0f"
+checksum = "560adfab9ea973d61949de25be0b547f9e518ac7f9ceafd2146c67cdb634dc4f"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "qubit-config"
-version = "0.15.3"
+version = "0.15.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb000f21a0058a0f714c3361e65df32df94589bb947e453bc867c7bf7cc84071"
+checksum = "7bc78e20cccdb1093f83aa3a29a0f93689f3574c196f5549d724734a5a825642"
 dependencies = [
  "qubit-budget",
  "qubit-datatype",
@@ -674,9 +674,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-datatype"
-version = "0.15.4"
+version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2232ddc2317412734785a9cb6e8d17050595c950cdfb4b079e80f7133d45ecc"
+checksum = "2d3c1f1ccc5796b858c08ca9097d5c881ca3a31653cec79f57cbbe60aa38f2c4"
 dependencies = [
  "qubit-budget",
  "qubit-json",
@@ -687,18 +687,18 @@ dependencies = [
 
 [[package]]
 name = "qubit-io"
-version = "0.19.5"
+version = "0.19.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e563c7c3ed87a06ce8eba9810179e346762f7122f68090e64a5f9472425bc78"
+checksum = "3e782e5b568b1dfa6ee6e9b3f8617a86980b9438f0c449235e3840533d25f83c"
 dependencies = [
  "qubit-utils",
 ]
 
 [[package]]
 name = "qubit-json"
-version = "0.12.4"
+version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea8a293d7f923000f17a2ada7fc66e42b1e4eb12842f81efba2915d0da82f523"
+checksum = "605599add0b0dfe5ae47616c308d01f28d7dc8e53d3b3254929914bcd43cae50"
 dependencies = [
  "qubit-budget",
  "qubit-io",
@@ -710,9 +710,9 @@ dependencies = [
 
 [[package]]
 name = "qubit-redact"
-version = "0.10.3"
+version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d217d6f987adc5f32b9daa5d506e99c5a435f99b1493d5ab3ef55caf27a3c86"
+checksum = "29b91e8345b45d01c2a1e18b8a86c40030d8229bd538a8ec58cf9e2383f1dc35"
 dependencies = [
  "qubit-budget",
  "qubit-json",
@@ -722,15 +722,15 @@ dependencies = [
 
 [[package]]
 name = "qubit-utils"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89e16644d9ad9d6eafa3216b8a1d50db0cec09ef364f6cbd082ff49ea87bf154"
+checksum = "51269ed5cb6c0a936c79de455c299479653cbb28d772cfad8231710d2623a8b6"
 
 [[package]]
 name = "qubit-value"
-version = "0.13.2"
+version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c61cce1fd9f368784d38ca6500f94524513ab720f0720514b718be96c0d8f95e"
+checksum = "39d2a01f87135591bde065e92fd53eaf6e186b488687ddd004b397cdc0ef5011"
 dependencies = [
  "qubit-budget",
  "qubit-datatype",
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-web"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "axum",
  "axum-server",
@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "qubit-web-macros"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1320,9 +1320,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "trybuild"
-version = "1.0.122"
+version = "1.0.125"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62db9c92d704393fbf2132041720cc80b689f2d3f28521015c2ac866223c11b8"
+checksum = "9838b494ee14d28f1eeea490e8f4f10248fa6dd371d4bc874b635de499408245"
 dependencies = [
  "glob",
  "serde",
